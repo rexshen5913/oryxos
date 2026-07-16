@@ -1,0 +1,57 @@
+# ────────────────────────────────────────────────
+# OryxOS .gitignore
+# ────────────────────────────────────────────────
+
+# ── Go 建置與測試產物 ──
+# cmd/oryxos 編出的單一靜態二進制（go build -o oryxos ./cmd/oryxos）
+/oryxos
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+# 測試二進制與覆蓋率輸出
+*.test
+*.out
+coverage.*
+# Go workspace（本機多 module 開發用，通常不提交）
+go.work
+go.work.sum
+
+# ── OryxOS 執行時工作區（oryxos init 生成）──
+# 只忽略揮發/執行時狀態；Profile、Skill、Bootstrap（AGENTS/SOUL/USER）、MCP 配置、Memory
+# 是使用者主動維護、設計上可 git 跟蹤/備份（見 TechnicalSolution §9.3），保持可追蹤。
+.oryxos/sessions/
+.oryxos/logs/
+.oryxos/*.db
+.oryxos/*.db-shm
+.oryxos/*.db-wal
+
+# ── 環境變數與密鑰（絕不提交；.env.example 可留作範本）──
+.env
+.env.*
+!.env.example
+
+# ── Codex 審查 gate（本機工作流，不隨 public repo 散佈）──
+# gate 掛在 .claude/settings.local.json（本機），審查標的 implement.md 與腳本一併本機化
+.codex-review/
+implement.md
+.claude/hooks/codex-stop-review.sh
+
+# graphify — 本機生成的知識圖譜輸出（含絕對路徑與本機快取、且會把 .claude/settings.local.json
+# 這類 ignored 檔掃進 manifest），不提交；要用時以 /graphify 在 Claude Code 內重建
+graphify-out/
+.graphify_*
+
+# Claude Code 個人本機設定與本機專案記憶（依慣例不提交）
+.claude/settings.local.json
+CLAUDE.local.md
+
+# ── OS / 編輯器產物 ──
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

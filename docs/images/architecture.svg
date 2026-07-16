@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 660" font-family="'Helvetica Neue','PingFang TC','Microsoft JhengHei','Noto Sans TC',sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#5f6368"/>
+    </marker>
+  </defs>
+
+  <!-- background -->
+  <rect x="0" y="0" width="880" height="660" fill="#ffffff"/>
+  <text x="440" y="26" text-anchor="middle" font-size="18" font-weight="700" fill="#202124">OryxOS 架構（核心階段：執行時內核）</text>
+
+  <!-- ── entry layer ── -->
+  <rect x="150" y="48" width="580" height="104" rx="10" fill="#f8fbff" stroke="#1a73e8" stroke-dasharray="5 4"/>
+  <text x="440" y="70" text-anchor="middle" font-size="13" font-weight="700" fill="#1a73e8">接入層 · Entry Points</text>
+
+  <rect x="200" y="86" width="220" height="48" rx="8" fill="#e8f0fe" stroke="#1a73e8"/>
+  <text x="310" y="106" text-anchor="middle" font-size="14" font-weight="700" fill="#174ea6">CLI Channel</text>
+  <text x="310" y="124" text-anchor="middle" font-size="11" fill="#5f6368">核心階段內建（oryxos chat）</text>
+
+  <rect x="460" y="86" width="220" height="48" rx="8" fill="#e8f0fe" stroke="#1a73e8"/>
+  <text x="570" y="106" text-anchor="middle" font-size="14" font-weight="700" fill="#174ea6">Web Service</text>
+  <text x="570" y="124" text-anchor="middle" font-size="11" fill="#5f6368">能力五 · REST API（oryxos server）</text>
+
+  <!-- entry -> loop -->
+  <path d="M310,134 L410,206" fill="none" stroke="#5f6368" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M570,134 L470,206" fill="none" stroke="#5f6368" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ── ReAct loop (engine) ── -->
+  <rect x="285" y="208" width="310" height="92" rx="10" fill="#ede7f6" stroke="#6a3ab2" stroke-width="2"/>
+  <text x="440" y="240" text-anchor="middle" font-size="18" font-weight="700" fill="#4a2a80">ReAct Loop</text>
+  <text x="440" y="264" text-anchor="middle" font-size="13" fill="#4a2a80">Reason → Act → Observe（自實現，完全可控）</text>
+  <text x="440" y="286" text-anchor="middle" font-size="12" fill="#5f6368">internal/core · 所有 package 依賴它</text>
+
+  <!-- loop -> services -->
+  <path d="M390,300 L185,386" fill="none" stroke="#5f6368" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M440,300 L440,386" fill="none" stroke="#5f6368" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M490,300 L695,386" fill="none" stroke="#5f6368" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="285" y="352" text-anchor="middle" font-size="11" fill="#80868b" font-style="italic">calls</text>
+
+  <!-- ── three services ── -->
+  <rect x="70" y="388" width="230" height="76" rx="8" fill="#e6f4ea" stroke="#188038"/>
+  <text x="185" y="412" text-anchor="middle" font-size="14" font-weight="700" fill="#0d652d">ProviderService</text>
+  <text x="185" y="431" text-anchor="middle" font-size="11" fill="#5f6368">能力一 · 對接 LLM</text>
+  <text x="185" y="449" text-anchor="middle" font-size="11" fill="#5f6368">go-openai / OpenAI 兼容協議</text>
+
+  <rect x="325" y="388" width="230" height="76" rx="8" fill="#e6f4ea" stroke="#188038"/>
+  <text x="440" y="412" text-anchor="middle" font-size="14" font-weight="700" fill="#0d652d">MemoryService</text>
+  <text x="440" y="431" text-anchor="middle" font-size="11" fill="#5f6368">能力三 · 三層記憶</text>
+  <text x="440" y="449" text-anchor="middle" font-size="11" fill="#5f6368">會話 / 長期(MEMORY.md) / 情景</text>
+
+  <rect x="580" y="388" width="230" height="76" rx="8" fill="#e6f4ea" stroke="#188038"/>
+  <text x="695" y="412" text-anchor="middle" font-size="14" font-weight="700" fill="#0d652d">ToolRegistry</text>
+  <text x="695" y="431" text-anchor="middle" font-size="11" fill="#5f6368">能力四 · 工具體系</text>
+  <text x="695" y="449" text-anchor="middle" font-size="11" fill="#5f6368">內建 Tool / MCP Client</text>
+
+  <!-- services -> storage -->
+  <path d="M185,464 L320,516" fill="none" stroke="#5f6368" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M440,464 L440,516" fill="none" stroke="#5f6368" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M695,464 L560,516" fill="none" stroke="#5f6368" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="530" y="498" text-anchor="middle" font-size="11" fill="#80868b" font-style="italic">持久化 · 審計</text>
+
+  <!-- ── storage ── -->
+  <rect x="190" y="518" width="500" height="76" rx="8" fill="#f1f3f4" stroke="#5f6368"/>
+  <text x="440" y="546" text-anchor="middle" font-size="14" font-weight="700" fill="#3c4043">internal/storage · SQLite（modernc，純 Go）</text>
+  <text x="440" y="566" text-anchor="middle" font-size="11" fill="#5f6368">審計 day-one：sessions · tool_invocations · llm_calls</text>
+  <text x="440" y="583" text-anchor="middle" font-size="11" fill="#5f6368">CGO_ENABLED=0 · 單一靜態二進制</text>
+
+  <!-- footer note -->
+  <text x="440" y="628" text-anchor="middle" font-size="11" fill="#9aa0a6">Provider · Memory · Tool 三能力供養 ReAct 引擎；引擎經 CLI Channel 與 Web Service 兩個接入點對外提供能力</text>
+</svg>
