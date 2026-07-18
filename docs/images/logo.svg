@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="OryxOS logo">
+  <title>OryxOS</title>
+  <!--
+    劍羚（oryx）正面：一對長角 ＋ 外張的耳 ＋ 收窄的口鼻。
+    角上環紋取自實際劍羚角的紋理；每支角恰好分為五段，對應五大核心能力。
+    單一漸層以 userSpaceOnUse 貫穿整個標記（而非每個路徑各自套用），
+    使五個形體讀作單一物件、單一方向受光。
+  -->
+  <defs>
+    <linearGradient id="oryxGrad" gradientUnits="userSpaceOnUse" x1="34" y1="12" x2="92" y2="124">
+      <stop offset="0" stop-color="#7DD3FC"/>
+      <stop offset="0.48" stop-color="#00ADD8"/>
+      <stop offset="1" stop-color="#1D4ED8"/>
+    </linearGradient>
+    <mask id="oryxMask">
+      <rect width="128" height="128" fill="#fff"/>
+      <!-- 角環：四道等距切口，將每支角分為五段 -->
+      <g stroke="#000" stroke-width="3.4">
+        <line x1="16" y1="24" x2="112" y2="24"/>
+        <line x1="16" y1="38" x2="112" y2="38"/>
+        <line x1="16" y1="52" x2="112" y2="52"/>
+        <line x1="16" y1="66" x2="112" y2="66"/>
+      </g>
+      <!-- 雙眼 -->
+      <g stroke="#000" stroke-width="4" stroke-linecap="round">
+        <line x1="56.5" y1="88" x2="58.5" y2="88"/>
+        <line x1="69.5" y1="88" x2="71.5" y2="88"/>
+      </g>
+      <!-- 嘴：切口界定鼻頭，避免口鼻收成無特徵的尖錐 -->
+      <g stroke="#000" stroke-width="2.6" stroke-linecap="round">
+        <line x1="60.5" y1="116" x2="67.5" y2="116"/>
+      </g>
+    </mask>
+  </defs>
+
+  <g fill="url(#oryxGrad)" mask="url(#oryxMask)">
+    <!-- 左角 -->
+    <path d="M47 84 C43 62, 34 39, 25 15 L30 17 C40 41, 50 63, 55 82 Z"/>
+    <!-- 右角 -->
+    <path d="M81 84 C85 62, 94 39, 103 15 L98 17 C88 41, 78 63, 73 82 Z"/>
+    <!-- 左耳 -->
+    <path d="M49 80 C43 81, 36 84, 30 89 C36 90, 43 89, 49 86 Z"/>
+    <!-- 右耳 -->
+    <path d="M79 80 C85 81, 92 84, 98 89 C92 90, 85 89, 79 86 Z"/>
+    <!-- 頭部：微拱眉骨 → 收窄的頰 → 帶鼻頭的口鼻 -->
+    <path d="M47 77 Q64 71.5, 81 77 C80 88, 76 93, 70.5 97 C69.5 102, 69 106, 69 110 C69 116, 67.5 118, 67 120 Q64 123, 61 120 C60.5 118, 59 116, 59 110 C59 106, 58.5 102, 57.5 97 C52 93, 48 88, 47 77 Z"/>
+  </g>
+</svg>
