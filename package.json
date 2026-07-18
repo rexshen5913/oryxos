@@ -1,0 +1,17 @@
+{
+  "name": "oryxos-website",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "OryxOS 官網（VitePress）。與 Go 主體無關，僅用於建置文檔站。",
+  "scripts": {
+    "sync": "node scripts/sync-docs.mjs",
+    "docs:dev": "npm run sync && vitepress dev website",
+    "docs:build": "npm run sync && vitepress build website",
+    "docs:preview": "vitepress preview website"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.4",
+    "vue": "^3.5.13"
+  }
+}

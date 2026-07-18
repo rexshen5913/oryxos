@@ -1,0 +1,165 @@
+/*
+ * OryxOS 站台樣式
+ *
+ * 配色策略：大面積中性灰階，強調靠明度階層（mq9 的做法）；
+ * 品牌 cyan 只用在 logo、CTA、連結、程式碼強調等少數位置，不做大面積著色。
+ *
+ * 所有顏色走 CSS 變數，深色模式日後只需覆寫變數，不必重寫版面規則。
+ */
+
+:root {
+  /* 品牌 */
+  --oryx-accent: #00add8;
+  --oryx-accent-deep: #0284a8;
+  --oryx-accent-ink: #1d4ed8;
+  --oryx-accent-soft: rgba(0, 173, 216, 0.08);
+
+  /* 中性階層 */
+  --oryx-fg: #0f172a;
+  --oryx-fg-2: #475569;
+  --oryx-fg-3: #64748b;
+  --oryx-fg-4: #94a3b8;
+  --oryx-fg-faint: #e2e8f0;
+
+  --oryx-bg: #ffffff;
+  --oryx-bg-alt: #f8fafc;
+  --oryx-bg-card: #ffffff;
+  --oryx-border: #e2e8f0;
+  --oryx-border-strong: #cbd5e1;
+
+  /* 圓角階梯：元素越大，圓角越大 */
+  --oryx-r-xs: 4px;
+  --oryx-r-sm: 6px;
+  --oryx-r-md: 8px;
+  --oryx-r-lg: 12px;
+  --oryx-r-xl: 16px;
+}
+
+/*
+ * 深色模式：只覆寫變數，不重寫任何版面規則。
+ * VitePress 預設就帶外觀切換鈕，留一個會壞掉的開關比沒有更糟，因此一併支援。
+ * 若要改為強制淺色，於 config.mts 設 `appearance: false` 並刪除本區塊即可。
+ */
+.dark {
+  --oryx-accent: #22c9ee;
+  --oryx-accent-deep: #38d0f2; /* 深底上需提亮才有足夠對比 */
+  --oryx-accent-ink: #60a5fa;
+  --oryx-accent-soft: rgba(0, 173, 216, 0.13);
+
+  --oryx-fg: #e6edf3;
+  --oryx-fg-2: #a9b6c6;
+  --oryx-fg-3: #8b99ab;
+  --oryx-fg-4: #6b7a8d;
+  --oryx-fg-faint: #1e293b;
+
+  --oryx-bg: #0d1117;
+  --oryx-bg-alt: #141b23;
+  --oryx-bg-card: #171f28;
+  --oryx-border: #242e3a;
+  --oryx-border-strong: #35424f;
+}
+
+/* VitePress 主題變數對接 */
+:root {
+  --vp-c-brand-1: var(--oryx-accent-deep);
+  --vp-c-brand-2: var(--oryx-accent);
+  --vp-c-brand-3: var(--oryx-accent);
+  --vp-c-brand-soft: var(--oryx-accent-soft);
+
+  --vp-c-bg: var(--oryx-bg);
+  --vp-c-bg-alt: var(--oryx-bg-alt);
+  --vp-c-bg-soft: var(--oryx-bg-alt);
+
+  --vp-c-text-1: var(--oryx-fg);
+  --vp-c-text-2: var(--oryx-fg-2);
+  --vp-c-text-3: var(--oryx-fg-3);
+
+  --vp-c-divider: var(--oryx-border);
+  --vp-c-border: var(--oryx-border);
+  --vp-c-gutter: var(--oryx-border);
+
+  --vp-font-family-base: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'PingFang TC', 'Noto Sans TC', 'Microsoft JhengHei', sans-serif;
+  --vp-font-family-mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'Fira Code', Menlo, monospace;
+
+  --vp-layout-max-width: 1440px;
+  --vp-nav-height: 60px;
+}
+
+/* 首頁：移除 VitePress 預設 hero 與內距，版面完全交給 Home.vue */
+.VPHome {
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+}
+.VPHome .VPHero,
+.VPHome .VPFeatures {
+  display: none;
+}
+.VPContent.is-home {
+  padding-bottom: 0 !important;
+}
+
+/* 導覽列：半透明模糊 */
+.VPNav .VPNavBar {
+  background: rgba(255, 255, 255, 0.86) !important;
+  backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--oryx-border);
+}
+.dark .VPNav .VPNavBar {
+  background: rgba(13, 17, 23, 0.86) !important;
+}
+.VPNavBar.has-sidebar .content-body,
+.VPNavBar .divider {
+  background: transparent !important;
+}
+.VPNavBarTitle .logo {
+  height: 26px;
+  margin-right: 8px;
+}
+
+/* 文檔頁：用分隔線而非大字級做分段，壓縮階層 */
+.VPDoc h1 {
+  font-size: 2rem;
+  letter-spacing: -0.02em;
+}
+.VPDoc h2 {
+  font-size: 1.3rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  border-top: 1px solid var(--oryx-border);
+  padding-top: 2rem;
+  margin-top: 2.5rem;
+}
+.VPDoc h3 {
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+/* 文檔頁表格：規劃文檔含大量表格，收窄邊框與內距 */
+.vp-doc table {
+  display: table;
+  width: 100%;
+  font-size: 14px;
+}
+.vp-doc th,
+.vp-doc td {
+  border-color: var(--oryx-border);
+}
+.vp-doc th {
+  background: var(--oryx-bg-alt);
+  font-weight: 600;
+}
+
+/* 行內程式碼：品牌色，但低飽和 */
+.vp-doc :not(pre) > code {
+  color: var(--oryx-accent-deep);
+  background: var(--oryx-accent-soft);
+  border-radius: var(--oryx-r-xs);
+  font-size: 0.86em;
+}
+
+/* 頁尾 */
+.VPFooter {
+  border-top: 1px solid var(--oryx-border);
+  background: var(--oryx-bg-alt);
+}

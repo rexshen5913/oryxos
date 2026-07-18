@@ -1,0 +1,67 @@
+name: Deploy website
+
+on:
+  push:
+    branches: [main]
+    # 涵蓋所有建置輸入。scripts/ 用萬用字元而非逐檔列舉：
+    # 建置流程橫跨 sync-docs.mjs 與它 import 的 docs-manifest.mjs，
+    # 逐檔列舉會在日後新增檔案時漏掉，導致線上站台 stale。
+    paths:
+      - 'website/**'
+      - 'scripts/**'
+      - 'docs/**'
+      - 'constitution.md'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/deploy-site.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同時只跑一個部署，但不取消進行中的（避免半完成的部署上線）
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # 有 lockfile 才用 npm ci（可重現建置）；沒有才退回 npm install
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            echo "::warning::找不到 package-lock.json，改用 npm install（版本不鎖定）"
+            npm install
+          fi
+
+      - name: Build
+        run: npm run docs:build
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/.vitepress/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

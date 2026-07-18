@@ -49,6 +49,17 @@ graphify-out/
 .claude/settings.local.json
 CLAUDE.local.md
 
+# ── 官網（VitePress）──
+# 與 Go 主體無關，僅用於建置文檔站。
+node_modules/
+website/.vitepress/dist/
+website/.vitepress/cache/
+# scripts/sync-docs.mjs 於建置時從 repo 根目錄複製過來的生成物（正本在 docs/ 與 constitution.md）
+website/docs/
+website/zh/docs/
+website/public/logo.svg
+website/public/architecture.svg
+
 # ── OS / 編輯器產物 ──
 .DS_Store
 Thumbs.db
