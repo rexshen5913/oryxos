@@ -1,11 +1,20 @@
-# OryxOS
+<p align="center">
+  <img src="docs/images/logo.svg" alt="OryxOS" width="128">
+</p>
 
-> 用 Go 打造的企業級 **Agent OS** —— 一個完全可控、單一靜態二進制部署的 Agent 運行時內核。
+<h1 align="center">OryxOS</h1>
 
-![status](https://img.shields.io/badge/status-pre--alpha%20(文檔規劃期)-orange)
-![language](https://img.shields.io/badge/Go-%3E%3D%201.24-00ADD8?logo=go)
-![build](https://img.shields.io/badge/build-CGO__ENABLED%3D0%20單一靜態二進制-informational)
-![license](https://img.shields.io/badge/license-TBD-lightgrey)
+<p align="center">
+  用 Go 打造的企業級 <strong>Agent OS</strong><br>
+  一個完全可控、單一靜態二進制部署的 Agent 運行時內核
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/status-pre--alpha%20(文檔規劃期)-orange" alt="status">
+  <img src="https://img.shields.io/badge/Go-%3E%3D%201.24-00ADD8?logo=go" alt="Go >= 1.24">
+  <img src="https://img.shields.io/badge/build-CGO__ENABLED%3D0%20單一靜態二進制-informational" alt="build">
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="license: MIT"></a>
+</p>
 
 > [!WARNING]
 > **專案現況：文檔級重規劃期，尚無 Go 程式碼。**
@@ -81,8 +90,13 @@ oryxos/
 │   ├── storage/          # SQLite（modernc）儲存層：sessions、tool_invocations、llm_calls
 │   └── config/           # ConfigLoader 配置與密鑰加載
 ├── docs/                  # 規劃文檔（← 目前的「原始碼」）
+├── .github/               # Issue／PR 範本
 ├── constitution.md        # 專案憲法（六條不可協商原則）
+├── CONTRIBUTING.md        # 貢獻指南
+├── SECURITY.md            # 安全政策與漏洞回報流程
+├── CODE_OF_CONDUCT.md     # 行為準則
 ├── CLAUDE.md              # AI 協作上下文入口
+├── LICENSE                # MIT
 └── README.md
 ```
 
@@ -130,7 +144,17 @@ CGO_ENABLED=0 go build -o oryxos ./cmd/oryxos
 
 ---
 
-## 🤝 開發約定
+## 🤝 參與貢獻
+
+歡迎參與！專案目前處於文檔規劃期，**最有價值的貢獻是對 `docs/` 規劃文檔的修正、質疑與架構討論**。
+
+- **開始之前**：請先讀 [`CONTRIBUTING.md`](./CONTRIBUTING.md) 與 [`constitution.md`](./constitution.md)
+- **回報 Bug／提功能建議**：使用 [Issue 範本](https://github.com/rexshen5913/oryxos/issues/new/choose)
+- **提問與設計討論**：開 [Discussion](https://github.com/rexshen5913/oryxos/discussions)
+- **回報安全漏洞**：**請勿開公開 Issue**，改依 [`SECURITY.md`](./SECURITY.md) 私下回報
+- **行為準則**：參與本專案即表示你同意遵守 [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md)
+
+### 開發約定摘要
 
 - **測試先行（不可協商）**：遵循 Red-Green-Refactor；單元測試優先採用**表格驅動測試**，並優先寫使用真實依賴的整合測試。
 - **明確性**：所有錯誤顯式處理並以 `fmt.Errorf("...: %w", err)` 包裝；不使用全域變數傳遞狀態（依賴顯式注入）。
@@ -143,4 +167,4 @@ CGO_ENABLED=0 go build -o oryxos ./cmd/oryxos
 
 ## 📄 授權
 
-授權條款尚未確定（TBD）。在正式加入 `LICENSE` 檔案前，預設保留所有權利。
+本專案採用 [MIT License](./LICENSE) 授權。

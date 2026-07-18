@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 提問與設計討論
+    url: https://github.com/rexshen5913/oryxos/discussions
+    about: 使用問題、架構討論、想法交流請開 Discussion，不要開 Issue。
+  - name: 🔒 回報安全漏洞
+    url: https://github.com/rexshen5913/oryxos/security/advisories/new
+    about: 請勿以公開 Issue 回報安全漏洞，改用 GitHub 私密漏洞回報。
+  - name: 📜 專案憲法
+    url: https://github.com/rexshen5913/oryxos/blob/main/constitution.md
+    about: 提出變更建議前，請先讀過六條不可協商的核心開發原則。

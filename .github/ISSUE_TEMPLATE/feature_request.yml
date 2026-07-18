@@ -1,0 +1,65 @@
+name: ✨ 功能建議
+description: 提出新功能或改進構想
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感謝你的構想！送出前請留意兩件事：
+
+        1. 本專案遵循 **YAGNI**（見 [`constitution.md`](https://github.com/rexshen5913/oryxos/blob/main/constitution.md) 第三條）——只實作明確需要的功能。請先說明**你要解決的問題**，而不只是你想要的解法。
+        2. 核心階段聚焦於**執行時內核（五大核心能力）**；多租戶、SSO、完整審計、Tool Policy 等治理層功能已規劃在擴展階段。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你要解決什麼問題
+      description: 描述你遇到的實際困境或使用場景。請聚焦在問題本身，先不要談解法。
+      placeholder: "我在做 ... 的時候，因為 ... 而無法 ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你建議的解法
+      description: 你希望 OryxOS 如何運作？若有 API 或 CLI 形式的構想，請一併描述。
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 你考慮過的替代方案
+      description: 有沒有現有的做法可以繞過？為什麼不夠好？
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 相關範圍
+      description: 這個建議主要涉及哪個部分？
+      options:
+        - core（ReAct loop、Prompt、Tool 調度）
+        - provider（LLM 對接）
+        - memory（三層記憶）
+        - tool（內建 Tool、MCP、Plugin）
+        - web（HTTP API）
+        - channel（CLI 及其他訊息接入渠道）
+        - storage（SQLite、審計）
+        - config（配置與密鑰）
+        - docs（文檔）
+        - 其他 / 不確定
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 確認事項
+      options:
+        - label: 我已搜尋過既有 Issue 與 Discussion，確認這不是重複建議
+          required: true
+        - label: 我已讀過 `constitution.md`，這個建議未與其中的核心原則牴觸
+          required: true
