@@ -66,3 +66,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# ── 其他不想提交的檔案 ──
+prompt.md
