@@ -1,35 +1,68 @@
-# ==================================
 # oryxos 專案上下文總入口
-# ==================================
 
-# --- 核心原則導入 (最高優先級) ---
-# 明確導入專案憲法，確保 AI 在思考任何問題前，都已載入核心原則。
 @./constitution.md
 
-# --- 核心使命與角色設定 ---
-你是一名資深的 Go 語言工程師，正在協助我開發一個名為 "oryxos" 的 Agent OS。
-你的所有行動都必須嚴格遵守上面導入的專案憲法。
+你是一名資深的 Go 語言工程師，正在協助開發 OryxOS——一個用 Go 實作的企業級 Agent OS。所有行動必須嚴格遵守上面導入的專案憲法。
 
 ---
-## 0. 專案現況 (Project Status)
-- **目前階段**：文檔級重規劃期。repo 尚無 Go 程式碼（無 `internal/`、`Makefile`、`cmd/`、`go.mod`），目前的「原始碼」是 `docs/` 下四份規劃文檔 ＋ `constitution.md`。本檔 §1、§3 中的 `make *` 與 `internal/` 為**目標狀態**，待對應程式碼落地後才生效。
+
+## 0. 專案現況
+
+**文檔級規劃期。** repo 尚無 Go 程式碼（無 `go.mod`、`cmd/`、`internal/`、`Makefile`）。本檔 §1 的 `make *` 與 §2 的 package scope 屬**目標狀態**，待對應程式碼落地後生效。
 
 ---
+
 ## 1. 技術棧與環境
-- **語言**: Go (版本 >= 1.24)
-- **建置與測試**（目標狀態，`Makefile` 尚未建立；下列指令待建置系統落地後生效）:
-  - 使用 `Makefile` 進行標準化操作。
-  - 執行所有測試: `make test`
-  - 建置 Web 服務: `make web`
+
+- **語言**：Go >= 1.24
+- **建置與測試**（`Makefile` 尚未建立）：
+  - 執行所有測試：`make test`
+  - 建置 Web 服務：`make web`
+  - 建置二進制：`CGO_ENABLED=0 go build -o oryxos ./cmd/oryxos`
 
 ---
+
 ## 2. Git 與版本控制
-- **Commit Message 規範**: 嚴格遵循 Conventional Commits 規範。
-  - 格式: `<type>(<scope>): <subject>`
-  - 當被要求產生 commit message 時，必須遵循此格式。
+
+Commit message 嚴格遵循 Conventional Commits：`<type>(<scope>): <subject>`。
+
+`scope` 用 package 名（`core`、`provider`、`memory`、`tool`、`web`、`storage`、`config`、`cli`）；文檔期則用 `docs`、`website`、`agents`。
 
 ---
-## 3. AI 協作指令
-- **當被要求新增功能時**: 你的第一步應該是先閱讀相關上下文並對照專案憲法，再提出你的計畫。目前文檔期以 `constitution.md` ＋ `docs/` 為主要上下文；待 `internal/` 落地後，改為先用 `@` 指令閱讀 `internal/` 下的相關套件。
-- **當被要求編寫測試時**: 你應該優先編寫 **表格驅動測試（Table-Driven Tests）**。
-- **當被要求建置專案時**: 你應該優先提議使用 `Makefile` 中定義好的指令。
+
+## 3. 上下文讀取順序
+
+動工前依序讀，衝突時上位優先：
+
+1. **`constitution.md`** — 不可協商原則，唯一的原則來源
+2. **`CONTEXT.md`** — 正式術語表。輸出提到領域概念時一律用其中的詞，不要漂移到 `_Avoid_` 列出的同義詞
+3. **`docs/adr/`** — 與工作範圍相關的架構決策（「為什麼」的唯一來源）
+4. **originating spec ＋ ticket 全文**
+5. **`docs/` 規劃文檔** — 需求與技術方案的細節依據
+
+若你的產出與既有 ADR 抵觸，明白指出並說明為何值得重新討論，不要默默覆寫。
+
+---
+
+## 4. 協作準則
+
+- **新增功能**：先讀上述上下文並對照憲法，提出計畫後再動手。不擴大 ticket scope。
+- **編寫測試**：優先表格驅動測試。真實依賴 vs LLM 錄製回應的邊界見憲法 §4.3–4.4。
+- **建置專案**：優先提議使用 `Makefile` 中定義好的指令。
+- **開發流程**：`/to-spec` → `/to-tickets` → `/implement`，拆解形狀為 tracer bullet。詳見 `docs/AIProgrammingGuide.md`。
+
+---
+
+## 5. Agent skills
+
+### Issue tracker
+
+GitHub Issues（`rexshen5913/oryxos`），透過 `gh` CLI 操作。詳見 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+五個標準角色沿用預設標籤字串：`needs-triage`、`needs-info`、`ready-for-agent`、`ready-for-human`、`wontfix`。詳見 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+Single-context：根目錄 `CONTEXT.md`（術語）＋ `docs/adr/`（決策）。讀取順序見 §3。

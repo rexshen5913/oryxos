@@ -12,7 +12,7 @@ export const DOCS = [
   { source: 'docs/IndustryResearch.md', slug: 'industry-research', title: '業界調研' },
   { source: 'docs/DemandAnalysis.md', slug: 'demand-analysis', title: '需求分析' },
   { source: 'docs/TechnicalSolution.md', slug: 'technical-solution', title: '技術方案' },
-  { source: 'docs/AIProgrammingGuid.md', slug: 'ai-programming-guide', title: 'AI 編程指南' },
+  { source: 'docs/AIProgrammingGuide.md', slug: 'ai-programming-guide', title: 'AI 編程指南' },
 ]
 
 /** 站台語系前綴。文檔為繁中撰寫，兩個語系指向同一份內容，但兩邊路徑都必須實際存在，

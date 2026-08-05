@@ -17,8 +17,8 @@
 </p>
 
 > [!WARNING]
-> **專案現況：文檔級重規劃期，尚無 Go 程式碼。**
-> 目前 repo 只有規劃文檔（`docs/`）與專案憲法（`constitution.md`）；`internal/`、`cmd/`、`Makefile`、`go.mod` 皆**尚未建立**。本 README 中的目錄結構、指令與功能屬**目標狀態**，會隨實作推進逐步落地。
+> **專案現況：文檔級規劃期，尚無 Go 程式碼。**
+> 目前 repo 只有規劃文檔（`docs/`）、專案憲法（`constitution.md`）、術語表（`CONTEXT.md`）與架構決策紀錄（`docs/adr/`）；`internal/`、`cmd/`、`Makefile`、`go.mod` 皆**尚未建立**。本 README 中的目錄結構、指令與功能屬**目標狀態**，會隨實作推進逐步落地。
 
 ---
 
@@ -40,7 +40,7 @@ OryxOS 是一個**企業級 Agent 作業系統**。它的定位不是又一個 A
 |---|------|------|
 | 一 | **對接 LLM** | 以 `go-openai` 薄包裝接 OpenAI 兼容協議，配上自實現的 Provider 抽象；跨 provider 統一介面。 |
 | 二 | **ReAct 循環** | Agent 的大腦。ReAct loop 由 `ReActLoop` ＋ `ToolExecutor` 完全自實現、可控，不採用框架的自動執行 Agent 抽象。 |
-| 三 | **三層記憶（Memory）** | 短期／工作／長期三層統一門面，讓 Agent 記得住上下文；核心階段用 SQLite ＋ `MEMORY.md`。 |
+| 三 | **三層記憶（Memory）** | Session／長期記憶／情景記憶三層，統一門面對外；核心階段實作前兩層（SQLite ＋ `MEMORY.md`），情景記憶放擴展階段。 |
 | 四 | **工具體系（Tool）** | 內建 Tool（File／Shell／Http）＋ MCP Client ＋ Plugin 自定義工具，主推 `SKILL.md` 與 MCP 的零程式碼接入。 |
 | 五 | **Web Service** | 以 `net/http`（搭配 `chi`）對外暴露 HTTP API，供業務系統集成。 |
 
@@ -79,19 +79,22 @@ Agent 的執行核心是一個自實現的 ReAct loop，向下驅動三大服務
 
 ```
 oryxos/
-├── cmd/oryxos/            # main ＋ cobra 命令樹（12 個子命令）
+├── cmd/oryxos/            # main ＋ cobra 命令樹（11 個子命令）
 ├── internal/
 │   ├── core/             # 核心引擎：ReActLoop、PromptBuilder、ToolExecutor、ContextLoader…（所有 package 依賴）
 │   ├── provider/         # 能力一：ProviderService、OpenAI 兼容 adapter、provider 顯式註冊
-│   ├── memory/           # 能力三：MemoryService（三層門面）、LongTermMemory、MemoryTools
+│   ├── memory/           # 能力三：MemoryService（統一門面）、LongTermMemory、MemoryTools
 │   ├── tool/             # 能力四：內建 Tool、MCP Client、ToolRegistry、SandboxChecker（三合一）
 │   ├── web/              # 能力五：HTTP server（net/http ＋ chi）、handler、OpenAPI
 │   ├── channel/cli/      # CLI Channel 實現
 │   ├── storage/          # SQLite（modernc）儲存層：sessions、tool_invocations、llm_calls
 │   └── config/           # ConfigLoader 配置與密鑰加載
 ├── docs/                  # 規劃文檔（← 目前的「原始碼」）
+│   ├── adr/              # 架構決策紀錄
+│   └── agents/           # AI agent 協作設定（issue tracker、triage labels）
 ├── .github/               # Issue／PR 範本
 ├── constitution.md        # 專案憲法（六條不可協商原則）
+├── CONTEXT.md             # 領域術語表
 ├── CONTRIBUTING.md        # 貢獻指南
 ├── SECURITY.md            # 安全政策與漏洞回報流程
 ├── CODE_OF_CONDUCT.md     # 行為準則
@@ -120,13 +123,13 @@ CGO_ENABLED=0 go build -o oryxos ./cmd/oryxos
 ./oryxos server
 ```
 
-規劃中的三種運行模式：**CLI（`chat`）**、**HTTP Server（`server`）**、**Gateway（`gateway`）**。CLI 共 12 個子命令：`init`、`status`、`chat`、`server`、`gateway`、`profile list/create/show/delete`、`provider list`、`tool list`、`session list`。
+核心階段有兩種運行模式：**CLI（`chat`）** 與 **HTTP Server（`server`）**。CLI 共 11 個子命令：`init`、`status`、`chat`、`server`、`profile list/create/show/delete`、`provider list`、`tool list`、`session list`。
 
 ---
 
 ## 🗺️ 路線圖
 
-- **核心階段（進行中）** — 執行時內核：五大核心能力 ＋ CLI Channel ＋ SQLite 審計地基。每個 user story 完成後有可演示 demo。
+- **核心階段（進行中）** — 執行時內核：五大核心能力 ＋ CLI Channel ＋ SQLite 審計地基。每張 ticket 完成後有可演示 demo。
 - **擴展階段** — IM Channel（Slack／Telegram／Discord）、向量檢索（chromem-go／sqlite-vec／pgvector）、更多 Provider adapter。
 - **社區／企業治理階段** — 多租戶、Tool Policy、完整審計、SSO。
 
@@ -137,10 +140,12 @@ CGO_ENABLED=0 go build -o oryxos ./cmd/oryxos
 | 文件 | 內容 |
 |------|------|
 | [`constitution.md`](./constitution.md) | 專案憲法：六條不可協商的核心開發原則（效力高於一切） |
+| [`CONTEXT.md`](./CONTEXT.md) | 領域術語表：正式術語的單一事實來源 |
+| [`docs/adr/`](./docs/adr/) | 架構決策紀錄：每個難逆轉決策的理由與取捨 |
 | [`docs/IndustryResearch.md`](./docs/IndustryResearch.md) | 業界調研：為什麼是 Go |
 | [`docs/DemandAnalysis.md`](./docs/DemandAnalysis.md) | 需求分析：五大核心能力與典型場景 |
 | [`docs/TechnicalSolution.md`](./docs/TechnicalSolution.md) | 技術方案：架構決策與工程結構 |
-| [`docs/AIProgrammingGuid.md`](./docs/AIProgrammingGuid.md) | AI 編程指南 |
+| [`docs/AIProgrammingGuide.md`](./docs/AIProgrammingGuide.md) | AI 編程指南：開發流程與實作審查清單 |
 
 ---
 
@@ -156,7 +161,7 @@ CGO_ENABLED=0 go build -o oryxos ./cmd/oryxos
 
 ### 開發約定摘要
 
-- **測試先行（不可協商）**：遵循 Red-Green-Refactor；單元測試優先採用**表格驅動測試**，並優先寫使用真實依賴的整合測試。
+- **測試先行（不可協商）**：遵循 Red-Green-Refactor；單元測試優先採用**表格驅動測試**，並優先寫使用真實依賴的整合測試——LLM 呼叫是唯一例外，測試中一律回放錄製回應。
 - **明確性**：所有錯誤顯式處理並以 `fmt.Errorf("...: %w", err)` 包裝；不使用全域變數傳遞狀態（依賴顯式注入）。
 - **簡單性（YAGNI）**：只實作明確要求的功能，簡單函式與資料結構優於複雜的介面與繼承。
 - **Commit 規範**：遵循 [Conventional Commits](https://www.conventionalcommits.org/)，格式 `<type>(<scope>): <subject>`。

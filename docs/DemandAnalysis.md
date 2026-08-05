@@ -119,7 +119,7 @@ API 覆蓋六類操作：會話管理（創建會話、發訊息、查歷史、�
 
 社區共建功能作為長期方向開放給社區貢獻。
 
-核心階段的實施按 4 週節奏組織，每週 3 小時實踐，合計 12 小時。這是一個極強的時間約束，意味著核心功能的範圍必須收得很緊，只覆蓋運行時內核的最短跑通鏈路，其餘一切放擴展或社區共建。核心階段之後，OryxOS 長期以開源社區的方式維護和演進。
+核心階段的實施按 4 週節奏組織，每週約 3 小時實踐。**這是節奏參考，不是驗收條件**（ADR-0004）；驗收標準見第 13 章。核心功能只覆蓋運行時內核的最短跑通鏈路，其餘放擴展或社區共建。核心階段之後，OryxOS 長期以開源社區的方式維護和演進。
 
 文檔的讀者包括專案研發人員、架構師、測試人員、產品和運營、社區貢獻者。研發把這份文檔當作實施依據，架構師把它當作技術方案設計的輸入，測試照著它寫用例，社區貢獻者理解 OryxOS 的邊界，判斷在哪些方向可以貢獻。
 
@@ -174,7 +174,7 @@ OryxOS 的核心目標可以用四個詞概括：統一、私有、易接入、�
 
 ## 5. 核心功能
 
-核心功能是核心階段 4 週（合計 12 小時）內必須完成的最短鏈路，對應 Agent OS 的運行時內核。目標是跑通一個完整鏈路：用 Profile 配置一個 Agent，通過 CLI 跟它對話，它能呼叫 LLM 和工具完成任務，並能通過 REST API 對外暴露。
+核心功能是核心階段必須完成的最短鏈路，對應 Agent OS 的運行時內核。目標是跑通一個完整鏈路：用 Profile 配置一個 Agent，通過 CLI 跟它對話，它能呼叫 LLM 和工具完成任務，並能通過 REST API 對外暴露。
 
 > **📌 重要：** 需要再次強調，核心階段交付的是運行時內核，讓 OryxOS 成為真正企業級 Agent OS 的治理層（多租戶、SSO、完整審計、Tool Policy）在擴展和社區階段補齊。下面按功能模組展開。
 
@@ -272,7 +272,7 @@ Channel 是 Agent 對外的訊息接入入口，主要解決「訊息進來、�
 
 核心階段只內建一種 Channel：CLI Channel，通過 `oryxos chat` 命令啟動，是開發調試時的主要互動方式，支援多輪對話、查看上下文、查看 Tool 呼叫記錄。
 
-Slack、Telegram、Discord 這些 IM Channel 放在擴展功能。它們的實現複雜度高（webhook、卡片、媒體、組織架構），且需要單獨的 OAuth 流程和企業資質，不在 12 小時核心階段能完成的範圍。擴展階段的 IM Channel 底層呼叫 Web Service，不重複實現 Agent 邏輯。
+Slack、Telegram、Discord 這些 IM Channel 放在擴展功能。它們的實現複雜度高（webhook、卡片、媒體、組織架構），且需要單獨的 OAuth 流程和企業資質，不在核心階段的最短鏈路上。擴展階段的 IM Channel 底層呼叫 Web Service，不重複實現 Agent 邏輯。
 
 ### 5.8 Web Service（核心能力五：對外介面暴露）
 
@@ -280,7 +280,7 @@ Web Service 是 OryxOS 的對外完整門面，業務系統通過 REST API 接�
 
 API 覆蓋六類操作：會話管理（創建會話、發訊息、查歷史、歸檔會話）、Agent 呼叫（無狀態呼叫一次 Agent、流式回應擴展階段補）、Profile 管理（列 Profile、看詳情、重載）、Memory 操作（查長期記憶、手動寫入、清理）、Tool 資訊（列可用 Tool、看元資訊）、系統狀態（健康檢查、運行指標、Provider 狀態）。
 
-核心階段 10 個關鍵端點。 12 小時核心階段做最關鍵的 10 個端點跑通，其他放擴展階段：
+核心階段 10 個關鍵端點。核心階段做最關鍵的 10 個端點跑通，其他放擴展階段：
 
 | 端點 | 說明 | 分類 |
 | --- | --- | --- |
@@ -308,27 +308,28 @@ API 覆蓋六類操作：會話管理（創建會話、發訊息、查歷史、�
 
 ### 5.9 Session 管理
 
-Session 是使用者和 Agent 一次對話的上下文容器。Session 包含起止時間、使用者身份、Agent 標識、對話歷史、當前上下文、臨時變數。Session 標識由 Channel、使用者、Agent 聯合生成。
+Session 是使用者和 Agent 一次對話的上下文容器。Session 包含起止時間、使用者身份、Profile 標識、對話歷史、當前上下文、臨時變數。Session 標識由 Channel、使用者、Profile 聯合生成。
 
 核心階段 Session 資料持久化到本地 SQLite（`.oryxos/sessions/` 下）。重啟 OryxOS 後，正在進行的 Session 可以恢復。
 
 跨 Session 的長期記憶、上下文壓縮、Memory Wiki 這些放在擴展功能。核心階段 Session 上下文超過 LLM 的 context window 時，簡單截斷早期對話保留近期對話。對外提供的 Session API 包括創建 Session、追加訊息、獲取歷史、結束 Session。
 
-### 5.10 三種運行模式
+### 5.10 兩種運行模式
 
-OryxOS 提供三種運行模式，在核心階段全部實現。這三種模式是使用者跟 OryxOS 互動的全部入口：
+OryxOS 核心階段提供兩種運行模式。這兩種模式是使用者跟 OryxOS 互動的全部入口：
 
 - `oryxos chat`：互動式多輪對話模式。啟動後使用者在終端跟 Agent 對話，Agent 呼叫 LLM 和 Tool，實時返回結果。也可以用 `--message “xxx”` 發送單條訊息後退出。這是開發調試和日常使用的主要方式
 - `oryxos server`：HTTP API 模式。啟動後 OryxOS 在指定端口（預設 8080）開放 RESTful 介面，業務系統通過 HTTP 呼叫 OryxOS 的 Agent
-- `oryxos gateway`：常駐守護進程模式。啟動後 OryxOS 同時服務多個接入點（擴展功能補齊多 Channel 後才有完整用途，核心階段只掛 CLI Channel 和 Web Service）
 
-三種模式共享同一份 Profile 配置和 Session 儲存。
+兩種模式共享同一份 Profile 配置和 Session 儲存。
+
+常駐守護進程模式 `oryxos gateway` 屬擴展階段——它的價值在於同時服務多個接入點，而核心階段只有 CLI 一種 Channel（ADR-0004）。
 
 ### 5.11 命令行工具
 
-OryxOS 通過命令行工具完成主要操作。核心階段實現 12 個命令，這一組命令是使用者跟 OryxOS 互動的全部入口。
+OryxOS 通過命令行工具完成主要操作。核心階段實現 11 個命令，這一組命令是使用者跟 OryxOS 互動的全部入口。
 
-啟動和狀態：`oryxos init` 初始化工作區、`oryxos status` 查看配置和運行狀態、`oryxos chat` 互動對話（可選 `--profile` 指定 Profile，預設用 default）、`oryxos server` 啟動 HTTP API 服務、`oryxos gateway` 啟動多渠道守護進程。
+啟動和狀態：`oryxos init` 初始化工作區、`oryxos status` 查看配置和運行狀態、`oryxos chat` 互動對話（可選 `--profile` 指定 Profile，預設用 default）、`oryxos server` 啟動 HTTP API 服務。
 
 Profile 管理：`oryxos profile list` 列出所有 Profile、`oryxos profile create <name>` 創建新 Profile、`oryxos profile show <name>` 查看 Profile 詳情、`oryxos profile delete <name>` 刪除 Profile。
 
@@ -395,7 +396,7 @@ OryxOS 作為開源專案，需要一個獨立的主頁作為對外門面，講�
 
 社區共建功能不在 OryxOS 主線開發計劃內，作為長期方向開放給社區貢獻。這一檔不規定時間表，有人貢獻就推進，沒人貢獻就先放著。
 
-- 剩餘專案文檔：核心階段專案方只交付需求文檔、技術方案文檔、業界調研。其他文檔（API 參考文檔、部署運維手冊、貢獻者指南 CONTRIBUTING.md、典型場景使用手冊）作為社區共建專案，通過 PR 貢獻
+- 剩餘專案文檔：核心階段專案方交付需求文檔、技術方案文檔、業界調研，以及專案主頁上的**快速開始**。其他文檔（API 參考文檔、**部署運維手冊**、典型場景使用手冊）作為社區共建專案，通過 PR 貢獻。部署運維手冊核心階段刻意不交付——核心階段不建議在生產環境跑高敏感場景（見 §12），此時給出生產部署手冊等於誤導使用者
 - Skills Marketplace：一個社區貢獻的 Skill 共享平台，Skill 用 SKILL.md 描述，符合 agentskills.io 開放標準，跟 OpenClaw 和 Hermes Agent 兼容。Marketplace 讓企業可以一鍵安裝別人貢獻的運維 Skill、客服 Skill、銷售 Skill
 - SDK 多語言支援：優先級是 Go（OryxOS 同語言）、Python、TypeScript、Java，其他長尾語言看社區訴求
 - 可視化 Profile 編輯器：讓非工程師也能配置和調整 Agent。編輯器輸出標準的 Profile YAML，OryxOS 直接讀取。產品形態接近 Dify 的 Agent 配置界面
@@ -561,7 +562,7 @@ OryxOS 核心功能的實施按 4 週節奏組織。
 實施內容：
 
 - 多 Agent 演示（配置兩個不同 Profile 的 Agent 在同一實例並存，驗證「OS」的多 Agent 形態）
-- 命令行工具完整 12 個命令、Session 持久化到 SQLite（跨重啟恢復）
+- 命令行工具完整 11 個命令、Session 持久化到 SQLite（跨重啟恢復）
 - Bootstrap 檔案機制（AGENTS.md、SOUL.md、USER.md 加載到系統提示詞）
 - 結構化日誌、專案主頁（VitePress 或類似靜態站點工具）
 
@@ -581,7 +582,7 @@ OryxOS 主倉庫提供清晰的 issue 標註和貢獻者指南，標註哪些是
 
 **核心功能範圍風險**
 
-> **⚠️ 風險：** 4 週 12 小時是很緊的時間約束，可能實施過程中發現某些核心功能比預期複雜。應對是核心功能範圍卡得很緊，如果某一週完不成，立刻把當週末段功能挪到擴展功能，保證每週有可演示成果。優先級是"跑通"而不是"做完美"，後續社區接力可以慢慢完善。
+> **⚠️ 風險：** 核心功能可能比預期複雜。應對是核心功能範圍卡得很緊，若某一段完不成，把末段功能挪到擴展功能，保證每個階段有可演示成果。優先級是「跑通」而不是「做完美」，後續社區接力可以慢慢完善。
 
 **LLM 框架不集中風險**
 
@@ -611,10 +612,8 @@ OryxOS 大量用 goroutine 承載並發 Session 和阻塞在 LLM IO 上的請求
 
 OryxOS 兼容 agentskills.io 標準，但跟它們是不同的專案，設計哲學和產品形態有差異。應對是專案文檔明確說明定位差異：OpenClaw 偏個人（Node.js），Hermes 偏個人到小團隊（Python），OryxOS 直接定位企業場景（Go），三者通過 SKILL.md 互通，生態互補不競爭。
 
-幾個未決事項，在技術方案階段或後續迭代決議。
+未決事項：
 
-- Provider 抽象介面設計，是直接用 go-openai 的型別，還是在其上加一層 OryxOS 自己的抽象。前者最省力，後者更可控。技術方案階段決議。
-- Bootstrap 檔案加載順序和優先級，AGENTS.md、SOUL.md、USER.md 怎麼組合進系統提示詞，有不同方案。技術方案階段決議。
 - LLM 客戶端核心走 go-openai 薄包裝，未來是否引入 Eino 一類框架作可選適配。核心階段已定走薄包裝加自實現 Provider 抽象，Eino 僅列為擴展期的可選項，後續迭代決議。
 
 ---
@@ -634,17 +633,17 @@ OryxOS 兼容 agentskills.io 標準，但跟它們是不同的專案，設計哲
 - Plugin Tool 接入（方式一零程式碼 SKILL.md 加 MCP 跑通；方式三原生 Go Tool 示例跑通）
 - MCP Client 集成、CLI Channel
 - Web Service 核心 10 個 REST 端點全部跑通
-- Session 持久化（SQLite，跨重啟恢復）、12 個命令行工具、配置與密鑰加載
+- Session 持久化（SQLite，跨重啟恢復）、11 個命令行工具、配置與密鑰加載
 
-性能驗收：通過壓力測試驗證單節點 10 個 Agent 穩定運行 4 小時、單節點 100 個並發 Session、Session 創建 P99 延遲低於 200 毫秒、內部轉發開銷低於 50 毫秒。這些是核心階段的目標，不達標不影響發布但需在擴展階段優化。
+性能目標（**擴展階段的優化目標，非核心階段驗收條件**）：單節點 10 個 Agent 穩定運行 4 小時、單節點 100 個並發 Session、Session 創建 P99 延遲低於 200 毫秒、內部轉發開銷低於 50 毫秒。
 
-可運維性驗收：完整的部署文檔（新手 30 分鐘內完成單節點部署）；命令行工具有清晰的幫助和錯誤提示；專案主頁可訪問，講清楚 OryxOS 是什麼、怎麼快速開始。
+可運維性驗收：**快速開始可複跑** —— 在乾淨環境依專案主頁的快速開始步驟，能從 `git clone` 走到 `oryxos chat` 成功對話一輪；命令行工具有清晰的幫助和錯誤提示；專案主頁可訪問。部署運維手冊（生產部署、K8s、監控、故障排除）屬社區共建，不在核心階段驗收範圍內。
 
 場景驗收：通過五個 demo Agent 驗證五個核心能力，五個 demo 跑通是核心功能發布的硬條件。
 
 | Demo | 驗證能力 | 內容 |
 | --- | --- | --- |
-| Demo 一 | 對接 LLM 加 ReAct | “查天氣並寫日報”，Agent 調天氣 API、用檔案 Tool 寫日報到本地 |
+| Demo 一 | 對接 LLM 加 ReAct | “查一下北京天氣並告訴我穿什麼”，Agent 調 HTTP Tool 拉天氣，第二輪據結果給穿衣建議（兩輪 LLM 加一輪 Tool，驗證結果回填與終止條件；多 Tool 串接歸 Demo 三） |
 | Demo 二 | Memory | 第一次對話告訴偏好（Go、K8s），Agent 調 save_memory；第二次對話能引用記憶回答 |
 | Demo 三 | Plugin Tool 加 MCP | Agent 通過 MCP Client 調外部 server 的工具完成跨工具任務 |
 | Demo 四 | Web Service 同步呼叫 | 外部系統創建 Session、發訊息、獲取回應、歸檔，鏈路跑通 |
@@ -669,7 +668,7 @@ OryxOS 的交付分兩段。
 - Plugin 自定義工具加內建工具集（內建檔案、Shell、HTTP，業務方通過 SKILL.md 加 MCP 零程式碼擴展、MCP server 輕程式碼擴展、原生 Go Tool 重程式碼擴展）
 - Web Service（REST API 覆蓋會話管理、Agent 呼叫、Profile/Memory/Tool 資訊查詢、系統狀態，業務系統通過 HTTP 接入）。
 
-核心階段按 4 週組織，每週 3 小時實踐，合計 12 小時：
+核心階段按 4 週節奏組織（節奏參考，非驗收條件，見 ADR-0004）：
 
 - 第一週做對接 LLM 加 ReAct 循環
 - 第二週做 Memory 加 Tool 體系

@@ -16,8 +16,8 @@ OryxOS 目前處於**文檔級規劃期**，repo 尚無 Go 程式碼（`go.mod`�
 這代表現階段最有價值的貢獻是**文檔與設計討論**：
 
 - 對 [`docs/`](./docs/) 下規劃文檔的修正、補充或質疑
-- 對架構決策提出替代方案（附理由與取捨分析）
-- 指出文檔之間的不一致
+- 對 [`docs/adr/`](./docs/adr/) 的架構決策提出替代方案（附理由與取捨分析）
+- 指出文檔之間的不一致，或 [`CONTEXT.md`](./CONTEXT.md) 術語與文檔用詞的落差
 
 程式碼相關的流程（下方「開發流程」與「程式碼準則」）在建置系統落地後才會生效，先列於此作為預期規則。
 
@@ -58,36 +58,16 @@ CGO_ENABLED=0 go build -o oryxos ./cmd/oryxos  # 建置單一靜態二進制
 
 ## 程式碼準則
 
-以下為憲法的實作要點摘要，完整條文以 [`constitution.md`](./constitution.md) 為準。
+**完整規則見 [`constitution.md`](./constitution.md)，本節不重複條文。** 以下是 PR 最常被退回的四個原因：
 
-### 測試先行（不可協商）
+1. **只有實作、沒有測試。** 憲法第四條要求從失敗的測試開始，不可協商。
+2. **LLM 測試打了真實 API。** 可確定化的依賴（SQLite、檔案系統、本地 MCP server）一律用真的；LLM 是唯一例外，測試中以 `httptest.Server` 回放錄製回應（憲法 §4.3–4.4）。
+3. **引入 cgo 依賴。** 會破壞 `CGO_ENABLED=0` 單一靜態二進制（憲法 §1.2）。
+4. **用了反射或型別掃描自動裝配。** Provider 與 Tool 一律顯式註冊（憲法 §2.3）。
 
-所有新功能與 Bug 修復，都**必須從一個失敗的測試開始**。
+新增第三方依賴需在 PR 描述中說明理由。
 
-- 嚴格遵循 **Red → Green → Refactor** 循環
-- 單元測試**優先採用表格驅動測試（Table-Driven Tests）**
-- **優先寫使用真實依賴的整合測試**，而非堆疊 mock
-
-只有實作、沒有測試的 PR 不會被合併。
-
-### 明確性
-
-- **錯誤一律顯式處理**，傳遞時必須以 `fmt.Errorf("...: %w", err)` 包裝
-- **不使用全域變數傳遞狀態**，所有依賴透過函式參數或結構體成員顯式注入
-- **所有阻塞路徑走 `context.Context`**（取消、超時、追蹤傳遞），避免 goroutine 洩漏
-
-### 簡單性
-
-- **YAGNI** — 只實作規格中明確要求的功能
-- 簡單的函式與資料結構，優於複雜的介面與繼承體系
-- **顯式優於魔法** — Provider 與 Tool 一律顯式註冊，絕不靠反射或型別掃描自動裝配
-
-### 依賴
-
-- **禁止引入 cgo 依賴**，以守住 `CGO_ENABLED=0` 單一靜態二進制
-  （SQLite 用純 Go 的 `modernc.org/sqlite`，不用 `mattn/go-sqlite3`）
-- **標準庫優先**，不引入非必需的重框架
-- 新增第三方依賴需在 PR 描述中說明理由
+領域概念的用詞請對照 [`CONTEXT.md`](./CONTEXT.md)；若你的改動與既有 [ADR](./docs/adr/) 抵觸，請在 PR 中明講。
 
 ---
 
@@ -101,7 +81,7 @@ CGO_ENABLED=0 go build -o oryxos ./cmd/oryxos  # 建置單一靜態二進制
 
 常用 `type`：`feat`、`fix`、`docs`、`refactor`、`test`、`chore`、`perf`、`build`、`ci`
 
-`scope` 使用 package 名稱（如 `core`、`provider`、`memory`、`tool`、`web`、`storage`、`config`）。
+`scope` 使用 package 名稱（如 `core`、`provider`、`memory`、`tool`、`web`、`storage`、`config`）；文檔期則用 `docs`、`website`、`agents`。
 
 範例：
 

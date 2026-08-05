@@ -178,7 +178,7 @@ ReActLoop 模組。Agent 的核心循環引擎。輸入 Session 和使用者訊�
 
 PromptBuilder 模組。組裝每輪 LLM 呼叫的 Prompt。按四部分順序拼接：
 
-- 第一部分 system prompt（Profile 的 identity prompt 加 Bootstrap 檔案加 Skill 檔案內容，統一由下面講的 ContextLoader 提供）；
+- 第一部分 system prompt（人格加 Bootstrap 檔案加 Skill 檔案內容，統一由下面講的 ContextLoader 提供，內部拼接順序與覆蓋語義見 8.3 與 ADR-0003）；
 - 第二部分 Memory 注入（會話歷史加長期記憶，由 MemoryService 提供）；
 - 第三部分對話歷史（按 maxHistoryTurns 截斷後的 Session messages）；
 - 第四部分當前 Profile 可用的 Tool 列表（按 Function Calling 格式）。
@@ -201,11 +201,13 @@ MAX_ITERATIONS 限制。核心階段預設 10 次，防止 Agent 陷入 Tool 呼
 
 Memory 是 Agent OS 區別於普通 chatbot 的核心能力。三層記憶是完整設計，核心階段做會話和長期兩層，情景記憶放擴展。
 
-這裡做一個相對原方案的架構調整：Memory 做成三層記憶的統一門面，對 ReAct 循環只暴露一個 MemoryService 介面，內部再分會話記憶和長期記憶。這樣對外敘述的"三層記憶"和內部實現一致，ReAct 循環不需要分別去問 Session 和 MEMORY.md 兩個地方。
+Memory 做成**統一門面**，對 ReAct 循環只暴露一個 MemoryService 介面，內部再分 Session 和長期記憶。ReAct 循環不需要分別去問 Session 和 MEMORY.md 兩個地方。
+
+門面**不叫「三層門面」**——核心階段只實作兩層，門面內部也只有兩個委託對象，多算一層會誘導實作者去補刻意未實作的情景記憶。門面的職責與內部層數無關。
 
 ### 5.1 模組組成
 
-MemoryService 模組（統一門面）。對 ReAct 循環暴露統一的記憶讀寫介面。內部把會話記憶委託給 SessionManager（底層是 SQLite 的 Session 儲存），把長期記憶委託給 LongTermMemory（底層是 MEMORY.md 檔案）。ReAct 循環組裝 prompt 時只調 MemoryService 一個介面拿到完整上下文。這是相對原設計的關鍵調整，避免 Memory 概念橫跨兩個模組卻沒有統一入口。
+MemoryService 模組（統一門面）。對 ReAct 循環暴露統一的記憶讀寫介面。內部把會話記憶委託給 SessionManager（底層是 SQLite 的 Session 儲存），把長期記憶委託給 LongTermMemory（底層是 MEMORY.md 檔案）。ReAct 循環組裝 prompt 時只調 MemoryService 一個介面拿到完整上下文，避免 Memory 概念橫跨兩個模組卻沒有統一入口。
 
 LongTermMemory 子模組。長期記憶的核心讀寫，底層操作 `.oryxos/memory/MEMORY.md` 一個 Markdown 檔案。對外提供四個方法：`append`（追加內容，自動加日期 header）、`load`（加載整個檔案，超閾值截斷）、`recallByKeyword`（按關鍵詞檢索返回匹配行）、`truncateIfNeeded`（超過 4000 字保留最近內容）。介面預留向量檢索升級空間：`recallByKeyword` 設計成可升級為 `recall`（帶 mode 參數支援 keyword 加 semantic），切換底層實現不影響上層。
 
@@ -240,7 +242,7 @@ ReAct 循環每次組裝 prompt 時，MemoryService 把會話歷史和整個 MEM
 
 Tool 是 Agent 可以呼叫的外部能力。OryxOS 的 Tool 分兩類：內建 Tool 由 OryxOS 提供，Plugin Tool 由業務方擴展。Plugin Tool 有三種接入方式，按門檻從低到高排。
 
-這裡做一個相對原方案的模組調整說明：核心階段 Tool 相關合併為一個 `internal/tool` package（內建 Tool、MCP Client、ToolRegistry、Sandbox 都在裡面），不拆成 builtin/skill/mcp 三個 package。原因是它們共享同一個 OryxTool 抽象和 ToolRegistry，耦合度高，核心階段沒必要拆細。
+核心階段 Tool 相關合併為一個 `internal/tool` package（內建 Tool、MCP Client、ToolRegistry、Sandbox 都在裡面），**不拆成 builtin/skill/mcp 三個 package**——它們共享同一個 OryxTool 抽象和 ToolRegistry，耦合度高，拆細沒有收益。
 
 另外，SKILL.md 嚴格說不是一種 Tool，而是注入 system prompt 的指令模板，因此 SkillLoader 不放在 Tool 體系裡，歸到上下文加載那一層（見 8.3），跟 Bootstrap 檔案一類。這樣概念更齊整。
 
@@ -381,9 +383,18 @@ ProfileRegistry 模組。Profile 的記憶體索引，按 name 提供快速查�
 
 ### 8.3 上下文加載（Bootstrap 加 Skill 統一）
 
-這是相對原方案的一個調整：把 Bootstrap 檔案加載和 Skill 檔案加載合併到一個 ContextLoader 模組，因為兩者本質相同，都是注入 system prompt 的 markdown 上下文，只是來源不同。
+Bootstrap 檔案加載和 Skill 檔案加載合併到一個 ContextLoader 模組——兩者本質相同，都是注入 system prompt 的 markdown 上下文，只是來源不同。
 
-ContextLoader 模組。按 Profile 的 bootstrap 字段和 skills 字段，從 `.oryxos/` 讀取 AGENTS.md、SOUL.md、USER.md（Bootstrap）和 `.oryxos/skills/` 下引用的 SKILL.md（Skill），拼接成 system prompt 的上下文部分，提供給 PromptBuilder。每次組裝 prompt 時重新加載不緩存，使用者修改後立即生效。把 SKILL.md 歸到這裡而不是 Tool 模組，是因為它是 prompt 的輸入、不是可執行的 Tool。
+ContextLoader 模組。按 Profile 的 bootstrap 字段和 skills 字段，從 `.oryxos/` 讀取 AGENTS.md、SOUL.md、USER.md（Bootstrap）和 `.oryxos/skills/` 下引用的 SKILL.md（Skill），拼接成 system prompt 的上下文部分，提供給 PromptBuilder。每次組裝 prompt 時重新加載不緩存，使用者修改後立即生效。
+
+**拼接順序與覆蓋語義（ADR-0003）**。按「最穩定普遍 → 最具體當下」排列，衝突時後者勝出：
+
+1. `SOUL.md` **或** Profile 的 `identity.prompt`（人格）
+2. `AGENTS.md`（專案約定）
+3. `USER.md`（使用者偏好）
+4. `SKILL.md`（當前任務）
+
+Profile 的 `identity.prompt` 與 `SOUL.md` **互斥、前者優先**。此語義須以表格驅動測試固定，至少斷言三條：`USER.md` 與 `SOUL.md` 衝突時 `USER.md` 勝；`identity.prompt` 存在時 `SOUL.md` 完全不進 prompt；四層皆存在時的拼接順序。把 SKILL.md 歸到這裡而不是 Tool 模組，是因為它是 prompt 的輸入、不是可執行的 Tool。
 
 ### 8.4 Channel 接入
 
@@ -391,13 +402,13 @@ Channel 是 Agent 對外的訊息接入入口，主要解決"訊息進來、回�
 
 CliChannel 模組。`oryxos chat` 命令的實現，讀 stdin 寫 stdout 實現互動式對話，維護當前 Session，每次輸入調 AgentService.process，支援 `/quit` 退出。擴展階段補 Slack、Telegram、Discord 等 IM Channel，每個通過 Channel Adapter 插件機制擴展，所有 IM Channel 底層都調 Web Service 的 Agent 介面，不重複實現 Agent 邏輯。
 
-### 8.5 三種運行模式
+### 8.5 兩種運行模式
 
-`oryxos chat`（互動對話）、`oryxos server`（啟動 Web Service）、`oryxos gateway`（守護進程同時掛多個 Channel）。三種模式共享同一份 Profile 配置和 Session 儲存，差異只是接入層。
+`oryxos chat`（互動對話）、`oryxos server`（啟動 Web Service）。兩種模式共享同一份 Profile 配置和 Session 儲存，差異只是接入層。`oryxos gateway`（守護進程同時掛多個 Channel）屬擴展階段（ADR-0004）。
 
 ### 8.6 命令行工具
 
-OryxOsCli 模組。cobra 命令行入口，整個 OryxOS 的 main 函數（位於 `cmd/oryxos`），註冊 12 個子命令：init、status、chat、server、gateway、profile list/create/show/delete、provider list、tool list、session list。每個子命令對應一個 cobra `Command`。Go 單一二進制啟動本就在 ~10ms 量級，所有命令都無啟動負擔。
+OryxOsCli 模組。cobra 命令行入口，整個 OryxOS 的 main 函數（位於 `cmd/oryxos`），註冊 11 個子命令：init、status、chat、server、profile list/create/show/delete、provider list、tool list、session list。每個子命令對應一個 cobra `Command`。Go 單一二進制啟動本就在 ~10ms 量級，所有命令都無啟動負擔。
 
 ### 8.7 配置與密鑰加載
 
@@ -435,7 +446,7 @@ OryxOsCli 模組。cobra 命令行入口，整個 OryxOS 的 main 函數（位�
 - `tool_invocations`：每次 Tool 呼叫記錄。
 - `llm_calls`：每次 LLM 呼叫記錄。
 
-相對原方案的一個調整：`tool_invocations` 和 `llm_calls` 在核心階段就做寫入（不一定做查詢介面），因為"可審計"是 OryxOS 的差異化賣點之一，審計資料的地基應該 day one 就立起來，純靠日誌後期要做審計還得反解析返工。查詢介面和審計報表放擴展階段，但寫入核心階段就有。
+`tool_invocations` 和 `llm_calls` 在核心階段就做寫入（不一定做查詢介面）。「可審計」是 OryxOS 的差異化賣點之一，資料地基應該 day one 就立起來——純靠日誌後期要做審計還得反解析返工。查詢介面和審計報表放擴展階段，但寫入核心階段就有。
 
 Session 實體字段：
 
@@ -467,7 +478,7 @@ oryxos/
     core/                # ReActLoop、PromptBuilder、ToolExecutor、ContextLoader、
                          #   Session、Profile、OryxTool 介面（所有 package 都依賴它）
     provider/            # ProviderService、OpenAI 兼容 adapter、provider name 顯式註冊
-    memory/              # MemoryService 三層門面、LongTermMemory、MemoryTools
+    memory/              # MemoryService 統一門面、LongTermMemory、MemoryTools
     tool/                # 內建 Tool（File/Shell/Http）、MCP Client、ToolRegistry、SandboxChecker
     web/                 # HTTP server（net/http 加 chi）、六組 handler、錯誤處理、OpenAPI
     channel/cli/         # CLI Channel
@@ -482,13 +493,13 @@ oryxos/
 | --- | --- | --- |
 | `internal/core` | 核心引擎 | ReActLoop、PromptBuilder、ToolExecutor、ContextLoader、Session、Profile、OryxTool 等抽象。所有 package 都依賴它 |
 | `internal/provider` | 能力一 | ProviderService、OpenAI 兼容 adapter、provider name 顯式註冊 |
-| `internal/memory` | 能力三 | MemoryService（三層統一門面）、LongTermMemory、MemoryTools |
+| `internal/memory` | 能力三 | MemoryService（統一門面）、LongTermMemory、MemoryTools |
 | `internal/tool` | 能力四 | 內建 Tool（File/Shell/Http）、MCP Client、ToolRegistry、SandboxChecker（三合一） |
 | `internal/web` | 能力五 | HTTP server（net/http 加 chi）、六組 handler、錯誤處理、OpenAPI 文檔 |
 | `internal/channel/cli` | 支撐 | CLI Channel 實現 |
 | `internal/storage` | 支撐 | SQLite（modernc）儲存層，含 sessions、tool_invocations、llm_calls 三張表 |
 | `internal/config` | 支撐 | ConfigLoader 配置與密鑰加載 |
-| `cmd/oryxos` | 支撐 | main 函數加 cobra 命令樹（12 個子命令），`go build` 直接編成單一二進制 |
+| `cmd/oryxos` | 支撐 | main 函數加 cobra 命令樹（11 個子命令），`go build` 直接編成單一二進制 |
 
 映射與變化：
 
@@ -526,7 +537,7 @@ oryxos/
 
 ## 12. 實施節奏（4 週）
 
-實施按需求文檔第 11 章的 4 週節奏組織，每週 3 小時，合計 12 小時。每週對應一組核心能力，每週末有可演示成果。
+實施按需求文檔第 11 章的 4 週節奏組織，每週約 3 小時。**這是節奏參考，不是驗收條件**（ADR-0004）。每週對應一組核心能力，每週末有可演示成果。
 
 ### 第一週（3 小時）：核心能力一加二（對接 LLM 加 ReAct 循環）
 
@@ -539,7 +550,7 @@ oryxos/
 
 ### 第二週（3 小時）：核心能力三加四（Memory 加 Tool）
 
-- MemoryService 三層門面加 LongTermMemory（MEMORY.md 讀寫）、save_memory 加 recall_memory
+- MemoryService 統一門面加 LongTermMemory（MEMORY.md 讀寫）、save_memory 加 recall_memory
 - PromptBuilder 加 Memory 注入
 - 檔案 Tool 加 Shell Tool（帶白名單）、McpClientService（連接外部 MCP server）
 - ContextLoader 加載 SKILL.md
@@ -557,7 +568,7 @@ oryxos/
 
 - 多 Agent 演示（兩個不同 Profile 的 Agent 在同一實例並存）
 - Session 持久化到 SQLite（含 tool_invocations、llm_calls 寫入）
-- ContextLoader 的 Bootstrap 加載、cobra 12 個命令完整、結構化日誌
+- ContextLoader 的 Bootstrap 加載（載入順序見 ADR-0003）、cobra 11 個命令完整、結構化日誌
 - 專案主頁（VitePress 或類似）
 
 可演示：多 Agent 並存可用，CLI 體驗流暢，Bootstrap 影響 Agent 行為，Session 跨重啟恢復，主頁可訪問。
