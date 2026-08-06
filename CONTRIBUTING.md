@@ -11,15 +11,15 @@
 
 ## 專案現況
 
-OryxOS 目前處於**文檔級規劃期**，repo 尚無 Go 程式碼（`go.mod`、`cmd/`、`internal/`、`Makefile` 皆未建立）。
+OryxOS 目前處於 **pre-alpha 實作初期**：Go module 骨架（`go.mod`、`cmd/oryxos`、8 個 `internal/` package、`Makefile`）已落地，核心功能依 spec（issue #1）的 tickets 逐張實作中。
 
-這代表現階段最有價值的貢獻是**文檔與設計討論**：
+現階段最有價值的貢獻仍是**文檔與設計討論**：
 
 - 對 [`docs/`](./docs/) 下規劃文檔的修正、補充或質疑
 - 對 [`docs/adr/`](./docs/adr/) 的架構決策提出替代方案（附理由與取捨分析）
 - 指出文檔之間的不一致，或 [`CONTEXT.md`](./CONTEXT.md) 術語與文檔用詞的落差
 
-程式碼相關的流程（下方「開發流程」與「程式碼準則」）在建置系統落地後才會生效，先列於此作為預期規則。
+建置系統已落地（`make test`／`make build`），下方「開發流程」與「程式碼準則」自此生效。核心功能 tickets 由專案方依 spec 推進，社區程式碼貢獻的主場在核心階段完成後的增量階段（見 `docs/AIProgrammingGuide.md` §4）。
 
 ---
 

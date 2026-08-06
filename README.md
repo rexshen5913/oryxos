@@ -10,15 +10,15 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/status-pre--alpha%20(文檔規劃期)-orange" alt="status">
+  <img src="https://img.shields.io/badge/status-pre--alpha%20(實作啟動)-orange" alt="status">
   <img src="https://img.shields.io/badge/Go-%3E%3D%201.24-00ADD8?logo=go" alt="Go >= 1.24">
   <img src="https://img.shields.io/badge/build-CGO__ENABLED%3D0%20單一靜態二進制-informational" alt="build">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="license: MIT"></a>
 </p>
 
 > [!WARNING]
-> **專案現況：文檔級規劃期，尚無 Go 程式碼。**
-> 目前 repo 只有規劃文檔（`docs/`）、專案憲法（`constitution.md`）、術語表（`CONTEXT.md`）與架構決策紀錄（`docs/adr/`）；`internal/`、`cmd/`、`Makefile`、`go.mod` 皆**尚未建立**。本 README 中的目錄結構、指令與功能屬**目標狀態**，會隨實作推進逐步落地。
+> **專案現況：pre-alpha，Go module 骨架已落地。**
+> Go 工程骨架（`go.mod`、`cmd/oryxos`、8 個 `internal/` package、`Makefile`）已就位，目前可用 `make test` 與 `make build`；核心功能依 spec（issue #1）的 tickets 逐張實作中。本 README 中的目錄結構、指令與功能仍有部分屬**目標狀態**，會隨 tickets 推進逐步落地。
 
 ---
 
@@ -151,7 +151,7 @@ CGO_ENABLED=0 go build -o oryxos ./cmd/oryxos
 
 ## 🤝 參與貢獻
 
-歡迎參與！專案目前處於文檔規劃期，**最有價值的貢獻是對 `docs/` 規劃文檔的修正、質疑與架構討論**。
+歡迎參與！專案目前處於 pre-alpha 實作初期，**最有價值的貢獻仍是對 `docs/` 規劃文檔的修正、質疑與架構討論**；核心功能 tickets 由專案方依 spec 逐張推進。
 
 - **開始之前**：請先讀 [`CONTRIBUTING.md`](./CONTRIBUTING.md) 與 [`constitution.md`](./constitution.md)
 - **回報 Bug／提功能建議**：使用 [Issue 範本](https://github.com/rexshen5913/oryxos/issues/new/choose)

@@ -9,7 +9,7 @@ body:
 
         ⚠️ **安全漏洞請勿在此回報**，改用 [私密漏洞回報](https://github.com/rexshen5913/oryxos/security/advisories/new)。
 
-        ℹ️ 本專案目前處於文檔規劃期，尚無 Go 程式碼。若你要回報的是**文檔錯誤或不一致**，同樣歡迎使用本範本。
+        ℹ️ 本專案目前處於 pre-alpha：Go 骨架已落地，核心功能仍在逐張 ticket 實作中。回報**文檔錯誤或不一致**同樣歡迎使用本範本。
 
   - type: textarea
     id: what-happened
