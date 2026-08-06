@@ -35,7 +35,7 @@ OryxOS 目前處於 **pre-alpha 實作初期**：Go module 骨架（`go.mod`、`
 
 ## 開發流程
 
-> 以下指令待建置系統落地後生效。
+> 以下指令目前皆可使用；`oryxos` 的功能命令（`init`、`chat` 等）會隨 tickets 逐步補齊。
 
 ```bash
 # 前置需求：Go >= 1.24
