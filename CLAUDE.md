@@ -8,17 +8,17 @@
 
 ## 0. 專案現況
 
-**文檔級規劃期。** repo 尚無 Go 程式碼（無 `go.mod`、`cmd/`、`internal/`、`Makefile`）。本檔 §1 的 `make *` 與 §2 的 package scope 屬**目標狀態**，待對應程式碼落地後生效。
+**實作啟動。** Go module 骨架已落地（`go.mod`、`cmd/oryxos`、8 個 `internal/` package、`Makefile`；ticket #2）。核心功能依 spec #1（issue #1）的 tickets #3～#6 逐張落地中，§2 的 package scope 自此生效。
 
 ---
 
 ## 1. 技術棧與環境
 
 - **語言**：Go >= 1.24
-- **建置與測試**（`Makefile` 尚未建立）：
+- **建置與測試**：
   - 執行所有測試：`make test`
-  - 建置 Web 服務：`make web`
-  - 建置二進制：`CGO_ENABLED=0 go build -o oryxos ./cmd/oryxos`
+  - 建置二進制：`make build`（`CGO_ENABLED=0 go build -o oryxos ./cmd/oryxos`）
+  - Web 服務（`make web`／`oryxos server`）尚未實作，屬後續 ticket，落地時再補對應 target
 
 ---
 
