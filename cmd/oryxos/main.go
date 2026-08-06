@@ -8,16 +8,18 @@ import (
 )
 
 func newRootCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "oryxos",
 		Short: "OryxOS — 用 Go 實作的企業級 Agent OS",
 		Long: "OryxOS 是面向企業場景的 Agent OS：以 Profile 配置 Agent，\n" +
 			"透過 CLI 與其對話，Agent 經 ReAct 循環呼叫 LLM 與 Tool 完成任務。",
-		// 尚無子命令；裸跑與 --help 都顯示幫助（無 Run 時 cobra 會省略 Usage 區塊）。
+		// 裸跑與 --help 都顯示幫助（無 Run 時 cobra 會省略 Usage 區塊）。
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
 	}
+	cmd.AddCommand(newInitCmd())
+	return cmd
 }
 
 func main() {
