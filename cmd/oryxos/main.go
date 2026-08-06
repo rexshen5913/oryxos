@@ -2,7 +2,10 @@
 package main
 
 import (
+	"context"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 )
@@ -19,12 +22,17 @@ func newRootCmd() *cobra.Command {
 		},
 	}
 	cmd.AddCommand(newInitCmd())
+	cmd.AddCommand(newChatCmd())
 	return cmd
 }
 
 func main() {
+	// Ctrl+C／SIGTERM 取消 context，讓阻塞路徑（如進行中的 LLM 呼叫）可中斷（憲法 5.3）。
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// cobra 已將錯誤輸出到 stderr，這裡只負責非零退出碼。
-	if err := newRootCmd().Execute(); err != nil {
+	if err := newRootCmd().ExecuteContext(ctx); err != nil {
 		os.Exit(1)
 	}
 }

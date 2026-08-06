@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-cli-2",
+  "object": "chat.completion",
+  "created": 1722925211,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "回應二：我記得你剛才說的話。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 48,
+    "completion_tokens": 10,
+    "total_tokens": 58
+  }
+}

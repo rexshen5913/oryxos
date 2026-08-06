@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-cli-1",
+  "object": "chat.completion",
+  "created": 1722925210,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "回應一：你好，我是 Oryx。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 20,
+    "completion_tokens": 9,
+    "total_tokens": 29
+  }
+}

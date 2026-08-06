@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-fixture-tool-call",
+  "object": "chat.completion",
+  "created": 1722925203,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+              "name": "http_get",
+              "arguments": "{\"url\":\"https://api.example.com/weather?city=beijing\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 40,
+    "completion_tokens": 20,
+    "total_tokens": 60
+  }
+}

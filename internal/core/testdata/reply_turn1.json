@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-turn1",
+  "object": "chat.completion",
+  "created": 1722925201,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "好的，已記下：你的專案用 Go 開發。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 30,
+    "completion_tokens": 12,
+    "total_tokens": 42
+  }
+}
