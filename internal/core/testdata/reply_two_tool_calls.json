@@ -1,0 +1,39 @@
+{
+  "id": "chatcmpl-fixture-two-calls",
+  "object": "chat.completion",
+  "created": 1722925303,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_a",
+            "type": "function",
+            "function": {
+              "name": "http_get",
+              "arguments": "{\"url\":\"{{TARGET_URL}}/first\"}"
+            }
+          },
+          {
+            "id": "call_b",
+            "type": "function",
+            "function": {
+              "name": "http_get",
+              "arguments": "{\"url\":\"{{TARGET_URL}}/second\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 130,
+    "completion_tokens": 40,
+    "total_tokens": 170
+  }
+}

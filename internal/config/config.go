@@ -21,7 +21,7 @@ type ProviderConfig struct {
 	BaseURL string `yaml:"base_url"`
 }
 
-// HTTPConfig 是 HTTP Tool 的域名白名單（SandboxChecker 於後續 ticket 使用）。
+// HTTPConfig 是 HTTP Tool 的域名白名單，SandboxChecker 據此做執行前校驗。
 type HTTPConfig struct {
 	AllowedDomains []string `yaml:"allowed_domains"`
 }

@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-tool-error",
+  "object": "chat.completion",
+  "created": 1722925302,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "抱歉，我無法存取該天氣服務：目標域名不在允許清單內。請把該域名加入 http.allowed_domains 後再試。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 150,
+    "completion_tokens": 35,
+    "total_tokens": 185
+  }
+}

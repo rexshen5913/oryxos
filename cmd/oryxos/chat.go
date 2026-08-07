@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/spf13/cobra"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/rexshen5913/oryxos/internal/config"
 	"github.com/rexshen5913/oryxos/internal/core"
 	"github.com/rexshen5913/oryxos/internal/provider"
+	"github.com/rexshen5913/oryxos/internal/tool"
 )
 
 func newChatCmd() *cobra.Command {
@@ -84,7 +86,26 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir, profileN
 	for name, pc := range cfg.Providers {
 		providerConfigs[name] = provider.Config{APIKey: pc.APIKey, BaseURL: pc.BaseURL}
 	}
-	agent := core.NewAgentService(prof, provider.NewService(providerConfigs, logger))
+
+	// 內建 Tool 顯式註冊（憲法 2.3）；Profile 的 tools 欄位過濾可用子集，
+	// 引用未註冊的 Tool 在啟動即報清晰錯誤。
+	checker := tool.NewSandboxChecker(cfg.HTTP.AllowedDomains)
+	registry := tool.NewRegistry()
+	if err := tool.RegisterBuiltins(registry, checker); err != nil {
+		return fmt.Errorf("組裝 Tool registry: %w", err)
+	}
+	executor, err := registry.Subset(prof.Tools, logger)
+	if err != nil {
+		return fmt.Errorf("Profile %s 的 tools 校驗失敗: %w", prof.Name, err)
+	}
+	// 啟動即清晰告知（需求 5.12 基礎校驗）：空白名單是安全的預設（全拒），
+	// 但 Profile 列了 HTTP Tool 時，每次呼叫都會在執行期被攔截——先提醒，
+	// 不硬報錯（純對話不受影響）。
+	if len(cfg.HTTP.AllowedDomains) == 0 && (slices.Contains(prof.Tools, "http_get") || slices.Contains(prof.Tools, "http_post")) {
+		fmt.Fprintf(out, "提醒：%s/config.yaml 的 http.allowed_domains 為空，HTTP Tool 呼叫將全部被攔截；請把允許的域名加入白名單。\n", workspaceDir)
+	}
+
+	agent := core.NewAgentService(prof, provider.NewService(providerConfigs, logger), executor)
 	ch := cli.New(agent, prof.Name, prof.Identity.AgentName, in, out)
 
 	if message != "" {

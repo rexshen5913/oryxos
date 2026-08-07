@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-weather-2",
+  "object": "chat.completion",
+  "created": 1722925301,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "北京目前 5°C、晴。建議穿厚外套或風衣，早晚溫差大，可再加一條圍巾。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 180,
+    "completion_tokens": 40,
+    "total_tokens": 220
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-fixture-weather-1",
+  "object": "chat.completion",
+  "created": 1722925300,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_weather_1",
+            "type": "function",
+            "function": {
+              "name": "http_get",
+              "arguments": "{\"url\":\"{{TARGET_URL}}/weather?city=beijing\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 120,
+    "completion_tokens": 22,
+    "total_tokens": 142
+  }
+}

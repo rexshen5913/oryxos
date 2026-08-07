@@ -111,9 +111,10 @@ func (c *Channel) RunInteractive(ctx context.Context) error {
 				fmt.Fprintln(c.out, interruptedMsg)
 				return nil
 			}
-			// 失敗 turn 已由 AgentService rollback，重試安全；暫時性故障
-			// 不終結整場對話（記憶體版 Session 一斷就沒了）。
-			fmt.Fprintf(c.out, "錯誤：%v（本輪已回退，可直接重試，或輸入 /quit 離開）\n", err)
+			// 失敗 turn 已由 AgentService rollback，暫時性故障不終結整場
+			// 對話（記憶體版 Session 一斷就沒了）。本輪若執行過 Tool，
+			// 副作用註記由 Process 的錯誤訊息承載，這裡不重複判斷。
+			fmt.Fprintf(c.out, "錯誤：%v（本輪對話已回退，可重試或輸入 /quit 離開）\n", err)
 			continue
 		}
 		fmt.Fprintf(c.out, "%s> %s\n", c.agentName, resp)

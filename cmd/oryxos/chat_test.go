@@ -184,6 +184,41 @@ func TestChatInteractiveTransientError(t *testing.T) {
 	}
 }
 
+// TestChatEmptyWhitelistWarning 驗證啟動即清晰告知（spec 需求 5.12 基礎校驗）：
+// Profile 列了 HTTP Tool 但 http.allowed_domains 為空時，out-of-box 的每次
+// Tool 呼叫都會被攔截——啟動時警示而非留到執行期才發現；已配置白名單則不警示。
+func TestChatEmptyWhitelistWarning(t *testing.T) {
+	tests := []struct {
+		name           string
+		allowedDomains string // config.yaml 的 allowed_domains YAML 片段
+		wantWarn       bool
+	}{
+		{name: "空白名單且 Profile 列 HTTP Tool 時警示", allowedDomains: "[]", wantWarn: true},
+		{name: "已配置白名單不警示", allowedDomains: "[api.example.com]", wantWarn: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newReplayServer(t, readFixture(t, "chat_reply_1.json"))
+			dir := setupChatWorkspace(t, srv.URL)
+			cfg := "providers:\n  openai:\n    api_key: ${OPENAI_API_KEY}\n    base_url: " + srv.URL +
+				"\nhttp:\n  allowed_domains: " + tt.allowedDomains + "\n"
+			if err := os.WriteFile(filepath.Join(dir, workspaceDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := runChat(context.Background(), strings.NewReader(""), &out, dir, "default", "你好"); err != nil {
+				t.Fatalf("runChat: %v", err)
+			}
+			warned := strings.Contains(out.String(), "allowed_domains")
+			if warned != tt.wantWarn {
+				t.Errorf("警示出現 = %v, 期望 %v; 輸出: %q", warned, tt.wantWarn, out.String())
+			}
+		})
+	}
+}
+
 // TestChatProfileFlag 驗證 --profile 指定非預設 Profile 時載入對應 YAML。
 func TestChatProfileFlag(t *testing.T) {
 	srv := newReplayServer(t, readFixture(t, "chat_reply_1.json"))
@@ -231,6 +266,18 @@ func TestChatErrors(t *testing.T) {
 				return dir, "default"
 			},
 			wantSub: "OPENAI_API_KEY",
+		},
+		{
+			name: "Profile 引用未註冊的 Tool",
+			setup: func(t *testing.T) (string, string) {
+				dir := setupChatWorkspace(t, "http://127.0.0.1:1")
+				p := "name: default\nprovider:\n  name: openai\n  model: m\ntools:\n  - no_such_tool\n"
+				if err := os.WriteFile(filepath.Join(dir, workspaceDir, "profiles", "default.yaml"), []byte(p), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return dir, "default"
+			},
+			wantSub: "no_such_tool",
 		},
 		{
 			name: "Profile 引用的 Provider 未在設定檔配置",

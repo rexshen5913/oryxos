@@ -8,6 +8,7 @@ type ChatRequest struct {
 	Model       string
 	Temperature float32
 	Messages    []Message
+	Tools       []ToolDefinition // 可用 Tool 列表，按 Function Calling 格式附進請求
 }
 
 // ChatResponse 是一次 LLM 呼叫的輸出；ToolCalls 非空表示 LLM 要求呼叫 Tool。

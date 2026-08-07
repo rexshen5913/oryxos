@@ -16,6 +16,7 @@ import (
 
 	"github.com/rexshen5913/oryxos/internal/core"
 	"github.com/rexshen5913/oryxos/internal/provider"
+	"github.com/rexshen5913/oryxos/internal/tool"
 )
 
 // testProfile 回傳指向 provider name "openai" 的最簡 Profile。
@@ -57,13 +58,23 @@ func readFixture(t *testing.T, name string) string {
 	return string(data)
 }
 
-// newAgent 以指向 baseURL 的真實 ProviderService 組出 AgentService。
+// newAgent 以指向 baseURL 的真實 ProviderService 組出無 Tool 的 AgentService。
 func newAgent(t *testing.T, baseURL string, logger *slog.Logger) *core.AgentService {
 	t.Helper()
 	svc := provider.NewService(map[string]provider.Config{
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, logger)
-	return core.NewAgentService(testProfile(), svc)
+	return core.NewAgentService(testProfile(), svc, noTools(t))
+}
+
+// noTools 回傳空的 Tool 子集（無 Tool 的 Agent）。
+func noTools(t *testing.T) core.ToolExecutor {
+	t.Helper()
+	exec, err := tool.NewRegistry().Subset(nil, discardLogger())
+	if err != nil {
+		t.Fatalf("Subset: %v", err)
+	}
+	return exec
 }
 
 func discardLogger() *slog.Logger {

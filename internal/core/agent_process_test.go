@@ -58,7 +58,7 @@ func TestProcessErrors(t *testing.T) {
 			name: "Profile 引用的 Provider 未註冊",
 			setup: func(t *testing.T) (*core.AgentService, context.Context) {
 				svc := provider.NewService(map[string]provider.Config{}, discardLogger())
-				return core.NewAgentService(testProfile(), svc), context.Background()
+				return core.NewAgentService(testProfile(), svc, noTools(t)), context.Background()
 			},
 			wantSub: `Provider "openai" 未註冊`,
 		},
@@ -96,14 +96,6 @@ func TestProcessErrors(t *testing.T) {
 				return newAgent(t, srv.URL, discardLogger()), ctx
 			},
 			wantIs: context.DeadlineExceeded,
-		},
-		{
-			name: "LLM 要求呼叫 Tool（本 ticket 尚未支援）",
-			setup: func(t *testing.T) (*core.AgentService, context.Context) {
-				srv := newReplayServer(t, readFixture(t, "reply_tool_call.json"))
-				return newAgent(t, srv.URL, discardLogger()), context.Background()
-			},
-			wantSub: "Tool 執行尚未實作",
 		},
 	}
 
@@ -152,6 +144,8 @@ func TestProcessRetryAfterFailure(t *testing.T) {
 
 	if _, err := agent.Process(ctx, session, "你好"); err == nil {
 		t.Fatal("第一次呼叫期望 Provider 錯誤，實際成功")
+	} else if strings.Contains(err.Error(), "外部效果") {
+		t.Errorf("未執行過 Tool 的失敗 turn 不應帶副作用註記: %q", err.Error())
 	}
 	resp, err := agent.Process(ctx, session, "你好")
 	if err != nil {
@@ -166,6 +160,28 @@ func TestProcessRetryAfterFailure(t *testing.T) {
 		{Role: core.RoleUser, Content: "你好"},
 		{Role: core.RoleAssistant, Content: want},
 	})
+}
+
+// TestProcessZeroMaxIterationsUsesDefault 驗證迭代上限預設在讀取點成立：
+// 手組（未經 LoadProfile）的 Profile 帶零值時，循環以預設 10 跑而非零輪終止。
+func TestProcessZeroMaxIterationsUsesDefault(t *testing.T) {
+	srv := newReplayServer(t, readFixture(t, "reply_direct.json"))
+	p := testProfile()
+	p.Settings = core.Settings{} // 零值：未套 LoadProfile 預設
+	svc := provider.NewService(map[string]provider.Config{
+		"openai": {APIKey: "test-key", BaseURL: srv.URL},
+	}, discardLogger())
+	agent := core.NewAgentService(p, svc, noTools(t))
+	session := core.NewSession("cli", "local", "default")
+
+	resp, err := agent.Process(context.Background(), session, "你好")
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	const want = "你好！我是 Oryx，很高興為你服務。"
+	if resp != want {
+		t.Errorf("回應 = %q, 期望 %q", resp, want)
+	}
 }
 
 func TestProcessLogsLLMCall(t *testing.T) {

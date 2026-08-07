@@ -57,6 +57,7 @@ func (s *Service) Chat(ctx context.Context, req core.ChatRequest) (core.ChatResp
 		Model:       req.Model,
 		Temperature: req.Temperature,
 		Messages:    toOpenAIMessages(req.Messages),
+		Tools:       toOpenAITools(req.Tools),
 	})
 	latency := time.Since(start)
 	if err != nil {
@@ -84,14 +85,46 @@ func (s *Service) Chat(ctx context.Context, req core.ChatRequest) (core.ChatResp
 	return fromOpenAIMessage(resp.Choices[0].Message), nil
 }
 
-// toOpenAIMessages 把 Session 訊息轉成 OpenAI 兼容協議格式。tool 訊息與
-// assistant 的 tool_calls 轉換隨 Tool 執行於後續 ticket 補上。
+// toOpenAIMessages 把 Session 訊息轉成 OpenAI 兼容協議格式：assistant 訊息帶
+// tool_calls、tool 訊息帶 tool_call_id，原樣搬運不加語義（憲法 2.2）。
 func toOpenAIMessages(msgs []core.Message) []openai.ChatCompletionMessage {
 	out := make([]openai.ChatCompletionMessage, 0, len(msgs))
 	for _, m := range msgs {
-		out = append(out, openai.ChatCompletionMessage{
-			Role:    string(m.Role),
-			Content: m.Content,
+		om := openai.ChatCompletionMessage{
+			Role:       string(m.Role),
+			Content:    m.Content,
+			ToolCallID: m.ToolCallID,
+		}
+		for _, tc := range m.ToolCalls {
+			om.ToolCalls = append(om.ToolCalls, openai.ToolCall{
+				ID:   tc.ID,
+				Type: openai.ToolTypeFunction,
+				Function: openai.FunctionCall{
+					Name:      tc.Name,
+					Arguments: tc.Arguments,
+				},
+			})
+		}
+		out = append(out, om)
+	}
+	return out
+}
+
+// toOpenAITools 把 Tool 宣告轉成 Function Calling 格式；tool schema 的組裝
+// 交給 go-openai（憲法 2.2），InputSchema 原樣作為 parameters。
+func toOpenAITools(defs []core.ToolDefinition) []openai.Tool {
+	if len(defs) == 0 {
+		return nil
+	}
+	out := make([]openai.Tool, 0, len(defs))
+	for _, d := range defs {
+		out = append(out, openai.Tool{
+			Type: openai.ToolTypeFunction,
+			Function: &openai.FunctionDefinition{
+				Name:        d.Name,
+				Description: d.Description,
+				Parameters:  d.InputSchema,
+			},
 		})
 	}
 	return out

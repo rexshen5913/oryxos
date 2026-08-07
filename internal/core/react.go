@@ -9,34 +9,54 @@ import (
 // 最終回應，直到終止或達最大迭代次數。自行實作、完全可控（憲法 2.1）。
 type ReActLoop struct {
 	provider ProviderService
+	tools    ToolExecutor
 }
 
-// NewReActLoop 以 provider 建立 ReAct 循環。
-func NewReActLoop(provider ProviderService) *ReActLoop {
-	return &ReActLoop{provider: provider}
+// NewReActLoop 以 provider 與 Tool 子集建立 ReAct 循環；tools 不得為 nil。
+func NewReActLoop(provider ProviderService, tools ToolExecutor) *ReActLoop {
+	return &ReActLoop{provider: provider, tools: tools}
 }
 
-// Run 對 session 的當前對話歷史跑 ReAct 循環，回傳 Agent 的最終回應，
-// LLM 回應追加到 session 對話歷史（完整可查）。本張 ticket 只落地「無 Tool
-// 呼叫直接回應」分支，一輪 LLM 呼叫即終止；Tool 結果回填的多輪迭代與
-// settings.max_iterations 上限屬後續 ticket（issue #5、#6），在其落地前對
-// Tool 呼叫明確報錯，不默默吞掉。
+// Run 對 session 的當前對話歷史跑 ReAct 循環，回傳 Agent 的最終回應。每輪把
+// LLM 回應與 Tool 結果追加到 session 對話歷史（完整可查）：LLM 沒有 Tool 呼叫
+// 即為最終回應；有則按宣告順序逐一執行（不並行），結果以 tool 訊息回填後進入
+// 下一輪。Tool 失敗（含 SandboxViolation）不是硬錯誤：錯誤作為 tool 結果回填
+// 給 LLM，由 LLM 決定下一步（可重試失敗的指數退避屬後續 ticket，issue #6）。
+// 達 settings.max_iterations 時明確報錯終止（強制終止的固定提示語回覆屬 #6）。
 func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session) (string, error) {
-	resp, err := l.provider.Chat(ctx, ChatRequest{
-		Provider:    profile.Provider.Name,
-		Model:       profile.Provider.Model,
-		Temperature: profile.Provider.Temperature,
-		Messages:    buildMessages(profile, session),
-	})
-	if err != nil {
-		return "", fmt.Errorf("呼叫 LLM: %w", err)
+	// 預設在讀取點成立：手組（未經 LoadProfile）的 Profile 帶零值時
+	// 不得零輪終止（spec：預設 10，Profile settings 可覆蓋）。
+	maxIterations := profile.Settings.MaxIterations
+	if maxIterations <= 0 {
+		maxIterations = defaultMaxIterations
 	}
-	session.Append(Message{Role: RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls})
+	defs := l.tools.Definitions()
+	for range maxIterations {
+		resp, err := l.provider.Chat(ctx, ChatRequest{
+			Provider:    profile.Provider.Name,
+			Model:       profile.Provider.Model,
+			Temperature: profile.Provider.Temperature,
+			Messages:    buildMessages(profile, session),
+			Tools:       defs,
+		})
+		if err != nil {
+			return "", fmt.Errorf("呼叫 LLM: %w", err)
+		}
+		session.Append(Message{Role: RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls})
+		if len(resp.ToolCalls) == 0 {
+			return resp.Content, nil
+		}
 
-	if len(resp.ToolCalls) > 0 {
-		return "", fmt.Errorf("LLM 要求呼叫 Tool %q，但 Tool 執行尚未實作（屬後續 ticket）", resp.ToolCalls[0].Name)
+		for _, call := range resp.ToolCalls {
+			result := l.tools.Execute(ctx, call)
+			content := result.Content
+			if !result.OK {
+				content = "Tool 執行失敗: " + result.Error
+			}
+			session.Append(Message{Role: RoleTool, Content: content, ToolCallID: call.ID})
+		}
 	}
-	return resp.Content, nil
+	return "", fmt.Errorf("達最大迭代次數 %d 仍未產生最終回應，循環強制終止", maxIterations)
 }
 
 // buildMessages 組裝一次 LLM 呼叫的訊息序列：system prompt 僅來自 Profile 的
