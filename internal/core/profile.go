@@ -42,6 +42,23 @@ const (
 	defaultMaxHistoryTurns = 20
 )
 
+// effectiveMaxIterations 回傳迭代上限，零值（含負值）回退預設。預設在讀取點
+// 也成立：手組（未經 LoadProfile）的 Profile 不得零輪終止。
+func (s Settings) effectiveMaxIterations() int {
+	if s.MaxIterations <= 0 {
+		return defaultMaxIterations
+	}
+	return s.MaxIterations
+}
+
+// effectiveMaxHistoryTurns 回傳截斷輪數上限，零值（含負值）回退預設。
+func (s Settings) effectiveMaxHistoryTurns() int {
+	if s.MaxHistoryTurns <= 0 {
+		return defaultMaxHistoryTurns
+	}
+	return s.MaxHistoryTurns
+}
+
 // LoadProfile 從 path 讀取並解析 Profile YAML，套用 Settings 預設值並做基礎校驗
 // （provider.name、provider.model 必填）。
 func LoadProfile(path string) (*Profile, error) {
@@ -62,11 +79,7 @@ func LoadProfile(path string) (*Profile, error) {
 		return nil, fmt.Errorf("Profile %s 校驗失敗: provider.model 必填", path)
 	}
 
-	if p.Settings.MaxIterations == 0 {
-		p.Settings.MaxIterations = defaultMaxIterations
-	}
-	if p.Settings.MaxHistoryTurns == 0 {
-		p.Settings.MaxHistoryTurns = defaultMaxHistoryTurns
-	}
+	p.Settings.MaxIterations = p.Settings.effectiveMaxIterations()
+	p.Settings.MaxHistoryTurns = p.Settings.effectiveMaxHistoryTurns()
 	return &p, nil
 }

@@ -14,8 +14,8 @@ type ToolDefinition struct {
 }
 
 // ToolResult 是一次 Tool 執行的結果：成功標識、結果內容、錯誤資訊、是否可重試。
-// Retryable 供失敗重試策略使用（指數退避重試屬後續 ticket，issue #6）；
-// 本張 ticket 失敗一律不重試，錯誤直接作為 tool 結果回填給 LLM。
+// Retryable 標示的失敗由 ReAct 循環按指數退避重試（最多三次，需求 8.2）；
+// 重試耗盡或不可重試時，錯誤作為 tool 結果回填給 LLM。
 type ToolResult struct {
 	OK        bool
 	Content   string // OK 時的結果內容

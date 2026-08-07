@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-fixture-multi-2",
+  "object": "chat.completion",
+  "created": 1722925401,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_m2",
+            "type": "function",
+            "function": {
+              "name": "http_get",
+              "arguments": "{\"url\":\"{{TARGET_URL}}/air?city=beijing\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 190,
+    "completion_tokens": 22,
+    "total_tokens": 212
+  }
+}

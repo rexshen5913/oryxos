@@ -280,27 +280,3 @@ func TestProcessErrorAfterToolNotesSideEffects(t *testing.T) {
 		t.Errorf("失敗 turn 後 Session 殘留 %d 條訊息", len(session.Messages))
 	}
 }
-
-// TestProcessMaxIterationsExceeded 驗證循環的迭代上限保護：LLM 持續要求呼叫
-// Tool 時，達 settings.max_iterations 後明確報錯終止（強制終止的固定提示語
-// 回覆屬後續 ticket，issue #6，落地時本測試隨之改寫）。
-func TestProcessMaxIterationsExceeded(t *testing.T) {
-	fixture := readFixture(t, "reply_tool_call.json")
-	srv := newReplayServer(t, fixture, fixture) // 每輪都回 tool 呼叫
-	p := testProfile()
-	p.Settings.MaxIterations = 2
-	agent := newToolAgent(t, srv.URL, p, []string{"http_get"}, nil)
-	session := core.NewSession("cli", "local", "default")
-
-	_, err := agent.Process(context.Background(), session, "查天氣")
-	if err == nil {
-		t.Fatal("達迭代上限應報錯, 實際成功")
-	}
-	if !strings.Contains(err.Error(), "最大迭代次數") {
-		t.Errorf("錯誤 %q 未含迭代上限說明", err.Error())
-	}
-	// 失敗 turn 以 turn 為單位 rollback（同其他錯誤路徑）。
-	if len(session.Messages) != 0 {
-		t.Errorf("失敗 turn 後 Session 殘留 %d 條訊息", len(session.Messages))
-	}
-}

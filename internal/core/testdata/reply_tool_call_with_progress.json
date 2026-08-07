@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-fixture-progress",
+  "object": "chat.completion",
+  "created": 1722925403,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "已取得北京天氣資料，接下來查詢空氣品質。",
+        "tool_calls": [
+          {
+            "id": "call_p1",
+            "type": "function",
+            "function": {
+              "name": "http_get",
+              "arguments": "{\"url\":\"https://api.example.com/air?city=beijing\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 150,
+    "completion_tokens": 35,
+    "total_tokens": 185
+  }
+}
