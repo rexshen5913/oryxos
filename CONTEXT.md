@@ -35,6 +35,14 @@ _Avoid_: agent 定義、配置檔
 Agent 的核心工作機制。LLM 思考是否呼叫 Tool、呼叫後看結果、再決定下一步，直到給出最終回應或達到最大迭代次數。OryxOS 自行實作此循環，不採用任何框架的自動執行 Agent 抽象。
 _Avoid_: agent loop、思考循環
 
+**turn（輪）**：
+一條使用者訊息啟動的一次 Agent 完整處理，從訊息進入到 Agent 給出最終回應為止。是失敗 rollback、對話歷史截斷（`max_history_turns`）與長期記憶載入的單位。
+_Avoid_: 回合、對話輪次
+
+**iteration（迭代）**：
+一個 turn 之內 ReAct 循環的一次 LLM 呼叫。一個 turn 含一到多個 iteration，上限由 `max_iterations` 控制。與 turn 是不同量級的概念，文檔與程式碼中不可互稱——說「每輪」一律指 turn。
+_Avoid_: 輪（「輪」專指 turn）
+
 **Provider**：
 LLM API 服務的抽象，讓 Agent 不感知具體呼叫的是哪一家。一個 Provider 有唯一的 provider name，Profile 透過該 name 引用。注意 Provider 是服務的抽象，不是模型本身。
 _Avoid_: 模型、廠商、LLM 客戶端

@@ -117,8 +117,8 @@ CLI Channel 用於本地互動和調試，Web Service 用於業務系統通過 R
 五大能力不是平行的功能模組，它們之間有明確的協作關係。
 
 - ReAct 循環（能力二）是引擎，負責把"使用者訊息到 LLM 思考到 Tool 執行到結果回填到繼續"這件事跑起來。
-- Provider（能力一）給 ReAct 循環提供 LLM 呼叫能力，每輪思考都要調一次。
-- Memory（能力三）給 ReAct 循環提供上下文，每輪組裝 prompt 時把會話歷史和長期記憶注入進去。
+- Provider（能力一）給 ReAct 循環提供 LLM 呼叫能力，每次迭代都要調一次。
+- Memory（能力三）給 ReAct 循環提供上下文：長期記憶在每個 turn 開始時載入一次、注入 system prompt；會話歷史則每次組裝 prompt 時從當前 Session 重新取，兩者更新頻率不同。
 - Tool（能力四）給 ReAct 循環提供執行能力，LLM 決定調哪個 Tool 後由 ReAct 循環負責執行。
 - Web Service（能力五）是這套內部能力的對外出口，把前四個能力包裝成 REST API 供業務系統集成，它不參與 Agent 內部循環，而是循環的觸發入口和結果出口之一（另一個入口是 CLI Channel）。
 
@@ -163,24 +163,27 @@ ReAct 循環是 OryxOS 最核心的一段程式碼。輸入一條使用者訊息
 ReAct 是 Reason 加 Act 的簡稱。算法步驟：
 
 1. 接到使用者訊息追加到 Session 對話歷史；
-2. 組裝 Prompt（system prompt 加 Bootstrap 加 Skill 加 Memory 加對話歷史加可用 Tool 列表）；
-3. 呼叫 LLM Provider 獲取回應；
-4. 如果回應沒有 Tool 呼叫，返回最終回應；
-5. 如果有 Tool 呼叫，OryxOS 執行 Tool 並把結果作為 tool 訊息追加到對話歷史；
-6. 回到組裝 Prompt 步驟繼續循環；
-7. 達到最大迭代次數（預設 10 次）強制結束。
+2. 載入本 turn 的長期記憶（整份 MEMORY.md，**每個 turn 只載入一次**，見 5.3）；
+3. 組裝 Prompt（system prompt 加 Bootstrap 加 Skill 加 Memory 加對話歷史加可用 Tool 列表）；
+4. 呼叫 LLM Provider 獲取回應；
+5. 如果回應沒有 Tool 呼叫，返回最終回應；
+6. 如果有 Tool 呼叫，OryxOS 執行 Tool 並把結果作為 tool 訊息追加到對話歷史；
+7. 回到組裝 Prompt 步驟（第 3 步，**不回到第 2 步**）繼續循環；
+8. 達到最大迭代次數（預設 10 次）強制結束。
+
+第 2 步刻意在循環之外：一個 turn 內 system prompt 保持固定，長期記憶不隨迭代變動。若 Agent 在同一 turn 內需要看到剛剛 `save_memory` 寫入的內容，走 `recall_memory`（直接讀檔，必然最新），不靠重新注入。術語見 `CONTEXT.md` 的 turn 與 iteration。
 
 ### 4.2 模組組成
 
 ReActLoop 模組。Agent 的核心循環引擎。輸入 Session 和使用者訊息，輸出最終回應。
 
-內部維護當前迭代次數，呼叫 ProviderService 調 LLM，呼叫 ToolExecutor 執行 Tool，把每輪的回應和工具結果累積到 Session 對話歷史。核心循環邏輯精簡，約數十行 Go，不依賴任何框架的 Agent 抽象，讓實現者完整掌握 Agent 的工作機制。
+內部維護當前迭代次數，呼叫 ProviderService 調 LLM，呼叫 ToolExecutor 執行 Tool，把每次迭代的回應和工具結果累積到 Session 對話歷史。核心循環邏輯精簡，約數十行 Go，不依賴任何框架的 Agent 抽象，讓實現者完整掌握 Agent 的工作機制。
 
-PromptBuilder 模組。組裝每輪 LLM 呼叫的 Prompt。按四部分順序拼接：
+PromptBuilder 模組。組裝每次 LLM 呼叫的 Prompt。按四部分順序拼接：
 
 - 第一部分 system prompt（人格加 Bootstrap 檔案加 Skill 檔案內容，統一由下面講的 ContextLoader 提供，內部拼接順序與覆蓋語義見 8.3 與 ADR-0003）；
-- 第二部分 Memory 注入（會話歷史加長期記憶，由 MemoryService 提供）；
-- 第三部分對話歷史（按 maxHistoryTurns 截斷後的 Session messages）；
+- 第二部分 Memory 注入（**只有長期記憶**，由 MemoryService 提供，並由呼叫端在 turn 開始時載入後傳入，PromptBuilder 本身不碰檔案，見 5.3）；
+- 第三部分對話歷史（按 maxHistoryTurns 截斷後的 Session messages，**每次組裝都從當前 Session 重新取**，含本 turn 內剛追加的 assistant 與 tool 訊息）；
 - 第四部分當前 Profile 可用的 Tool 列表（按 Function Calling 格式）。
 
 ToolExecutor 模組。執行 LLM 返回的 Tool 呼叫請求。從 ToolRegistry 找到對應 Tool，做 Sandbox 檢查，執行 Tool，把結果包裝成 ToolResult 返回給 ReAct 循環，並寫入 `tool_invocations` 表。失敗時按可重試策略返回錯誤資訊。
@@ -209,7 +212,9 @@ Memory 做成**統一門面**，對 ReAct 循環只暴露一個 MemoryService �
 
 MemoryService 模組（統一門面）。對 ReAct 循環暴露統一的記憶讀寫介面。內部把會話記憶委託給 SessionManager（底層是 SQLite 的 Session 儲存），把長期記憶委託給 LongTermMemory（底層是 MEMORY.md 檔案）。ReAct 循環組裝 prompt 時只調 MemoryService 一個介面拿到完整上下文，避免 Memory 概念橫跨兩個模組卻沒有統一入口。
 
-LongTermMemory 子模組。長期記憶的核心讀寫，底層操作 `.oryxos/memory/MEMORY.md` 一個 Markdown 檔案。對外提供四個方法：`append`（追加內容，自動加日期 header）、`load`（加載整個檔案，超閾值截斷）、`recallByKeyword`（按關鍵詞檢索返回匹配行）、`truncateIfNeeded`（超過 4000 字保留最近內容）。介面預留向量檢索升級空間：`recallByKeyword` 設計成可升級為 `recall`（帶 mode 參數支援 keyword 加 semantic），切換底層實現不影響上層。
+LongTermMemory 子模組。長期記憶的核心讀寫，底層操作 `.oryxos/memory/MEMORY.md` 一個 Markdown 檔案。對外提供四個方法：`append`（追加內容，自動加日期 header；單條超過 1000 rune 拒絕寫入並回可操作的錯誤）、`load`（加載整個檔案，超閾值截斷）、`recallByKeyword`（按關鍵詞檢索返回匹配行，回傳總量同樣有 4000 rune 上限）、`truncateIfNeeded`（超過 4000 字保留最近內容）。介面預留向量檢索升級空間：`recallByKeyword` 設計成可升級為 `recall`（帶 mode 參數支援 keyword 加 semantic），切換底層實現不影響上層。
+
+兩條進 LLM 的輸入路徑都要有上限：prompt 注入走 `load`、tool 結果回填走 `recallByKeyword`。單靠寫入側的單條上限不足以守住 `recallByKeyword`——MEMORY.md 是使用者可直接編輯、git 追蹤的純文字檔（見 9.3 檔案系統資料），手改或 spec #2 之前遺留的超長行繞得過寫入校驗。
 
 MemoryTools 子模組。把長期記憶暴露給 Agent 呼叫，包含 `save_memory` 和 `recall_memory` 兩個內建 Tool，實現 OryxTool 介面後顯式註冊到 ToolRegistry，跟其他內建 Tool 一視同仁。
 
@@ -221,7 +226,13 @@ MemoryTools 子模組。把長期記憶暴露給 Agent 呼叫，包含 `save_mem
 
 ### 5.3 Memory 注入到 system prompt
 
-ReAct 循環每次組裝 prompt 時，MemoryService 把會話歷史和整個 MEMORY.md 內容提供給 PromptBuilder。長期記憶每次重新讀不做緩存，這樣 Agent 呼叫 `save_memory` 後下一輪立刻能看到，每次讀一個小檔案性能可接受。擴展階段加 in-memory cache 加檔案 watch 自動失效。
+ReAct 循環在**每個 turn 開始時**（進入迭代迴圈之前）向 MemoryService 取一次**長期記憶快照**（整份 MEMORY.md 內容）傳給 PromptBuilder；同一 turn 內的後續迭代重用這份快照，不重讀檔案。
+
+**被快照的只有長期記憶，對話歷史絕不快照。** 每次 PromptBuilder 呼叫都要從**當前** Session messages 重新組裝對話歷史，必須含本 turn 內剛追加的 assistant 與 tool 訊息——否則第 2 次 LLM 呼叫看不到 4.1 第 6 步回填的 tool 結果，ReAct 循環直接壞掉。兩者更新頻率不同是刻意的：長期記憶是 turn 級的穩定前提（進 system prompt），對話歷史是 iteration 級的即時累積（進 messages 序列）。MemoryService 作為統一門面內部仍委託 SessionManager 管理 Session，但那不是 PromptBuilder「Memory 注入」這一部分的內容。
+
+長期記憶**每個 turn 重新讀、不做緩存**，這樣 Agent 呼叫 `save_memory` 後下一個 turn 立刻能看到，使用者手動編輯 MEMORY.md 也是下一個 turn 生效，讀一個小檔案性能可接受。擴展階段加 in-memory cache 加檔案 watch 自動失效。
+
+載入頻率取 turn 而非 iteration 有三個理由：一個 turn 內 system prompt 保持固定，LLM 在第二次迭代看到的前提與它第一次迭代決策時一致；prompt 組裝函式維持無檔案 I/O，好測；同一 turn 內剛寫入的內容 LLM 本來就在對話歷史裡看得到，重複注入是冗餘，真要精準取用有 `recall_memory`。次要好處是 system prompt 前綴在 turn 內穩定，對有前綴快取的 Provider 較友善——這是效能補充理由，不作為架構依據。
 
 ### 5.4 MEMORY.md 跟 USER.md 的區別
 
@@ -585,7 +596,7 @@ goroutine 撐高並發。每個 Agent 是記憶體裡的 Profile 對象加 Sessi
 
 1000 個並發 Session 記憶體可控。1000 個 Session 平均 50KB 共 50MB 沒問題。SQLite 寫入主要由 Session 追加訊息和審計表寫入觸發，核心階段每次都寫，壓測發現瓶頸再優化成批量落盤。
 
-Memory 檔案 IO。每次組裝 prompt 讀一次 MEMORY.md，檔案幾 KB 到幾十 KB 每次讀 1 到 2 ms，1000 並發可接受。擴展階段加 cache 加檔案 watch。
+Memory 檔案 IO。**每個 turn 讀一次 MEMORY.md**，同一 turn 內多次 PromptBuilder 呼叫重用該長期記憶快照（見 5.3），檔案幾 KB 到幾十 KB 每次讀 1 到 2 ms，1000 並發可接受。擴展階段加 cache 加檔案 watch。
 
 啟動時間。Go 單一靜態二進制啟動本就在 ~10ms 量級，對常駐服務和 CLI 工具都沒有啟動負擔，所有命令一律快速啟動，無需任何啟動優化 workaround。
 
