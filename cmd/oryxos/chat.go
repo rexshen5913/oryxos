@@ -24,16 +24,24 @@ import (
 // sessionDBFile 是 Workspace 內的 SQLite 資料庫檔名（技術方案 §9.2）。
 const sessionDBFile = "oryxos.db"
 
+// chatOptions 是 chat 命令的旗標集合。旗標多於兩個後改用具名欄位傳遞，
+// 免得呼叫端排出一串無從辨識的位置參數。
+type chatOptions struct {
+	profileName string
+	message     string
+	// newConversation 對應 --new：歸檔當前 active Session 再開一場新對話。
+	newConversation bool
+}
+
 func newChatCmd() *cobra.Command {
-	var (
-		profileName string
-		message     string
-	)
+	var opts chatOptions
 	cmd := &cobra.Command{
 		Use:   "chat",
 		Short: "與 Agent 進入多輪對話（CLI Channel）",
 		Long: "在已初始化的 Workspace 中與 Agent 對話。多輪對話共享同一個 Session，\n" +
-			"輸入 /quit 結束；--message 送出單條訊息、輸出回應後退出。",
+			"重新執行時自動恢復先前的 active Session、接著上次的話題繼續；\n" +
+			"輸入 /quit 結束。--message 送出單條訊息、輸出回應後退出；\n" +
+			"--new 歸檔當前 active Session 後開一場全新對話。",
 		Args: cobra.NoArgs,
 		// 執行期錯誤（未初始化、缺 API key、Provider 故障）與用法無關，
 		// 不倒 Usage 沖淡錯誤訊息。
@@ -43,17 +51,19 @@ func newChatCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("取得當前目錄: %w", err)
 			}
-			return runChat(cmd.Context(), cmd.InOrStdin(), cmd.OutOrStdout(), cwd, profileName, message)
+			return runChat(cmd.Context(), cmd.InOrStdin(), cmd.OutOrStdout(), cwd, opts)
 		},
 	}
-	cmd.Flags().StringVar(&profileName, "profile", "default", "使用的 Profile 名（.oryxos/profiles/<name>.yaml）")
-	cmd.Flags().StringVar(&message, "message", "", "送出單條訊息、輸出回應後退出")
+	cmd.Flags().StringVar(&opts.profileName, "profile", "default", "使用的 Profile 名（.oryxos/profiles/<name>.yaml）")
+	cmd.Flags().StringVar(&opts.message, "message", "", "送出單條訊息、輸出回應後退出")
+	cmd.Flags().BoolVar(&opts.newConversation, "new", false,
+		"歸檔當前 active Session，開始一場全新對話（不帶舊 Session 的任何訊息）")
 	return cmd
 }
 
 // runChat 載入 Workspace 設定檔與 Profile、校驗 Provider 可解析，組出
 // AgentService 後交給 CLI Channel；message 非空時走單訊息模式。
-func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir, profileName, message string) (err error) {
+func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, opts chatOptions) (err error) {
 	ws := filepath.Join(baseDir, workspaceDir)
 	if _, err := os.Stat(ws); err != nil {
 		return fmt.Errorf("找不到 Workspace %s（請先執行 oryxos init）: %w", workspaceDir, err)
@@ -63,9 +73,9 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir, profileN
 	if err != nil {
 		return fmt.Errorf("載入 Workspace 設定檔: %w", err)
 	}
-	prof, err := core.LoadProfile(filepath.Join(ws, "profiles", profileName+".yaml"))
+	prof, err := core.LoadProfile(filepath.Join(ws, "profiles", opts.profileName+".yaml"))
 	if err != nil {
-		return fmt.Errorf("載入 Profile %s: %w", profileName, err)
+		return fmt.Errorf("載入 Profile %s: %w", opts.profileName, err)
 	}
 	if _, ok := cfg.Providers[prof.Provider.Name]; !ok {
 		return fmt.Errorf("Profile %s 引用的 Provider %q 未在 %s/config.yaml 的 providers 段配置",
@@ -119,6 +129,13 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir, profileN
 			err = cerr
 		}
 	}()
+	// --new：先歸檔當前 active Session，下面的 ActiveSession 就取不到 active 列，
+	// 自然開出一場乾淨的新對話（沒有 active Session 時歸檔是 no-op，不報錯）。
+	if opts.newConversation {
+		if err := sessions.ArchiveActive(ctx, cli.ChannelName, cli.LocalUserID, prof.Name); err != nil {
+			return fmt.Errorf("歸檔當前 active Session: %w", err)
+		}
+	}
 	// 同一（Channel、使用者、Profile）聯合標識的 active Session 自動恢復，
 	// 沒有時開新的：重新執行 oryxos chat 就接得上先前的上下文。
 	session, err := sessions.ActiveSession(ctx, cli.ChannelName, cli.LocalUserID, prof.Name)
@@ -129,8 +146,8 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir, profileN
 	agent := core.NewAgentService(prof, provider.NewService(providerConfigs, logger), executor, sessions)
 	ch := cli.New(agent, session, prof.Identity.AgentName, in, out)
 
-	if message != "" {
-		return ch.RunOnce(ctx, message)
+	if opts.message != "" {
+		return ch.RunOnce(ctx, opts.message)
 	}
 	return ch.RunInteractive(ctx)
 }

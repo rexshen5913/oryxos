@@ -13,9 +13,16 @@ import (
 	"github.com/rexshen5913/oryxos/internal/core"
 )
 
-// statusActive 是 Session 尚在進行中的狀態。歸檔（archived）的寫入路徑隨
-// `oryxos chat --new` 落地，本切片只讀不寫。
-const statusActive = "active"
+// statusActive 是 Session 尚在進行中的狀態；statusArchived 是已收尾、不再接續
+// 對話的狀態。歸檔由 `oryxos chat --new` 觸發（spec #2 定案 2026-08-07）。
+//
+// 這兩個字面值是落在 db 檔裡的既成事實——除了 status 欄位值，sessions_single_active
+// 的部分索引條件也寫死 'active'。改字面值等同改 schema（既有資料列存的是舊字串、
+// 索引條件要重建），必須連遷移一起做，所以索引裡刻意不做常數插值，那不是疏漏。
+const (
+	statusActive   = "active"
+	statusArchived = "archived"
+)
 
 // timestampLayout 是時間欄位的落庫格式：RFC3339 加固定九位小數。刻意不用
 // time.RFC3339Nano——它會裁掉尾端的零，讓字串排序偏離時間排序（無小數的
@@ -103,9 +110,39 @@ func (m *SessionManager) ActiveSession(ctx context.Context, channel, userID, pro
 	}, nil
 }
 
+// ArchiveActive 把該（Channel、使用者、Profile）聯合標識的 active Session 標記
+// 為 archived 並寫 archived_at。歸檔只改狀態欄位，對話歷史原樣保留供日後查閱。
+//
+// 沒有 active Session 時什麼也不做、不算錯誤——在全新 Workspace 上執行
+// `oryxos chat --new` 就是這個情況，語義等同直接開一場新對話。歸檔後聯合標識
+// 上沒有 active 列，ActiveSession 便會開出一場乾淨的新對話。
+//
+// 定位方式是聯合標識、不是 session_id，只服務「歸檔當前這場」這一個用例。技術
+// 方案 §7.2 的 DELETE /api/v1/sessions/{id} 以 ID 定位，落地時要另加一支 ID-based
+// 的歸檔——別接到這裡：傳入舊 Session 的 ID 會歸檔到當前那場，改錯目標。兩者共用
+// 的是狀態轉移本身（status 轉 archived、蓋 archived_at、對話歷史不動），不是這支
+// 函式。
+func (m *SessionManager) ArchiveActive(ctx context.Context, channel, userID, profileName string) error {
+	now := time.Now().UTC().Format(timestampLayout)
+	if _, err := m.db.ExecContext(ctx,
+		`UPDATE sessions SET status = ?, archived_at = ?
+		 WHERE channel = ? AND user_id = ? AND profile_name = ? AND status = ?`,
+		statusArchived, now, channel, userID, profileName, statusActive); err != nil {
+		return fmt.Errorf("歸檔 active Session（%s／%s／%s）: %w", channel, userID, profileName, err)
+	}
+	return nil
+}
+
 // Save 覆寫 session 的對話歷史並更新 last_active_at；Session 首次落庫時建立
 // 資料列（status 為 active、created_at 為當下）。整段歷史一次覆寫而非增量
 // 追加：對話歷史本就以 JSON 整欄儲存，單次寫入天然原子，不會留半截 tool 序列。
+//
+// 只寫得進 active 的資料列：`--new` 落地後，同一個 Workspace 開兩個 oryxos 進程
+// 就可能讓 A 手上的 Session 被 B 歸檔掉，此時 A 的 Save 若照樣覆寫那個 archived
+// 列，訊息會寫成功卻再也不被 ActiveSession 看見——使用者看到的是成功回應，實際是
+// 靜默遺失。改為只更新 active 列，並以受影響列數判斷：0 列代表這個 Session 已不
+// 再 active，回明確錯誤讓該 turn 失敗、走既有 rollback（同「寧可看到錯誤重試，
+// 也不要在不知情下遺失對話」的既定取捨）。
 func (m *SessionManager) Save(ctx context.Context, session *core.Session) error {
 	messagesJSON, err := encodeMessages(session.Messages)
 	if err != nil {
@@ -115,16 +152,25 @@ func (m *SessionManager) Save(ctx context.Context, session *core.Session) error 
 
 	// 衝突時只更新對話歷史與最後活躍時間：created_at、status、archived_at
 	// 各有自己的寫入時機，不該被每個 turn 的存檔順手蓋掉。
-	if _, err := m.db.ExecContext(ctx,
+	res, err := m.db.ExecContext(ctx,
 		`INSERT INTO sessions
 		     (session_id, profile_name, channel, user_id, messages_json, status, created_at, last_active_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(session_id) DO UPDATE SET
 		     messages_json  = excluded.messages_json,
-		     last_active_at = excluded.last_active_at`,
+		     last_active_at = excluded.last_active_at
+		 WHERE status = ?`,
 		session.ID, session.ProfileName, session.Channel, session.UserID,
-		messagesJSON, statusActive, now, now); err != nil {
+		messagesJSON, statusActive, now, now, statusActive)
+	if err != nil {
 		return fmt.Errorf("寫入 Session %s: %w", session.ID, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("取得 Session %s 的寫入結果: %w", session.ID, err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("Session %s 已不是 active（可能已被另一個 oryxos 進程的 chat --new 歸檔），本輪未寫入", session.ID)
 	}
 	return nil
 }

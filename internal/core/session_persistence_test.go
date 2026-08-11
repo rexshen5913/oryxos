@@ -97,6 +97,22 @@ func onlySession(t *testing.T, dbPath string) sessionRow {
 	return rows[0]
 }
 
+// activeRow 從 sessions 資料列中取出唯一一列 active Session——歸檔過的 db 會有
+// 多列，但同一聯合標識同時至多一個 active。
+func activeRow(t *testing.T, rows []sessionRow) sessionRow {
+	t.Helper()
+	var found []sessionRow
+	for _, r := range rows {
+		if r.status == "active" {
+			found = append(found, r)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("active 資料列數 = %d, 期望 1: %+v", len(found), rows)
+	}
+	return found[0]
+}
+
 // decodePersisted 解析 messages_json。
 func decodePersisted(t *testing.T, messagesJSON string) []persistedMessage {
 	t.Helper()
@@ -254,18 +270,32 @@ func TestSessionRestoreMatrix(t *testing.T) {
 	tests := []struct {
 		name      string
 		seedTurn1 bool
+		// archiveSeeded 在第一場對話後歸檔，模擬 `oryxos chat --new` 之後的 db：
+		// 只剩 archived Session，沒有 active。
+		archiveSeeded bool
 		// wantConversation 是重啟後那次 LLM 邊界請求應帶的非 system 訊息序列。
 		wantConversation []string
+		// wantRows 是收尾時 sessions 表應有的資料列數。
+		wantRows int
 	}{
 		{
-			name:             "無既有 active Session：建新，對話歷史自本輪起算",
+			name:             "無既有 Session：建新，對話歷史自本輪起算",
 			seedTurn1:        false,
 			wantConversation: []string{"user:" + turn2Msg},
+			wantRows:         1,
 		},
 		{
 			name:             "有 active Session：恢復，先前的對話歷史進 LLM 請求",
 			seedTurn1:        true,
 			wantConversation: []string{"user:" + turn1Msg, "assistant:" + turn1Reply, "user:" + turn2Msg},
+			wantRows:         1,
+		},
+		{
+			name:             "僅 archived Session：建新 active，歸檔的對話歷史不進 LLM 請求",
+			seedTurn1:        true,
+			archiveSeeded:    true,
+			wantConversation: []string{"user:" + turn2Msg},
+			wantRows:         2,
 		},
 	}
 
@@ -279,12 +309,19 @@ func TestSessionRestoreMatrix(t *testing.T) {
 			srv := newRecordingReplayServer(t, &llmReqs, fixtures...)
 			dbPath := filepath.Join(t.TempDir(), "oryxos.db")
 
+			var seededID string
 			if tt.seedTurn1 {
 				// 第一個進程：對話一輪後關閉儲存，模擬進程結束。
 				store := openSessionStore(t, dbPath)
 				session := activeSession(t, store)
 				if _, err := newAgentOn(t, srv.URL, discardLogger(), store).Process(context.Background(), session, turn1Msg); err != nil {
 					t.Fatalf("重啟前對話: %v", err)
+				}
+				seededID = session.ID
+				if tt.archiveSeeded {
+					if err := store.ArchiveActive(context.Background(), "cli", "local", "default"); err != nil {
+						t.Fatalf("歸檔 active Session: %v", err)
+					}
 				}
 				if err := store.Close(); err != nil {
 					t.Fatalf("關閉 Session 儲存: %v", err)
@@ -302,10 +339,21 @@ func TestSessionRestoreMatrix(t *testing.T) {
 			if !slices.Equal(got, tt.wantConversation) {
 				t.Errorf("重啟後 LLM 請求的對話歷史 = %q, 期望 %q", got, tt.wantConversation)
 			}
-			// 恢復的是同一列，不是又開一場：整場對話仍只有一個 active Session。
-			row := onlySession(t, dbPath)
-			if len(decodePersisted(t, row.messagesJSON)) != len(session.Messages) {
-				t.Errorf("落庫訊息數 = %d, 期望與 Session 一致 %d", len(decodePersisted(t, row.messagesJSON)), len(session.Messages))
+
+			rows := querySessions(t, dbPath)
+			if len(rows) != tt.wantRows {
+				t.Fatalf("sessions 資料列數 = %d, 期望 %d: %+v", len(rows), tt.wantRows, rows)
+			}
+			// 落庫的 active Session 就是本輪這場，且其歷史與記憶體一致。
+			active := activeRow(t, rows)
+			if active.sessionID != session.ID {
+				t.Errorf("active Session = %q, 期望本輪這場 %q", active.sessionID, session.ID)
+			}
+			if len(decodePersisted(t, active.messagesJSON)) != len(session.Messages) {
+				t.Errorf("落庫訊息數 = %d, 期望與 Session 一致 %d", len(decodePersisted(t, active.messagesJSON)), len(session.Messages))
+			}
+			if tt.archiveSeeded && active.sessionID == seededID {
+				t.Errorf("歸檔後未另開 Session：active 仍是 %q", seededID)
 			}
 		})
 	}
@@ -368,6 +416,48 @@ func TestFailedTurnNotPersisted(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSaveRejectsArchivedSession 驗證 `--new` 落地後才可能出現的並行情境：一個
+// 進程手上的 Session 被另一個進程歸檔後，它續談的那個 turn 明確失敗並 rollback。
+// 若放任寫進 archived 列，使用者會看到成功回應，但那些訊息之後永遠不被
+// ActiveSession 讀回——正是「在使用者不知情下遺失對話」。
+func TestSaveRejectsArchivedSession(t *testing.T) {
+	srv := newReplayServer(t, readFixture(t, "reply_turn1.json"), readFixture(t, "reply_turn2.json"))
+	dbPath := filepath.Join(t.TempDir(), "oryxos.db")
+
+	storeA := openSessionStore(t, dbPath)
+	session := activeSession(t, storeA)
+	agent := newAgentOn(t, srv.URL, discardLogger(), storeA)
+	if _, err := agent.Process(context.Background(), session, "我的專案用 Go 開發"); err != nil {
+		t.Fatalf("第一輪對話: %v", err)
+	}
+	beforeArchive := onlySession(t, dbPath)
+
+	// 另一個進程執行 `oryxos chat --new`，歸檔掉這個進程手上這場。
+	storeB := openSessionStore(t, dbPath)
+	if err := storeB.ArchiveActive(context.Background(), "cli", "local", "default"); err != nil {
+		t.Fatalf("另一個進程歸檔: %v", err)
+	}
+
+	_, err := agent.Process(context.Background(), session, "我剛才說專案用什麼開發？")
+	if err == nil {
+		t.Fatal("期望續談失敗，實際成功——訊息會靜默寫進 archived 列")
+	}
+	if !strings.Contains(err.Error(), "已不是 active") {
+		t.Errorf("錯誤訊息未說明 Session 已非 active: %v", err)
+	}
+
+	row := onlySession(t, dbPath)
+	if row.messagesJSON != beforeArchive.messagesJSON {
+		t.Errorf("archived 列被寫入了：%s, 期望維持 %s", row.messagesJSON, beforeArchive.messagesJSON)
+	}
+	if row.status != "archived" {
+		t.Errorf("status = %q, 期望維持 archived", row.status)
+	}
+	if len(session.Messages) != 2 {
+		t.Errorf("失敗 turn 未 rollback：記憶體對話歷史 = %d 條, 期望 2", len(session.Messages))
 	}
 }
 

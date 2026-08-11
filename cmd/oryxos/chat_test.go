@@ -114,7 +114,7 @@ func TestChatInteractive(t *testing.T) {
 			dir := setupChatWorkspace(t, srv.URL)
 
 			var out bytes.Buffer
-			err := runChat(context.Background(), strings.NewReader(tt.stdin), &out, dir, "default", "")
+			err := runChat(context.Background(), strings.NewReader(tt.stdin), &out, dir, chatOptions{profileName: "default"})
 			if err != nil {
 				t.Fatalf("runChat: %v", err)
 			}
@@ -140,7 +140,7 @@ func TestChatInteractiveCancel(t *testing.T) {
 
 	var out bytes.Buffer
 	done := make(chan error, 1)
-	go func() { done <- runChat(ctx, pr, &out, dir, "default", "") }()
+	go func() { done <- runChat(ctx, pr, &out, dir, chatOptions{profileName: "default"}) }()
 
 	time.Sleep(50 * time.Millisecond) // 讓對話進入等待輸入狀態
 	cancel()
@@ -177,7 +177,7 @@ func TestChatInteractiveTransientError(t *testing.T) {
 
 	var out bytes.Buffer
 	in := strings.NewReader("你好\n你好\n/quit\n")
-	if err := runChat(context.Background(), in, &out, dir, "default", ""); err != nil {
+	if err := runChat(context.Background(), in, &out, dir, chatOptions{profileName: "default"}); err != nil {
 		t.Fatalf("暫時性故障不應終結對話，實際錯誤: %v", err)
 	}
 	if !strings.Contains(out.String(), "錯誤：") {
@@ -212,7 +212,7 @@ func TestChatEmptyWhitelistWarning(t *testing.T) {
 			}
 
 			var out bytes.Buffer
-			if err := runChat(context.Background(), strings.NewReader(""), &out, dir, "default", "你好"); err != nil {
+			if err := runChat(context.Background(), strings.NewReader(""), &out, dir, chatOptions{profileName: "default", message: "你好"}); err != nil {
 				t.Fatalf("runChat: %v", err)
 			}
 			warned := strings.Contains(out.String(), "allowed_domains")
@@ -223,9 +223,27 @@ func TestChatEmptyWhitelistWarning(t *testing.T) {
 	}
 }
 
-// onlyActiveSession 直接查 Workspace 的 sessions 表（外部可觀察產物），斷言
-// 恰有一行且為 active，回傳其主鍵與落庫的對話歷史條數。
-func onlyActiveSession(t *testing.T, dbPath string) (sessionID string, messageCount int) {
+// sessionRow 是 sessions 表一列在 CLI 端的斷言形狀。
+type sessionRow struct {
+	sessionID    string
+	profileName  string
+	messagesJSON string
+	status       string
+	archivedAt   sql.NullString
+}
+
+// messageCount 回傳該列落庫的對話歷史條數。
+func (r sessionRow) messageCount(t *testing.T) int {
+	t.Helper()
+	var messages []json.RawMessage
+	if err := json.Unmarshal([]byte(r.messagesJSON), &messages); err != nil {
+		t.Fatalf("解析 messages_json %q: %v", r.messagesJSON, err)
+	}
+	return len(messages)
+}
+
+// sessionRows 直接查 Workspace 的 sessions 表（外部可觀察產物）。
+func sessionRows(t *testing.T, dbPath string) []sessionRow {
 	t.Helper()
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -237,35 +255,54 @@ func onlyActiveSession(t *testing.T, dbPath string) (sessionID string, messageCo
 		}
 	}()
 
-	rows, err := db.QueryContext(context.Background(), `SELECT session_id, messages_json, status FROM sessions`)
+	rows, err := db.QueryContext(context.Background(),
+		`SELECT session_id, profile_name, messages_json, status, archived_at FROM sessions ORDER BY created_at`)
 	if err != nil {
 		t.Fatalf("查詢 sessions 表: %v", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var found int
-	var messagesJSON, status string
+	var got []sessionRow
 	for rows.Next() {
-		found++
-		if err := rows.Scan(&sessionID, &messagesJSON, &status); err != nil {
+		var r sessionRow
+		if err := rows.Scan(&r.sessionID, &r.profileName, &r.messagesJSON, &r.status, &r.archivedAt); err != nil {
 			t.Fatalf("掃描 sessions 資料列: %v", err)
 		}
+		got = append(got, r)
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("讀取 sessions 資料列: %v", err)
 	}
-	if found != 1 {
-		t.Fatalf("sessions 資料列數 = %d, 期望 1", found)
-	}
-	if status != "active" {
-		t.Errorf("status = %q, 期望 active", status)
-	}
+	return got
+}
 
-	var messages []json.RawMessage
-	if err := json.Unmarshal([]byte(messagesJSON), &messages); err != nil {
-		t.Fatalf("解析 messages_json %q: %v", messagesJSON, err)
+// rowWithStatus 取出唯一一列指定 status 的 Session。
+func rowWithStatus(t *testing.T, rows []sessionRow, status string) sessionRow {
+	t.Helper()
+	var found []sessionRow
+	for _, r := range rows {
+		if r.status == status {
+			found = append(found, r)
+		}
 	}
-	return sessionID, len(messages)
+	if len(found) != 1 {
+		t.Fatalf("status=%s 的資料列數 = %d, 期望 1: %+v", status, len(found), rows)
+	}
+	return found[0]
+}
+
+// onlyActiveSession 斷言 sessions 表恰有一行且為 active，回傳其主鍵與落庫的
+// 對話歷史條數。
+func onlyActiveSession(t *testing.T, dbPath string) (sessionID string, messageCount int) {
+	t.Helper()
+	rows := sessionRows(t, dbPath)
+	if len(rows) != 1 {
+		t.Fatalf("sessions 資料列數 = %d, 期望 1: %+v", len(rows), rows)
+	}
+	if rows[0].status != "active" {
+		t.Errorf("status = %q, 期望 active", rows[0].status)
+	}
+	return rows[0].sessionID, rows[0].messageCount(t)
 }
 
 // TestChatPersistsAndRestoresSession 是 ticket #8 在 CLI 端的端到端驗證：一輪
@@ -278,7 +315,7 @@ func TestChatPersistsAndRestoresSession(t *testing.T) {
 	dbPath := filepath.Join(dir, workspaceDir, sessionDBFile)
 
 	var out bytes.Buffer
-	if err := runChat(context.Background(), strings.NewReader(""), &out, dir, "default", "第一句"); err != nil {
+	if err := runChat(context.Background(), strings.NewReader(""), &out, dir, chatOptions{profileName: "default", message: "第一句"}); err != nil {
 		t.Fatalf("第一次 oryxos chat: %v", err)
 	}
 	firstID, firstCount := onlyActiveSession(t, dbPath)
@@ -287,7 +324,7 @@ func TestChatPersistsAndRestoresSession(t *testing.T) {
 	}
 
 	// runChat 已返回（儲存關閉、進程視同結束），重跑一次即模擬重啟。
-	if err := runChat(context.Background(), strings.NewReader(""), &out, dir, "default", "第二句"); err != nil {
+	if err := runChat(context.Background(), strings.NewReader(""), &out, dir, chatOptions{profileName: "default", message: "第二句"}); err != nil {
 		t.Fatalf("重啟後 oryxos chat: %v", err)
 	}
 	secondID, secondCount := onlyActiveSession(t, dbPath)
@@ -296,6 +333,150 @@ func TestChatPersistsAndRestoresSession(t *testing.T) {
 	}
 	if secondCount != 4 {
 		t.Errorf("重啟後落庫訊息數 = %d, 期望 4（兩輪對話累積在同一 Session）", secondCount)
+	}
+}
+
+// TestChatNewArchivesActiveSession 是 ticket #9 在 CLI 端的端到端驗證：先談一場
+// 對話，再帶 --new 執行——舊 Session 標記 archived 並寫 archived_at、對話歷史
+// 原樣保留供日後查閱，新的 active Session 另起一列，兩行並存。
+func TestChatNewArchivesActiveSession(t *testing.T) {
+	srv := newReplayServer(t, readFixture(t, "chat_reply_1.json"), readFixture(t, "chat_reply_2.json"))
+	dir := setupChatWorkspace(t, srv.URL)
+	dbPath := filepath.Join(dir, workspaceDir, sessionDBFile)
+
+	var out bytes.Buffer
+	if err := runChat(context.Background(), strings.NewReader(""), &out, dir, chatOptions{profileName: "default", message: "第一句"}); err != nil {
+		t.Fatalf("第一次 oryxos chat: %v", err)
+	}
+	firstID, _ := onlyActiveSession(t, dbPath)
+
+	if err := runChat(context.Background(), strings.NewReader(""), &out, dir, chatOptions{profileName: "default", message: "第二句", newConversation: true}); err != nil {
+		t.Fatalf("oryxos chat --new: %v", err)
+	}
+
+	rows := sessionRows(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("sessions 資料列數 = %d, 期望 2（archived 與 active 並存）: %+v", len(rows), rows)
+	}
+	archived := rowWithStatus(t, rows, "archived")
+	if archived.sessionID != firstID {
+		t.Errorf("被歸檔的是 %q, 期望先前那場 %q", archived.sessionID, firstID)
+	}
+	if !archived.archivedAt.Valid {
+		t.Fatalf("歸檔的 Session archived_at 為 NULL")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, archived.archivedAt.String); err != nil {
+		t.Errorf("archived_at %q 非合法時間戳: %v", archived.archivedAt.String, err)
+	}
+	if got := archived.messageCount(t); got != 2 {
+		t.Errorf("歸檔後舊 Session 訊息數 = %d, 期望維持 2（歸檔只改狀態，不動對話歷史）", got)
+	}
+
+	active := rowWithStatus(t, rows, "active")
+	if active.sessionID == firstID {
+		t.Errorf("--new 未另開 Session：active 仍是 %q", active.sessionID)
+	}
+	if active.archivedAt.Valid {
+		t.Errorf("新 Session archived_at = %q, 期望 NULL", active.archivedAt.String)
+	}
+	if got := active.messageCount(t); got != 2 {
+		t.Errorf("新 Session 訊息數 = %d, 期望 2（本輪 user 加 assistant，不帶舊 Session 訊息）", got)
+	}
+}
+
+// TestChatNewWithoutActiveSession 驗證全新 Workspace 上 --new 等同正常開新對話：
+// 沒有 active Session 可歸檔不是錯誤，對話照常談得起來。
+func TestChatNewWithoutActiveSession(t *testing.T) {
+	srv := newReplayServer(t, readFixture(t, "chat_reply_1.json"))
+	dir := setupChatWorkspace(t, srv.URL)
+	dbPath := filepath.Join(dir, workspaceDir, sessionDBFile)
+
+	var out bytes.Buffer
+	if err := runChat(context.Background(), strings.NewReader(""), &out, dir, chatOptions{profileName: "default", message: "第一句", newConversation: true}); err != nil {
+		t.Fatalf("全新 Workspace 上 oryxos chat --new: %v", err)
+	}
+	if !strings.Contains(out.String(), "回應一：你好，我是 Oryx。") {
+		t.Errorf("輸出未含回應內容: %q", out.String())
+	}
+	if _, count := onlyActiveSession(t, dbPath); count != 2 {
+		t.Errorf("落庫訊息數 = %d, 期望 2（user 加 assistant）", count)
+	}
+}
+
+// TestChatNewScopedToProfile 驗證歸檔的範圍就是（Channel、使用者、Profile）這組
+// 聯合標識：在 work Profile 上 --new，不得波及 default Profile 的 active Session。
+// 範圍是 ArchiveActive 的 WHERE 條件唯一要守的性質，也是重構時最容易悄悄放寬的。
+func TestChatNewScopedToProfile(t *testing.T) {
+	srv := newReplayServer(t,
+		readFixture(t, "chat_reply_1.json"), readFixture(t, "chat_reply_2.json"),
+		readFixture(t, "chat_reply_1.json"))
+	dir := setupChatWorkspace(t, srv.URL)
+	dbPath := filepath.Join(dir, workspaceDir, sessionDBFile)
+	work := "name: work\nidentity:\n  agent_name: Worker\n  prompt: 你是工作助理。\nprovider:\n  name: openai\n  model: gpt-4o-mini\n"
+	if err := os.WriteFile(filepath.Join(dir, workspaceDir, "profiles", "work.yaml"), []byte(work), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	for _, profileName := range []string{"default", "work"} {
+		if err := runChat(context.Background(), strings.NewReader(""), &out, dir, chatOptions{profileName: profileName, message: "第一句"}); err != nil {
+			t.Fatalf("Profile %s 首場對話: %v", profileName, err)
+		}
+	}
+	before := sessionRows(t, dbPath)
+	if len(before) != 2 {
+		t.Fatalf("兩個 Profile 各談一場後資料列數 = %d, 期望 2: %+v", len(before), before)
+	}
+	defaultID := profileRow(t, before, "default").sessionID
+	workID := profileRow(t, before, "work").sessionID
+
+	if err := runChat(context.Background(), strings.NewReader(""), &out, dir, chatOptions{profileName: "work", message: "第二句", newConversation: true}); err != nil {
+		t.Fatalf("oryxos chat --profile work --new: %v", err)
+	}
+
+	rows := sessionRows(t, dbPath)
+	archived := rowWithStatus(t, rows, "archived")
+	if archived.sessionID != workID {
+		t.Errorf("被歸檔的是 %q（Profile %s）, 期望 work 那場 %q", archived.sessionID, archived.profileName, workID)
+	}
+	for _, r := range rows {
+		if r.sessionID == defaultID && r.status != "active" {
+			t.Errorf("default 的 Session 被波及：status = %q, 期望維持 active", r.status)
+		}
+	}
+}
+
+// profileRow 取出唯一一列屬於指定 Profile 的 Session。
+func profileRow(t *testing.T, rows []sessionRow, profileName string) sessionRow {
+	t.Helper()
+	var found []sessionRow
+	for _, r := range rows {
+		if r.profileName == profileName {
+			found = append(found, r)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("Profile %s 的資料列數 = %d, 期望 1: %+v", profileName, len(found), rows)
+	}
+	return found[0]
+}
+
+// TestChatHelpDescribesNewFlag 驗證 oryxos chat --help 說清楚 --new 會做什麼
+// （歸檔當前 Session、開新對話），使用者不必翻文檔才敢用。
+func TestChatHelpDescribesNewFlag(t *testing.T) {
+	root := newRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"chat", "--help"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("chat --help: %v", err)
+	}
+	for _, want := range []string{"--new", "歸檔", "新對話"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("--help 輸出未含 %q: %q", want, out.String())
+		}
 	}
 }
 
@@ -309,7 +490,7 @@ func TestChatProfileFlag(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := runChat(context.Background(), strings.NewReader(""), &out, dir, "work", "哈囉"); err != nil {
+	if err := runChat(context.Background(), strings.NewReader(""), &out, dir, chatOptions{profileName: "work", message: "哈囉"}); err != nil {
 		t.Fatalf("runChat --profile work: %v", err)
 	}
 	if !strings.Contains(out.String(), "回應一：你好，我是 Oryx。") {
@@ -377,7 +558,7 @@ func TestChatErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir, profileName := tt.setup(t)
 			var out bytes.Buffer
-			err := runChat(context.Background(), strings.NewReader(""), &out, dir, profileName, "你好")
+			err := runChat(context.Background(), strings.NewReader(""), &out, dir, chatOptions{profileName: profileName, message: "你好"})
 			if err == nil {
 				t.Fatal("期望錯誤，實際成功")
 			}
