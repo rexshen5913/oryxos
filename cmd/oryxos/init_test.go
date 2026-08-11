@@ -86,8 +86,9 @@ func TestInitCommand(t *testing.T) {
 			"name: openai",
 			"model:",
 			"tools:",
-			// 預設 Profile 就帶 save_memory，快速開始能直接走 Demo 二的記事場景。
+			// 預設 Profile 就帶兩個 Memory Tool，快速開始能直接走 Demo 二的記事場景。
 			"- save_memory",
+			"- recall_memory",
 			"settings:",
 			"max_iterations:",
 			"max_history_turns:",

@@ -4,7 +4,9 @@
 package memory
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // memoryRelPath 是長期記憶檔在 Workspace 內的相對路徑。
@@ -40,6 +43,317 @@ func openMemoryAt(t *testing.T, dir string) *LongTermMemory {
 		}
 	})
 	return NewLongTermMemory(root, memoryRelPath)
+}
+
+// entries 組出一份 n 條、每條 runesPerEntry 個字的長期記憶（同一天、共用 header）。
+func entries(n, runesPerEntry int) string {
+	var b strings.Builder
+	b.WriteString("## 2026-08-01\n\n")
+	for i := range n {
+		fmt.Fprintf(&b, "- 第%02d條-%s\n", i, strings.Repeat("記", runesPerEntry))
+	}
+	return b.String()
+}
+
+// TestTruncateForInjection 是 prompt 注入路徑的截斷矩陣：超過 maxInjectRunes 時
+// 保留**最近**內容、截斷點落條目邊界（日期 header 或列表項），不落 rune 或條目
+// 中間。這是常態主線——即使單條寫入上限 1000 rune，累積數十條仍會超標。
+func TestTruncateForInjection(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		// wantKept 是截斷後必須留下的子串；wantDropped 是必須被丟掉的。
+		wantKept    []string
+		wantDropped []string
+		// wantMarker 為 true 時，結果須含自述省略標記（單條超標的 fallback）。
+		wantMarker bool
+	}{
+		{
+			name:     "未超閾值：原樣回傳",
+			content:  "## 2026-08-01\n\n- 使用者的專案用 Go 開發\n",
+			wantKept: []string{"## 2026-08-01", "使用者的專案用 Go 開發"},
+		},
+		{
+			name:     "恰好 maxInjectRunes：原樣回傳",
+			content:  strings.Repeat("記", maxInjectRunes),
+			wantKept: []string{strings.Repeat("記", maxInjectRunes)},
+		},
+		{
+			name:        "跨多條超標：丟最舊的、保留最近的",
+			content:     entries(10, 500),
+			wantKept:    []string{"第09條", "第08條"},
+			wantDropped: []string{"第00條", "第01條"},
+		},
+		{
+			name:        "單一條目自身超標：保留開頭硬切並附自述省略標記",
+			content:     "## 2026-08-01\n\n- 開頭標記" + strings.Repeat("記", maxInjectRunes+500) + "\n",
+			wantKept:    []string{"開頭標記"},
+			wantDropped: []string{"## 2026-08-01"},
+			wantMarker:  true,
+		},
+		{
+			// MEMORY.md 是使用者可直接手改的檔案，寫成沒有列表項也沒有日期
+			// header 的一段散文完全合法。它不是「一條記憶」，套用一般政策保留
+			// **最近**的內容——若沿用單條超標的「保留開頭」，注入的會是最舊的
+			// 內容、使用者最近寫的全部消失。
+			name:        "整份沒有條目邊界（手寫散文）：保留結尾、省略開頭",
+			content:     "最舊的開頭" + strings.Repeat("記", maxInjectRunes+500) + "最近的結尾",
+			wantKept:    []string{"最近的結尾"},
+			wantDropped: []string{"最舊的開頭"},
+			wantMarker:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateForInjection(tt.content)
+
+			if n := utf8.RuneCountInString(got); n > maxInjectRunes {
+				t.Errorf("截斷後 %d 字, 超過上限 %d", n, maxInjectRunes)
+			}
+			for _, want := range tt.wantKept {
+				if !strings.Contains(got, want) {
+					t.Errorf("結果遺失應保留的內容 %q（結果 %d 字）", want, utf8.RuneCountInString(got))
+				}
+			}
+			for _, drop := range tt.wantDropped {
+				if strings.Contains(got, drop) {
+					t.Errorf("結果仍含應被丟棄的內容 %q", drop)
+				}
+			}
+			if tt.wantMarker {
+				if !strings.Contains(got, "已省略") || !strings.Contains(got, "recall_memory") {
+					t.Errorf("單條超標的結果未附自述省略標記（須含省略量與 recall_memory 提示）: %q", tail(got, 80))
+				}
+			} else if strings.Contains(got, "已省略") {
+				t.Errorf("不該出現省略標記: %q", tail(got, 80))
+			}
+			// 截斷點必須落在條目邊界：結果的第一行是日期 header 或列表項。
+			if !tt.wantMarker && utf8.RuneCountInString(tt.content) > maxInjectRunes {
+				if first, _, _ := strings.Cut(got, "\n"); !isEntryBoundary(first) {
+					t.Errorf("截斷點未落在條目邊界，首行 = %q", first)
+				}
+			}
+		})
+	}
+}
+
+// tail 回傳字串末尾的 n 個字，用來讓錯誤訊息不至於印出整份記憶。
+func tail(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return "…" + string(r[len(r)-n:])
+}
+
+// TestRecallMatches 是 recallByKeyword 的匹配矩陣：關鍵詞檢索回匹配行，回傳
+// 總量同樣以 maxInjectRunes 為上限、截斷點落匹配行邊界並附明確標記。
+func TestRecallMatches(t *testing.T) {
+	const content = "## 2026-08-01\n\n" +
+		"- 使用者的專案用 Go 開發\n" +
+		"- 部署在 K8s\n" +
+		"- 使用者偏好繁體中文回覆\n" +
+		"## 2026-08-02\n\n" +
+		"- Go 的測試一律表格驅動\n"
+
+	tests := []struct {
+		name        string
+		content     string
+		query       string
+		wantLines   []string
+		wantMissing []string
+		wantMarker  bool
+		// wantAlsoIn 是結果必須額外含有的子串（標記的細節）。
+		wantAlsoIn []string
+	}{
+		{
+			name:        "中文關鍵詞：多行匹配",
+			content:     content,
+			query:       "使用者",
+			wantLines:   []string{"專案用 Go 開發", "偏好繁體中文回覆"},
+			wantMissing: []string{"部署在 K8s"},
+		},
+		{
+			name:        "英文關鍵詞大小寫不敏感",
+			content:     content,
+			query:       "go",
+			wantLines:   []string{"專案用 Go 開發", "測試一律表格驅動"},
+			wantMissing: []string{"部署在 K8s"},
+		},
+		{
+			name:      "無匹配：回空",
+			content:   content,
+			query:     "Rust",
+			wantLines: nil,
+		},
+		{
+			name:       "匹配總量超上限：保留最近的匹配並附截斷標記",
+			content:    entries(20, 500),
+			query:      "記",
+			wantLines:  []string{"第19條"},
+			wantMarker: true,
+		},
+		{
+			name:       "手改造成的單行超長：硬切並附省略標記",
+			content:    "- 超長行" + strings.Repeat("記", maxInjectRunes+500) + "\n",
+			query:      "超長行",
+			wantLines:  []string{"超長行"},
+			wantMarker: true,
+		},
+		{
+			// 最新一行自己就放不下時，仍要讓 LLM 知道「還有別的匹配」——否則
+			// 它只看到一行被切掉的內容，不會想到換更精確的關鍵詞再查。
+			name:       "最新一行超長且另有匹配被丟掉：標記須同時交代兩件事",
+			content:    entries(3, 500) + "- 超長行" + strings.Repeat("記", maxInjectRunes+500) + "\n",
+			query:      "記",
+			wantLines:  []string{"超長行"},
+			wantMarker: true,
+			wantAlsoIn: []string{"未顯示"},
+		},
+		{
+			// 命中位置決定要摘哪一段。固定保留行首的話，關鍵詞落在行尾就會回一段
+			// 完全不含它的內容——看起來像答案、其實答非所問，而且重查也一樣。
+			name:       "關鍵詞落在超長行的尾端：摘錄須涵蓋命中位置",
+			content:    "- " + strings.Repeat("記", maxInjectRunes+1000) + "尾端關鍵詞\n",
+			query:      "尾端關鍵詞",
+			wantLines:  []string{"尾端關鍵詞"},
+			wantMarker: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := recallMatches(tt.content, tt.query)
+
+			if n := utf8.RuneCountInString(got); n > maxInjectRunes {
+				t.Errorf("回傳 %d 字, 超過上限 %d", n, maxInjectRunes)
+			}
+			if len(tt.wantLines) == 0 && got != "" {
+				t.Errorf("無匹配應回空字串，實際 %q", tail(got, 80))
+			}
+			for _, want := range tt.wantLines {
+				if !strings.Contains(got, want) {
+					t.Errorf("回傳遺失匹配行 %q", want)
+				}
+			}
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(got, missing) {
+					t.Errorf("回傳含未匹配的行 %q", missing)
+				}
+			}
+			if tt.wantMarker && !strings.Contains(got, "省略") && !strings.Contains(got, "未顯示") {
+				t.Errorf("截斷後未附標記: %q", tail(got, 80))
+			}
+			for _, want := range tt.wantAlsoIn {
+				if !strings.Contains(got, want) {
+					t.Errorf("標記未交代 %q: %q", want, tail(got, 120))
+				}
+			}
+		})
+	}
+}
+
+// TestAbbreviate 釘死引述上限的邊界：省略號本身要算進上限，否則回傳長度是
+// max+1，宣稱的上限就守不住。
+func TestAbbreviate(t *testing.T) {
+	tests := []struct {
+		name     string
+		in       string
+		max      int
+		wantLen  int
+		wantSame bool
+	}{
+		{name: "恰好等於上限：原樣回傳", in: strings.Repeat("查", 100), max: 100, wantLen: 100, wantSame: true},
+		{name: "剛好超過上限：縮到上限（含省略號）", in: strings.Repeat("查", 101), max: 100, wantLen: 100},
+		{name: "遠超上限", in: strings.Repeat("查", 5000), max: 100, wantLen: 100},
+		{name: "短於上限：原樣回傳", in: "查", max: 100, wantLen: 1, wantSame: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := abbreviate(tt.in, tt.max)
+			if n := utf8.RuneCountInString(got); n != tt.wantLen {
+				t.Errorf("長度 = %d, 期望 %d", n, tt.wantLen)
+			}
+			if tt.wantSame && got != tt.in {
+				t.Errorf("未超上限不該改動內容: %q", tail(got, 20))
+			}
+			if !tt.wantSame && !strings.HasSuffix(got, "…") {
+				t.Errorf("縮短後未以省略號收尾: %q", tail(got, 20))
+			}
+		})
+	}
+}
+
+// TestRecallByKeywordReadsFile 驗證檢索走真實檔案，且空白關鍵詞被擋下——
+// 空字串的 strings.Contains 恆真，會把整份記憶當成「全部匹配」倒回去。
+func TestRecallByKeywordReadsFile(t *testing.T) {
+	mem, path := newTestMemory(t)
+	mkdirTest(t, filepath.Dir(path))
+	// 「後端語言是 Go」刻意讓關鍵詞落在行尾：前後帶空白的 query 若不 trim，
+	// 這一行就匹配不到——用前後都有空格的句子當種子是測不出這件事的。
+	writeTestFile(t, path, "## 2026-08-01\n\n- 使用者的專案用 Go 開發\n- 後端語言是 Go\n- 部署在 K8s\n")
+
+	// 關鍵詞的前後空白在檢索裡不該有意義：LLM 產生的 JSON 常帶上它們，
+	// 不 trim 就會在記憶明明存在時回報「沒有符合的內容」，而模型無從診斷。
+	for _, query := range []string{"Go", " Go ", "\nGo"} {
+		got, err := mem.RecallByKeyword(context.Background(), query)
+		if err != nil {
+			t.Fatalf("RecallByKeyword(%q): %v", query, err)
+		}
+		for _, want := range []string{"專案用 Go 開發", "後端語言是 Go"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("RecallByKeyword(%q) 遺失 %q: %q", query, want, got)
+			}
+		}
+		if strings.Contains(got, "K8s") {
+			t.Errorf("RecallByKeyword(%q) 含未匹配的行: %q", query, got)
+		}
+	}
+
+	if _, err := mem.RecallByKeyword(context.Background(), "   "); !errors.Is(err, ErrInvalidEntry) {
+		t.Errorf("空白關鍵詞應以 ErrInvalidEntry 拒絕，實際 %v", err)
+	}
+}
+
+// TestLoadDoesNotModifyFile 守住「截斷只發生在讀取側」這個前提：Load 會把超標的
+// 內容裁掉，但磁碟上的 MEMORY.md 一個 byte 都不能變。這不是潔癖——fallback 標記
+// 敢寫「完整內容仍在 MEMORY.md」正是因為它確實還在；哪天有人把
+// 截斷改成回寫檔案，那句提示就變成騙人的，而且使用者的長期記憶會被真的刪掉。
+func TestLoadDoesNotModifyFile(t *testing.T) {
+	mem, path := newTestMemory(t)
+	mkdirTest(t, filepath.Dir(path))
+	writeTestFile(t, path, entries(20, 500)) // 遠超注入上限
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("讀取 MEMORY.md: %v", err)
+	}
+
+	injected, err := mem.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if strings.Contains(injected, "第00條") {
+		t.Fatal("最舊的條目未被截掉——這個測試沒有測到截斷路徑")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("重讀 MEMORY.md: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("Load 改動了 MEMORY.md：%d bytes → %d bytes", len(before), len(after))
+	}
+
+	// 被注入截掉的舊條目仍檢索得回來——這正是截斷標記承諾使用者的事。
+	got, err := mem.RecallByKeyword(context.Background(), "第00條")
+	if err != nil {
+		t.Fatalf("RecallByKeyword: %v", err)
+	}
+	if !strings.Contains(got, "第00條") {
+		t.Error("被注入截掉的舊條目無法用 recall_memory 取回")
+	}
 }
 
 // TestEntryBlock 是條目邊界的組裝矩陣：同一天共用日期 header、換日另起一段、

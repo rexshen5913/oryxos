@@ -13,15 +13,18 @@ import (
 	"unicode/utf8"
 )
 
-// maxEntryRunes 是 save_memory 單條記憶的長度上限，以 **rune** 計而非 byte
-// ——中文一字一 rune，用 byte 會讓中文體感縮水，也可能切壞 UTF-8。
-//
-// 1000 不是孤立魔數：它是長期記憶總注入上限 4000 rune 的 1/4，確保注入預算至少
-// 容得下三四條近期記憶與日期 header 的開銷。4000 這個上限本身與截斷行為隨
-// recall_memory 一起落地（ticket #11），本張只守單條寫入的入口。
-//
-// 取常數不開配置欄位（YAGNI）：文檔只給預設值，未定義配置面。
-const maxEntryRunes = 1000
+// 長度上限一律以 **rune** 計而非 byte——中文一字一 rune，用 byte 會讓中文體感
+// 縮水，也可能切壞 UTF-8。兩者都取常數、不開配置欄位（YAGNI）：文檔只給預設值，
+// 未定義配置面。
+const (
+	// maxInjectRunes 是長期記憶進 LLM 的總量上限。進 LLM 的輸入有兩條路徑——
+	// prompt 注入走 Load、tool 結果回填走 RecallByKeyword——兩條都套這個上限。
+	maxInjectRunes = 4000
+	// maxEntryRunes 是 save_memory 單條記憶的長度上限。它是總注入上限的 1/4，
+	// 確保注入預算至少容得下三四條近期記憶與日期 header 的開銷——這個關係是
+	// 它的判準，不是孤立魔數。
+	maxEntryRunes = maxInjectRunes / 4
+)
 
 // dateHeaderLayout 是每條記憶的日期 header 格式。header 讓使用者翻閱 MEMORY.md
 // 時知道每條是何時記下的，也是日後截斷時的條目邊界之一。
@@ -106,9 +109,14 @@ func (m *LongTermMemory) Append(ctx context.Context, content string) error {
 	return nil
 }
 
-// Load 回傳整份長期記憶。檔案不存在或內容為空白視為空記憶（回空字串、不算錯誤），
-// 對話照常；權限不足、I/O 錯誤、越界的符號連結等真實故障以 %w 包裝上拋，由呼叫端
-// fail 該 turn——把故障吞成空值會讓 Agent 在使用者不知情下失憶。
+// Load 回傳供注入 system prompt 的長期記憶，超過 maxInjectRunes 時截斷、保留
+// 最近內容（見 truncateForInjection）。檔案不存在或內容為空白視為空記憶（回空
+// 字串、不算錯誤），對話照常；權限不足、I/O 錯誤、越界的符號連結等真實故障以
+// %w 包裝上拋，由呼叫端 fail 該 turn——把故障吞成空值會讓 Agent 在使用者不知情
+// 下失憶。
+//
+// 截斷只發生在**讀取側**：檔案本身一個字都不動，被截掉的內容仍可用
+// recall_memory 檢索回來。
 func (m *LongTermMemory) Load(ctx context.Context) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("載入長期記憶: %w", err)
@@ -117,7 +125,32 @@ func (m *LongTermMemory) Load(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(content), nil
+	return truncateForInjection(strings.TrimSpace(content)), nil
+}
+
+// RecallByKeyword 以關鍵詞檢索長期記憶，回傳匹配的行（總量同樣受 maxInjectRunes
+// 限制，見 recallMatches）；沒有匹配時回空字串、不算錯誤。
+//
+// 方法名保留升級空間：擴展階段要加語義檢索時，這裡演進成帶 mode 參數的 recall
+// （keyword ＋ semantic），上層的 recall_memory Tool 不必跟著改（技術方案 §5.1）。
+//
+// 關鍵詞先 TrimSpace 再用於匹配：LLM 送來的關鍵詞可能帶前後空白，而空白在
+// 關鍵詞檢索裡不該有意義——`" Go "` 應該和 `"Go"` 查到同一批行。空白關鍵詞則
+// 一律拒絕：`strings.Contains(x, "")` 恆真，會把整份記憶當成「全部匹配」倒回給
+// LLM，那不是檢索。
+func (m *LongTermMemory) RecallByKeyword(ctx context.Context, query string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("檢索長期記憶: %w", err)
+	}
+	needle := strings.TrimSpace(query)
+	if needle == "" {
+		return "", fmt.Errorf("%w：關鍵詞為空；請帶上要檢索的關鍵詞後重新呼叫 recall_memory", ErrInvalidEntry)
+	}
+	content, err := m.read()
+	if err != nil {
+		return "", err
+	}
+	return recallMatches(content, needle), nil
 }
 
 // openAttempts 是「開檔／補建目錄」的嘗試次數上限，見 openForAppend。
@@ -221,18 +254,23 @@ func lineBreak(existing string) string {
 }
 
 // lastDateHeader 回傳內容中最後一個日期 header（形如 `## 2026-08-11`）；沒有則
-// 回空字串。只認日期解析得出來的行：記憶內容本身是自由文字，裡頭出現
-// `## 某某標題` 是常態，把它當條目邊界會誤判成「該換日了」而多補一個 header。
+// 回空字串。
 func lastDateHeader(content string) string {
 	for _, line := range slices.Backward(strings.Split(content, "\n")) {
-		header := strings.TrimRight(line, " \t")
-		date, ok := strings.CutPrefix(header, "## ")
-		if !ok {
-			continue
-		}
-		if _, err := time.Parse(dateHeaderLayout, date); err == nil {
-			return header
+		if isDateHeader(line) {
+			return strings.TrimRight(line, " \t")
 		}
 	}
 	return ""
+}
+
+// isDateHeader 判斷一行是不是日期 header。只認日期解析得出來的行：記憶內容本身
+// 是自由文字，裡頭出現 `## 某某標題` 是常態，把它當條目邊界會誤判。
+func isDateHeader(line string) bool {
+	date, ok := strings.CutPrefix(strings.TrimRight(line, " \t"), "## ")
+	if !ok {
+		return false
+	}
+	_, err := time.Parse(dateHeaderLayout, date)
+	return err == nil
 }

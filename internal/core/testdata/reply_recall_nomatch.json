@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-recall-nomatch",
+  "object": "chat.completion",
+  "created": 1722925501,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "我在長期記憶裡沒有找到相關的內容，你要不要直接告訴我？"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 145,
+    "completion_tokens": 20,
+    "total_tokens": 165
+  }
+}

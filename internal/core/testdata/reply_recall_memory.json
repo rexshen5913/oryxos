@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-fixture-recall-memory-1",
+  "object": "chat.completion",
+  "created": 1722925500,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_recall_memory_1",
+            "type": "function",
+            "function": {
+              "name": "recall_memory",
+              "arguments": "{\"query\":\"{{QUERY}}\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 135,
+    "completion_tokens": 15,
+    "total_tokens": 150
+  }
+}

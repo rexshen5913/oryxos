@@ -75,8 +75,10 @@ func buildToolRegistry(allowedDomains []string, longTerm *memory.LongTermMemory)
 	if err := tool.RegisterBuiltins(registry, tool.NewSandboxChecker(allowedDomains)); err != nil {
 		return nil, fmt.Errorf("組裝 Tool registry: %w", err)
 	}
-	if err := registry.Register(memory.NewSaveMemoryTool(longTerm)); err != nil {
-		return nil, fmt.Errorf("註冊 Memory Tool: %w", err)
+	for _, memTool := range []tool.OryxTool{memory.NewSaveMemoryTool(longTerm), memory.NewRecallMemoryTool(longTerm)} {
+		if err := registry.Register(memTool); err != nil {
+			return nil, fmt.Errorf("註冊 Memory Tool: %w", err)
+		}
 	}
 	return registry, nil
 }

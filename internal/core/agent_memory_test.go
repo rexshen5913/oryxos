@@ -13,9 +13,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rexshen5913/oryxos/internal/core"
 	"github.com/rexshen5913/oryxos/internal/memory"
@@ -81,10 +83,19 @@ func saveMemoryFixture(t *testing.T, name, content string) string {
 // 真實 SQLite；兩者都由 MemoryService 門面統一對外。subset 是 Profile 的 tools 欄位。
 func newMemoryAgent(t *testing.T, baseURL string, root *os.Root, subset []string, logger *slog.Logger) *core.AgentService {
 	t.Helper()
+	return newMemoryAgentOn(t, baseURL, root, subset, logger, newSessionStore(t))
+}
+
+// newMemoryAgentOn 同 newMemoryAgent，但用指定的 Session 儲存——`--new` 的歸檔
+// 路徑要對同一個 db 檔先歸檔再開新 Session。
+func newMemoryAgentOn(t *testing.T, baseURL string, root *os.Root, subset []string, logger *slog.Logger, sessions core.SessionStore) *core.AgentService {
+	t.Helper()
 	longTerm := memory.NewLongTermMemory(root, memoryRelPath)
 	r := tool.NewRegistry()
-	if err := r.Register(memory.NewSaveMemoryTool(longTerm)); err != nil {
-		t.Fatalf("註冊 save_memory: %v", err)
+	for _, memTool := range []tool.OryxTool{memory.NewSaveMemoryTool(longTerm), memory.NewRecallMemoryTool(longTerm)} {
+		if err := r.Register(memTool); err != nil {
+			t.Fatalf("註冊 %s: %v", memTool.Name(), err)
+		}
 	}
 	exec, err := r.Subset(subset, logger)
 	if err != nil {
@@ -93,7 +104,23 @@ func newMemoryAgent(t *testing.T, baseURL string, root *os.Root, subset []string
 	svc := provider.NewService(map[string]provider.Config{
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, discardLogger())
-	return core.NewAgentService(testProfile(), svc, exec, memory.NewService(newSessionStore(t), longTerm))
+	return core.NewAgentService(testProfile(), svc, exec, memory.NewService(sessions, longTerm))
+}
+
+// recallMemoryFixture 把錄製回應中的 {{QUERY}} 換成本次檢索的關鍵詞。
+func recallMemoryFixture(t *testing.T, query string) string {
+	t.Helper()
+	return strings.ReplaceAll(readFixture(t, "reply_recall_memory.json"), "{{QUERY}}", query)
+}
+
+// seededEntries 組出一份 n 條、每條 runesPerEntry 字的長期記憶（同一天）。
+func seededEntries(n, runesPerEntry int) string {
+	var b strings.Builder
+	b.WriteString("## 2026-08-01\n\n")
+	for i := range n {
+		fmt.Fprintf(&b, "- 第%02d條-%s\n", i, strings.Repeat("記", runesPerEntry))
+	}
+	return b.String()
 }
 
 // systemPrompt 取出 LLM 邊界請求的 system 訊息內容（本切片只有一條）。
@@ -490,16 +517,18 @@ func TestNewSessionInjectsLongTermMemory(t *testing.T) {
 	}
 }
 
-// TestSaveMemoryFilteredByProfile 驗證 save_memory 與其他內建 Tool 一視同仁地
-// 受 Profile 的 tools 欄位過濾：未列出時不出現在送往 LLM 的 tool 清單。
-func TestSaveMemoryFilteredByProfile(t *testing.T) {
+// TestMemoryToolsFilteredByProfile 驗證兩個 Memory Tool 與其他內建 Tool 一視同仁
+// 地受 Profile 的 tools 欄位過濾：未列出時不出現在送往 LLM 的 tool 清單。
+func TestMemoryToolsFilteredByProfile(t *testing.T) {
 	tests := []struct {
 		name   string
 		subset []string
-		want   bool
+		want   []string // 應出現在 LLM tool 清單的 Memory Tool
 	}{
-		{name: "Profile 列出 save_memory：出現在 tool 清單", subset: []string{"save_memory"}, want: true},
-		{name: "Profile 未列出：不出現在 tool 清單", subset: nil, want: false},
+		{name: "兩個都列出", subset: []string{"save_memory", "recall_memory"}, want: []string{"save_memory", "recall_memory"}},
+		{name: "只列出 save_memory：recall_memory 不出現", subset: []string{"save_memory"}, want: []string{"save_memory"}},
+		{name: "只列出 recall_memory：save_memory 不出現", subset: []string{"recall_memory"}, want: []string{"recall_memory"}},
+		{name: "都未列出：兩個都不出現", subset: nil, want: nil},
 	}
 
 	for _, tt := range tests {
@@ -513,16 +542,170 @@ func TestSaveMemoryFilteredByProfile(t *testing.T) {
 			if _, err := agent.Process(context.Background(), session, "你好"); err != nil {
 				t.Fatalf("Process: %v", err)
 			}
-			var got bool
-			for _, tool := range parseLLMRequest(t, llmReqs[0]).Tools {
-				if tool.Function.Name == "save_memory" {
-					got = true
+			var got []string
+			for _, declared := range parseLLMRequest(t, llmReqs[0]).Tools {
+				if name := declared.Function.Name; name == "save_memory" || name == "recall_memory" {
+					got = append(got, name)
 				}
 			}
-			if got != tt.want {
-				t.Errorf("save_memory 出現在 LLM 的 tool 清單 = %v, 期望 %v", got, tt.want)
+			slices.Sort(got)
+			want := slices.Clone(tt.want)
+			slices.Sort(want)
+			if !slices.Equal(got, want) {
+				t.Errorf("LLM tool 清單中的 Memory Tool = %v, 期望 %v", got, want)
 			}
 		})
+	}
+}
+
+// TestProcessRecallMemoryScenario 是 recall_memory 的主場景：LLM 第一輪呼叫
+// recall_memory、匹配行回填進對話歷史、第二輪據此回答。無匹配時回填明確的
+// 「沒有找到」結果而不是錯誤，迴圈照常收尾。
+func TestProcessRecallMemoryScenario(t *testing.T) {
+	const stored = "使用者的專案用 Go 開發"
+
+	tests := []struct {
+		name string
+		// query 是 LLM 傳給 recall_memory 的關鍵詞。
+		query string
+		// finalFixture 是第二輪的最終回應。
+		finalFixture string
+		// wantInTool 是 tool 訊息必須含的子串。
+		wantInTool string
+		wantReply  string
+	}{
+		{
+			name:         "有匹配：匹配行回填後據此回答",
+			query:        "Go",
+			finalFixture: "reply_memory_recall_answer.json",
+			wantInTool:   stored,
+			wantReply:    "依你先前告訴我的，你的專案用 Go 開發，所以我直接用 Go 的慣例來說明。",
+		},
+		{
+			name:         "無匹配：回填明確的沒有找到，不報錯",
+			query:        "Rust",
+			finalFixture: "reply_recall_nomatch.json",
+			wantInTool:   "沒有",
+			wantReply:    "我在長期記憶裡沒有找到相關的內容，你要不要直接告訴我？",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newReplayServer(t, recallMemoryFixture(t, tt.query), readFixture(t, tt.finalFixture))
+			root, memPath := workspaceRoot(t)
+			seedMemory(t, memPath, "## 2026-08-01\n\n- "+stored+"\n- 部署在 K8s\n")
+			agent := newMemoryAgent(t, srv.URL, root, []string{"recall_memory"}, discardLogger())
+			session := core.NewSession("cli", "local", "default")
+
+			resp, err := agent.Process(context.Background(), session, "我的專案是用什麼寫的？")
+			if err != nil {
+				t.Fatalf("Process: %v", err)
+			}
+			if resp != tt.wantReply {
+				t.Errorf("最終回應 = %q, 期望 %q", resp, tt.wantReply)
+			}
+			if got := lastToolMessage(t, session); !strings.Contains(got, tt.wantInTool) {
+				t.Errorf("tool 訊息 = %q, 期望含 %q", got, tt.wantInTool)
+			}
+		})
+	}
+}
+
+// TestRecallMemoryEchoBounded 驗證回填內容引述關鍵詞時自己有上限：LLM 送來一個
+// 超長 query，「沒有符合的內容」這則回填不能就這樣把它原樣倒回去——那會讓這條
+// 路徑無視 4000 rune 的約束，而它同樣會進下一次 LLM 請求。
+func TestRecallMemoryEchoBounded(t *testing.T) {
+	longQuery := strings.Repeat("查", 5000)
+	srv := newReplayServer(t, recallMemoryFixture(t, longQuery), readFixture(t, "reply_recall_nomatch.json"))
+	root, memPath := workspaceRoot(t)
+	seedMemory(t, memPath, "## 2026-08-01\n\n- 使用者的專案用 Go 開發\n")
+	agent := newMemoryAgent(t, srv.URL, root, []string{"recall_memory"}, discardLogger())
+	session := core.NewSession("cli", "local", "default")
+
+	if _, err := agent.Process(context.Background(), session, "查一下"); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	got := lastToolMessage(t, session)
+	if n := utf8.RuneCountInString(got); n > 4000 {
+		t.Errorf("回填內容 %d 字，超過長期記憶的注入上限", n)
+	}
+	if !strings.Contains(got, "沒有") {
+		t.Errorf("回填未說明沒有匹配: %q", got)
+	}
+}
+
+// TestLongTermMemoryInjectionTruncated 驗證注入 system prompt 的內容超閾值時同樣
+// 截斷（LLM 邊界請求斷言）：最舊的條目被丟掉、最近的留著，整份記憶不會原封不動
+// 撐爆每一次請求。確切的閾值與邊界行為由 internal/memory 的截斷矩陣釘死。
+func TestLongTermMemoryInjectionTruncated(t *testing.T) {
+	var llmReqs [][]byte
+	srv := newRecordingReplayServer(t, &llmReqs, readFixture(t, "reply_direct.json"))
+
+	root, memPath := workspaceRoot(t)
+	seeded := seededEntries(20, 500) // 遠超注入上限
+	seedMemory(t, memPath, seeded)
+	agent := newMemoryAgent(t, srv.URL, root, nil, discardLogger())
+	session := core.NewSession("cli", "local", "default")
+
+	if _, err := agent.Process(context.Background(), session, "你好"); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+
+	got := systemPrompt(t, llmReqs[0])
+	if strings.Contains(got, "第00條") {
+		t.Error("最舊的記憶未被截掉")
+	}
+	if !strings.Contains(got, "第19條") {
+		t.Error("最近的記憶被截掉了（截斷應保留最近內容）")
+	}
+	if utf8.RuneCountInString(got) >= utf8.RuneCountInString(seeded) {
+		t.Errorf("system prompt %d 字，整份記憶 %d 字——看不出截斷",
+			utf8.RuneCountInString(got), utf8.RuneCountInString(seeded))
+	}
+}
+
+// TestNewConversationStillInjectsLongTermMemory 是與 ticket #9 的複合斷言：走
+// `oryxos chat --new` 的歸檔路徑開出的新 Session，第一個 turn 就帶著長期記憶
+// ——這正是 Demo 二「第二次對話 Agent 仍記得偏好」要證明的東西，而且證明的是
+// 跨 Session 的記憶注入，不是同場對話歷史。
+func TestNewConversationStillInjectsLongTermMemory(t *testing.T) {
+	const fact = "使用者的專案用 Go 開發"
+	var llmReqs [][]byte
+	srv := newRecordingReplayServer(t, &llmReqs,
+		readFixture(t, "reply_turn1.json"),
+		readFixture(t, "reply_memory_recall_answer.json"))
+
+	root, memPath := workspaceRoot(t)
+	seedMemory(t, memPath, "## 2026-08-01\n\n- "+fact+"\n")
+	store := openSessionStore(t, filepath.Join(t.TempDir(), "oryxos.db"))
+	agent := newMemoryAgentOn(t, srv.URL, root, nil, discardLogger(), store)
+
+	session := activeSession(t, store)
+	if _, err := agent.Process(context.Background(), session, "第一句"); err != nil {
+		t.Fatalf("第一場對話: %v", err)
+	}
+
+	// `oryxos chat --new`：歸檔當前 active Session，再開一場乾淨的新對話。
+	if err := store.ArchiveActive(context.Background(), "cli", "local", "default"); err != nil {
+		t.Fatalf("歸檔 active Session: %v", err)
+	}
+	fresh := activeSession(t, store)
+	if fresh.ID == session.ID {
+		t.Fatal("歸檔後未開出新的 Session")
+	}
+	if _, err := agent.Process(context.Background(), fresh, "第二句"); err != nil {
+		t.Fatalf("新對話第一個 turn: %v", err)
+	}
+
+	if got := systemPrompt(t, llmReqs[1]); !strings.Contains(got, fact) {
+		t.Errorf("--new 開的新 Session 第一個 turn 未注入長期記憶: %q", got)
+	}
+	// 同時確認確實是新對話：舊 Session 的訊息不進請求。
+	for _, m := range parseLLMRequest(t, llmReqs[1]).Messages {
+		if strings.Contains(m.Content, "第一句") {
+			t.Errorf("新 Session 帶進了舊對話的訊息: %q", m.Content)
+		}
 	}
 }
 
