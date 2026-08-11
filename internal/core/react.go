@@ -21,11 +21,13 @@ const (
 type ReActLoop struct {
 	provider ProviderService
 	tools    ToolExecutor
+	memory   MemoryService
 }
 
-// NewReActLoop 以 provider 與 Tool 子集建立 ReAct 循環；tools 不得為 nil。
-func NewReActLoop(provider ProviderService, tools ToolExecutor) *ReActLoop {
-	return &ReActLoop{provider: provider, tools: tools}
+// NewReActLoop 以 provider、Tool 子集與 Memory 門面建立 ReAct 循環；
+// tools 與 memory 都不得為 nil。
+func NewReActLoop(provider ProviderService, tools ToolExecutor, memory MemoryService) *ReActLoop {
+	return &ReActLoop{provider: provider, tools: tools, memory: memory}
 }
 
 // Run 對 session 的當前對話歷史跑 ReAct 循環，回傳 Agent 的最終回應。每輪把
@@ -38,13 +40,24 @@ func NewReActLoop(provider ProviderService, tools ToolExecutor) *ReActLoop {
 func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session) (string, error) {
 	maxIterations := profile.Settings.effectiveMaxIterations()
 	defs := l.tools.Definitions()
+
+	// 長期記憶在**進入迭代迴圈之前**取一次快照，同一 turn 內的後續迭代重用它：
+	// system prompt 在 turn 內固定，LLM 第二次迭代看到的前提與它第一次決策時
+	// 一致，組裝函式也維持無檔案 I/O。同一 turn 內若真要看剛寫入的內容，
+	// recall_memory 直接讀檔必然最新（技術方案 §5.3）。
+	// 被快照的只有長期記憶——對話歷史每次組裝都從當前 Session 重新取。
+	longTerm, err := l.memory.LongTermMemory(ctx)
+	if err != nil {
+		return "", fmt.Errorf("載入長期記憶: %w", err)
+	}
+
 	var lastContent string // 最後一輪 LLM 內容，強制終止時作為已知進度附上
 	for range maxIterations {
 		resp, err := l.provider.Chat(ctx, ChatRequest{
 			Provider:    profile.Provider.Name,
 			Model:       profile.Provider.Model,
 			Temperature: profile.Provider.Temperature,
-			Messages:    buildMessages(profile, session),
+			Messages:    buildMessages(profile, session, longTerm),
 			Tools:       defs,
 		})
 		if err != nil {
@@ -104,14 +117,18 @@ func (l *ReActLoop) executeWithRetry(ctx context.Context, call ToolCall) (ToolRe
 	return result, retries, nil
 }
 
-// buildMessages 組裝一次 LLM 呼叫的訊息序列：system prompt 僅來自 Profile 的
-// identity.prompt（Bootstrap／Memory 注入屬後續 ticket），加上按
+// buildMessages 組裝一次 LLM 呼叫的訊息序列：system prompt 為 Profile 的
+// identity.prompt ＋ 長期記憶段（Bootstrap 注入屬 spec #3），加上按
 // max_history_turns 截斷後的近期對話歷史。
-func buildMessages(profile *Profile, session *Session) []Message {
+//
+// longTerm 是呼叫端在 turn 開始時取好的快照，當參數傳入——本函式不碰檔案，
+// 維持無 I/O、好測（技術方案 §4.2）。對話歷史則每次都從當前 session 重新取，
+// 含本 turn 內剛追加的 assistant 與 tool 訊息。
+func buildMessages(profile *Profile, session *Session, longTerm string) []Message {
 	history := truncateHistory(session.Messages, profile.Settings.effectiveMaxHistoryTurns())
 	msgs := make([]Message, 0, len(history)+1)
-	if profile.Identity.Prompt != "" {
-		msgs = append(msgs, Message{Role: RoleSystem, Content: profile.Identity.Prompt})
+	if system := composeSystemPrompt(profile.Identity.Prompt, longTerm); system != "" {
+		msgs = append(msgs, Message{Role: RoleSystem, Content: system})
 	}
 	return append(msgs, history...)
 }

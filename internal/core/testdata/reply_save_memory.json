@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-fixture-save-memory-1",
+  "object": "chat.completion",
+  "created": 1722925400,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_save_memory_1",
+            "type": "function",
+            "function": {
+              "name": "save_memory",
+              "arguments": "{\"content\":\"{{CONTENT}}\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 130,
+    "completion_tokens": 18,
+    "total_tokens": 148
+  }
+}

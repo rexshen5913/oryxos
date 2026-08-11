@@ -110,6 +110,7 @@ provider:
 tools:
   - http_get
   - http_post
+  - save_memory       # 長期記憶：Agent 自主把值得記住的偏好或事實寫進 memory/MEMORY.md
 settings:
   max_iterations: 10      # ReAct 循環最大迭代次數
   max_history_turns: 20   # 對話歷史保留的近期輪數

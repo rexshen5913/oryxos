@@ -16,13 +16,18 @@ import (
 	"github.com/rexshen5913/oryxos/internal/channel/cli"
 	"github.com/rexshen5913/oryxos/internal/config"
 	"github.com/rexshen5913/oryxos/internal/core"
+	"github.com/rexshen5913/oryxos/internal/memory"
 	"github.com/rexshen5913/oryxos/internal/provider"
 	"github.com/rexshen5913/oryxos/internal/storage"
 	"github.com/rexshen5913/oryxos/internal/tool"
 )
 
-// sessionDBFile 是 Workspace 內的 SQLite 資料庫檔名（技術方案 §9.2）。
-const sessionDBFile = "oryxos.db"
+const (
+	// sessionDBFile 是 Workspace 內的 SQLite 資料庫檔名（技術方案 §9.2）。
+	sessionDBFile = "oryxos.db"
+	// memoryFile 是 Workspace 內長期記憶的檔名，落在 memory/ 下（技術方案 §5.2）。
+	memoryFile = "MEMORY.md"
+)
 
 // chatOptions 是 chat 命令的旗標集合。旗標多於兩個後改用具名欄位傳遞，
 // 免得呼叫端排出一串無從辨識的位置參數。
@@ -59,6 +64,21 @@ func newChatCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&opts.newConversation, "new", false,
 		"歸檔當前 active Session，開始一場全新對話（不帶舊 Session 的任何訊息）")
 	return cmd
+}
+
+// buildToolRegistry 顯式註冊這個 Workspace 的全部內建 Tool（憲法 2.3）：
+// internal/tool 自帶的 HTTP Tool，加上住在 internal/memory、需要 Workspace 路徑的
+// Memory Tool。每個組裝點都該經此函式取得 Registry——`oryxos init` 的預設 Profile
+// 已列出 save_memory，漏註冊會讓 stock Workspace 在 Subset 時直接啟動失敗。
+func buildToolRegistry(allowedDomains []string, longTerm *memory.LongTermMemory) (*tool.Registry, error) {
+	registry := tool.NewRegistry()
+	if err := tool.RegisterBuiltins(registry, tool.NewSandboxChecker(allowedDomains)); err != nil {
+		return nil, fmt.Errorf("組裝 Tool registry: %w", err)
+	}
+	if err := registry.Register(memory.NewSaveMemoryTool(longTerm)); err != nil {
+		return nil, fmt.Errorf("註冊 Memory Tool: %w", err)
+	}
+	return registry, nil
 }
 
 // runChat 載入 Workspace 設定檔與 Profile、校驗 Provider 可解析，組出
@@ -101,12 +121,30 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 		providerConfigs[name] = provider.Config{APIKey: pc.APIKey, BaseURL: pc.BaseURL}
 	}
 
-	// 內建 Tool 顯式註冊（憲法 2.3）；Profile 的 tools 欄位過濾可用子集，
-	// 引用未註冊的 Tool 在啟動即報清晰錯誤。
-	checker := tool.NewSandboxChecker(cfg.HTTP.AllowedDomains)
-	registry := tool.NewRegistry()
-	if err := tool.RegisterBuiltins(registry, checker); err != nil {
-		return fmt.Errorf("組裝 Tool registry: %w", err)
+	// 長期記憶的檔案操作經此 root：越界（含經符號連結指到 Workspace 之外）由
+	// os.Root 擋下。MEMORY.md 隨 Workspace 進 git，一個惡意 repo 若把它做成指向
+	// 使用者敏感檔案的符號連結，讀取端會把該檔內容注入 prompt 送往 Provider、
+	// 寫入端則會覆寫它。
+	//
+	// 範圍僅止於長期記憶：上面的 logs/oryxos.log 與下面的 SQLite 仍各自開檔
+	// （SQLite 由驅動自己開，接不進 os.Root）。Workspace 級的路徑防護屬 Sandbox
+	// 職責（CONTEXT.md：核心階段做應用層的路徑／命令／域名白名單校驗），隨
+	// File Tool 那張統一處理。
+	wsRoot, err := os.OpenRoot(ws)
+	if err != nil {
+		return fmt.Errorf("開啟 Workspace %s: %w", workspaceDir, err)
+	}
+	defer func() {
+		if cerr := wsRoot.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("關閉 Workspace: %w", cerr)
+		}
+	}()
+	longTerm := memory.NewLongTermMemory(wsRoot, filepath.Join("memory", memoryFile))
+
+	// Profile 的 tools 欄位過濾可用子集，引用未註冊的 Tool 在啟動即報清晰錯誤。
+	registry, err := buildToolRegistry(cfg.HTTP.AllowedDomains, longTerm)
+	if err != nil {
+		return err
 	}
 	executor, err := registry.Subset(prof.Tools, logger)
 	if err != nil {
@@ -143,7 +181,10 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 		return fmt.Errorf("取回 active Session: %w", err)
 	}
 
-	agent := core.NewAgentService(prof, provider.NewService(providerConfigs, logger), executor, sessions)
+	// Memory 統一門面：會話記憶委託 SQLite 的 Session 儲存、長期記憶委託
+	// MEMORY.md，引擎只認這一個介面。
+	memories := memory.NewService(sessions, longTerm)
+	agent := core.NewAgentService(prof, provider.NewService(providerConfigs, logger), executor, memories)
 	ch := cli.New(agent, session, prof.Identity.AgentName, in, out)
 
 	if opts.message != "" {

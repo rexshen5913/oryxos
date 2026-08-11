@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-memory-saved",
+  "object": "chat.completion",
+  "created": 1722925402,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "好的，我已經記住了，之後的對話會用上。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 150,
+    "completion_tokens": 14,
+    "total_tokens": 164
+  }
+}

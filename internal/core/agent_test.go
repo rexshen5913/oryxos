@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/rexshen5913/oryxos/internal/core"
+	"github.com/rexshen5913/oryxos/internal/memory"
 	"github.com/rexshen5913/oryxos/internal/provider"
 	"github.com/rexshen5913/oryxos/internal/tool"
 )
@@ -72,7 +73,16 @@ func newAgentOn(t *testing.T, baseURL string, logger *slog.Logger, sessions core
 	svc := provider.NewService(map[string]provider.Config{
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, logger)
-	return core.NewAgentService(testProfile(), svc, noTools(t), sessions)
+	return core.NewAgentService(testProfile(), svc, noTools(t), newMemory(t, sessions))
+}
+
+// newMemory 以指定的 Session 儲存與一份落在 t.TempDir()、尚未建立的 MEMORY.md
+// 組出 Memory 門面。不關心長期記憶的測試因此拿到空記憶，system prompt 維持只有
+// identity.prompt——長期記憶的行為由 agent_memory_test.go 專門覆蓋。
+func newMemory(t *testing.T, sessions core.SessionStore) core.MemoryService {
+	t.Helper()
+	root, _ := workspaceRoot(t)
+	return memory.NewService(sessions, memory.NewLongTermMemory(root, memoryRelPath))
 }
 
 // noTools 回傳空的 Tool 子集（無 Tool 的 Agent）。

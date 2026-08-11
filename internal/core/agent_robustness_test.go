@@ -336,7 +336,7 @@ func TestProcessHistoryTruncation(t *testing.T) {
 			svc := provider.NewService(map[string]provider.Config{
 				"openai": {APIKey: "test-key", BaseURL: srv.URL},
 			}, discardLogger())
-			agent := core.NewAgentService(p, svc, noTools(t), newSessionStore(t))
+			agent := core.NewAgentService(p, svc, noTools(t), newMemory(t, newSessionStore(t)))
 			session := core.NewSession("cli", "local", "default")
 
 			for i := 1; i <= total; i++ {

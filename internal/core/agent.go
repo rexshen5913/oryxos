@@ -8,16 +8,16 @@ import (
 // AgentService 是引擎的唯一對外入口（門面）：CLI Channel 每次輸入調 Process，
 // 後續切片的 Web Service 也調同一入口，不另闢鏈路。
 type AgentService struct {
-	profile  *Profile
-	loop     *ReActLoop
-	sessions SessionStore
+	profile *Profile
+	loop    *ReActLoop
+	memory  MemoryService
 }
 
-// NewAgentService 以 profile、provider、Profile 過濾後的 Tool 子集與 Session
-// 儲存組出 Agent 引擎；tools 不得為 nil（無 Tool 的 Agent 傳空子集），
-// sessions 不得為 nil（持久化是成功 turn 的一部分，見 Process）。
-func NewAgentService(profile *Profile, provider ProviderService, tools ToolExecutor, sessions SessionStore) *AgentService {
-	return &AgentService{profile: profile, loop: NewReActLoop(provider, tools), sessions: sessions}
+// NewAgentService 以 profile、provider、Profile 過濾後的 Tool 子集與 Memory 門面
+// 組出 Agent 引擎；tools 不得為 nil（無 Tool 的 Agent 傳空子集），memory 不得為
+// nil（會話記憶的持久化是成功 turn 的一部分，長期記憶則每個 turn 載入一次）。
+func NewAgentService(profile *Profile, provider ProviderService, tools ToolExecutor, memory MemoryService) *AgentService {
+	return &AgentService{profile: profile, loop: NewReActLoop(provider, tools, memory), memory: memory}
 }
 
 // Process 處理一條使用者訊息：追加到 session 對話歷史、跑 ReAct 循環，成功後
@@ -56,7 +56,7 @@ func (a *AgentService) runTurn(ctx context.Context, session *Session) (string, e
 	if err != nil {
 		return "", err
 	}
-	if err := a.sessions.Save(ctx, session); err != nil {
+	if err := a.memory.SaveSession(ctx, session); err != nil {
 		return "", fmt.Errorf("持久化 Session: %w", err)
 	}
 	return resp, nil

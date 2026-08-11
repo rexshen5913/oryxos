@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-memory-giveup",
+  "object": "chat.completion",
+  "created": 1722925404,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "這段內容太長了，我沒有存進長期記憶。你可以挑重點再告訴我一次，我再記下來。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 170,
+    "completion_tokens": 28,
+    "total_tokens": 198
+  }
+}

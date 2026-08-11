@@ -46,8 +46,12 @@ func (r *Registry) Subset(names []string, logger *slog.Logger) (*Executor, error
 	return &Executor{names: ordered, tools: sub, logger: logger}, nil
 }
 
-// RegisterBuiltins 顯式註冊全部內建 Tool；本切片為 HttpTools（http_get、
-// http_post），File／Shell／Memory Tool 隨其模組於後續 ticket 加入。
+// RegisterBuiltins 顯式註冊本 package 自帶的內建 Tool：HttpTools（http_get、
+// http_post），File／Shell Tool 隨其模組於後續 ticket 加入。
+//
+// Memory Tool（save_memory 等）不在此註冊：它們住在 internal/memory，且需要
+// Workspace 的 MEMORY.md 路徑，而 internal/tool 不該知道 Workspace 的檔案佈局。
+// 由組裝點顯式 Register 進同一個 Registry（憲法 2.3 要的是顯式，不是單一函式）。
 func RegisterBuiltins(r *Registry, checker *SandboxChecker) error {
 	for _, t := range []OryxTool{NewHTTPGet(checker), NewHTTPPost(checker)} {
 		if err := r.Register(t); err != nil {
