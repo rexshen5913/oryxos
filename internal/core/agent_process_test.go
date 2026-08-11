@@ -58,7 +58,7 @@ func TestProcessErrors(t *testing.T) {
 			name: "Profile 引用的 Provider 未註冊",
 			setup: func(t *testing.T) (*core.AgentService, context.Context) {
 				svc := provider.NewService(map[string]provider.Config{}, discardLogger())
-				return core.NewAgentService(testProfile(), svc, noTools(t)), context.Background()
+				return core.NewAgentService(testProfile(), svc, noTools(t), newSessionStore(t)), context.Background()
 			},
 			wantSub: `Provider "openai" 未註冊`,
 		},
@@ -171,7 +171,7 @@ func TestProcessZeroMaxIterationsUsesDefault(t *testing.T) {
 	svc := provider.NewService(map[string]provider.Config{
 		"openai": {APIKey: "test-key", BaseURL: srv.URL},
 	}, discardLogger())
-	agent := core.NewAgentService(p, svc, noTools(t))
+	agent := core.NewAgentService(p, svc, noTools(t), newSessionStore(t))
 	session := core.NewSession("cli", "local", "default")
 
 	resp, err := agent.Process(context.Background(), session, "你好")

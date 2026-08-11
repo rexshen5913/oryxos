@@ -12,11 +12,11 @@ import (
 )
 
 const (
-	// channelName 是 CLI Channel 在 Session 聯合標識中的 Channel 取值。
-	channelName = "cli"
-	// localUserID 是 CLI 在 Session 聯合標識中的使用者取值。核心階段 CLI 為
-	// 本機單使用者場景，固定為 local（spec #1 未決事項在本張的實作決定）。
-	localUserID = "local"
+	// ChannelName 是 CLI Channel 在 Session 聯合標識中的 Channel 取值。
+	ChannelName = "cli"
+	// LocalUserID 是 CLI 在 Session 聯合標識中的使用者取值。核心階段 CLI 為
+	// 本機單使用者場景，固定為 local（spec #1 未決事項在該張的實作決定）。
+	LocalUserID = "local"
 
 	goodbyeMsg     = "再見。"
 	interruptedMsg = "對話已中斷。"
@@ -32,12 +32,13 @@ type Channel struct {
 	agentName string
 }
 
-// New 建立 CLI Channel，內部以 Channel＋使用者＋Profile 聯合標識建立記憶體版
-// Session；同一次 oryxos chat 內的多輪對話共享此 Session。
-func New(agent *core.AgentService, profileName, agentName string, in io.Reader, out io.Writer) *Channel {
+// New 建立 CLI Channel。session 由呼叫端依 ChannelName、LocalUserID 與 Profile
+// 的聯合標識自儲存取得（可能是跨重啟恢復的既有 Session）；同一次 oryxos chat
+// 內的多輪對話共享它。
+func New(agent *core.AgentService, session *core.Session, agentName string, in io.Reader, out io.Writer) *Channel {
 	return &Channel{
 		agent:     agent,
-		session:   core.NewSession(channelName, localUserID, profileName),
+		session:   session,
 		in:        in,
 		out:       out,
 		agentName: agentName,
@@ -111,9 +112,9 @@ func (c *Channel) RunInteractive(ctx context.Context) error {
 				fmt.Fprintln(c.out, interruptedMsg)
 				return nil
 			}
-			// 失敗 turn 已由 AgentService rollback，暫時性故障不終結整場
-			// 對話（記憶體版 Session 一斷就沒了）。本輪若執行過 Tool，
-			// 副作用註記由 Process 的錯誤訊息承載，這裡不重複判斷。
+			// 失敗 turn 已由 AgentService rollback（本輪不落庫），暫時性
+			// 故障不必終結整場對話。本輪若執行過 Tool，副作用註記由
+			// Process 的錯誤訊息承載，這裡不重複判斷。
 			fmt.Fprintf(c.out, "錯誤：%v（本輪對話已回退，可重試或輸入 /quit 離開）\n", err)
 			continue
 		}

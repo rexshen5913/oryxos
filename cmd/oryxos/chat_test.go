@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite" // 測試直接查 sessions 表，用同一個純 Go 驅動
 )
 
 // newReplayServer 起一個回放錄製回應的 httptest.Server（ADR-0002）：按請求順序
@@ -216,6 +220,82 @@ func TestChatEmptyWhitelistWarning(t *testing.T) {
 				t.Errorf("警示出現 = %v, 期望 %v; 輸出: %q", warned, tt.wantWarn, out.String())
 			}
 		})
+	}
+}
+
+// onlyActiveSession 直接查 Workspace 的 sessions 表（外部可觀察產物），斷言
+// 恰有一行且為 active，回傳其主鍵與落庫的對話歷史條數。
+func onlyActiveSession(t *testing.T, dbPath string) (sessionID string, messageCount int) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("開啟 %s: %v", dbPath, err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("關閉 db 檔: %v", err)
+		}
+	}()
+
+	rows, err := db.QueryContext(context.Background(), `SELECT session_id, messages_json, status FROM sessions`)
+	if err != nil {
+		t.Fatalf("查詢 sessions 表: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var found int
+	var messagesJSON, status string
+	for rows.Next() {
+		found++
+		if err := rows.Scan(&sessionID, &messagesJSON, &status); err != nil {
+			t.Fatalf("掃描 sessions 資料列: %v", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("讀取 sessions 資料列: %v", err)
+	}
+	if found != 1 {
+		t.Fatalf("sessions 資料列數 = %d, 期望 1", found)
+	}
+	if status != "active" {
+		t.Errorf("status = %q, 期望 active", status)
+	}
+
+	var messages []json.RawMessage
+	if err := json.Unmarshal([]byte(messagesJSON), &messages); err != nil {
+		t.Fatalf("解析 messages_json %q: %v", messagesJSON, err)
+	}
+	return sessionID, len(messages)
+}
+
+// TestChatPersistsAndRestoresSession 是 ticket #8 在 CLI 端的端到端驗證：一輪
+// 成功對話後 sessions 表存在一行 active Session；結束進程後重新執行 oryxos chat
+// （同一 Profile），同一聯合標識的 Session 自動恢復——第二輪追加在同一行上，
+// 而不是另開一場對話。
+func TestChatPersistsAndRestoresSession(t *testing.T) {
+	srv := newReplayServer(t, readFixture(t, "chat_reply_1.json"), readFixture(t, "chat_reply_2.json"))
+	dir := setupChatWorkspace(t, srv.URL)
+	dbPath := filepath.Join(dir, workspaceDir, sessionDBFile)
+
+	var out bytes.Buffer
+	if err := runChat(context.Background(), strings.NewReader(""), &out, dir, "default", "第一句"); err != nil {
+		t.Fatalf("第一次 oryxos chat: %v", err)
+	}
+	firstID, firstCount := onlyActiveSession(t, dbPath)
+	if firstCount != 2 {
+		t.Fatalf("第一輪後落庫訊息數 = %d, 期望 2（user 加 assistant）", firstCount)
+	}
+
+	// runChat 已返回（儲存關閉、進程視同結束），重跑一次即模擬重啟。
+	if err := runChat(context.Background(), strings.NewReader(""), &out, dir, "default", "第二句"); err != nil {
+		t.Fatalf("重啟後 oryxos chat: %v", err)
+	}
+	secondID, secondCount := onlyActiveSession(t, dbPath)
+	if secondID != firstID {
+		t.Errorf("重啟後另開了新 Session: %q → %q", firstID, secondID)
+	}
+	if secondCount != 4 {
+		t.Errorf("重啟後落庫訊息數 = %d, 期望 4（兩輪對話累積在同一 Session）", secondCount)
 	}
 }
 

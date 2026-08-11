@@ -17,8 +17,12 @@ import (
 	"github.com/rexshen5913/oryxos/internal/config"
 	"github.com/rexshen5913/oryxos/internal/core"
 	"github.com/rexshen5913/oryxos/internal/provider"
+	"github.com/rexshen5913/oryxos/internal/storage"
 	"github.com/rexshen5913/oryxos/internal/tool"
 )
+
+// sessionDBFile 是 Workspace 內的 SQLite 資料庫檔名（技術方案 §9.2）。
+const sessionDBFile = "oryxos.db"
 
 func newChatCmd() *cobra.Command {
 	var (
@@ -105,8 +109,25 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir, profileN
 		fmt.Fprintf(out, "提醒：%s/config.yaml 的 http.allowed_domains 為空，HTTP Tool 呼叫將全部被攔截；請把允許的域名加入白名單。\n", workspaceDir)
 	}
 
-	agent := core.NewAgentService(prof, provider.NewService(providerConfigs, logger), executor)
-	ch := cli.New(agent, prof.Name, prof.Identity.AgentName, in, out)
+	// 對話落 Workspace 內單一 SQLite 檔：備份或搬遷 Workspace 就是搬檔案。
+	sessions, err := storage.OpenSessionManager(ctx, filepath.Join(ws, sessionDBFile))
+	if err != nil {
+		return fmt.Errorf("開啟 Session 儲存: %w", err)
+	}
+	defer func() {
+		if cerr := sessions.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
+	// 同一（Channel、使用者、Profile）聯合標識的 active Session 自動恢復，
+	// 沒有時開新的：重新執行 oryxos chat 就接得上先前的上下文。
+	session, err := sessions.ActiveSession(ctx, cli.ChannelName, cli.LocalUserID, prof.Name)
+	if err != nil {
+		return fmt.Errorf("取回 active Session: %w", err)
+	}
+
+	agent := core.NewAgentService(prof, provider.NewService(providerConfigs, logger), executor, sessions)
+	ch := cli.New(agent, session, prof.Identity.AgentName, in, out)
 
 	if message != "" {
 		return ch.RunOnce(ctx, message)

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,21 +21,29 @@ import (
 )
 
 // newToolAgent 組出帶 Tool 的 AgentService：真實 ToolRegistry 顯式註冊
-// http_get、http_post，按 subset（Profile tools 欄位）過濾，白名單為 allowed。
+// http_get、http_post，按 subset（Profile tools 欄位）過濾，白名單為 allowed；
+// Session 儲存用落在 t.TempDir() 的真實 SQLite。
 func newToolAgent(t *testing.T, baseURL string, profile *core.Profile, subset, allowed []string) *core.AgentService {
+	t.Helper()
+	return newToolAgentOn(t, baseURL, profile, subset, allowed, discardLogger(), newSessionStore(t))
+}
+
+// newToolAgentOn 是 newToolAgent 的完整形式：另可指定 Tool 執行日誌的去向
+// （斷言重試次數）與 Session 儲存（斷言落庫）。
+func newToolAgentOn(t *testing.T, baseURL string, profile *core.Profile, subset, allowed []string, logger *slog.Logger, sessions core.SessionStore) *core.AgentService {
 	t.Helper()
 	r := tool.NewRegistry()
 	if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(allowed)); err != nil {
 		t.Fatalf("RegisterBuiltins: %v", err)
 	}
-	exec, err := r.Subset(subset, discardLogger())
+	exec, err := r.Subset(subset, logger)
 	if err != nil {
 		t.Fatalf("Subset(%v): %v", subset, err)
 	}
 	svc := provider.NewService(map[string]provider.Config{
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, discardLogger())
-	return core.NewAgentService(profile, svc, exec)
+	return core.NewAgentService(profile, svc, exec, sessions)
 }
 
 // newRecordingReplayServer 同 newReplayServer，另記錄每次 LLM 請求的 body，

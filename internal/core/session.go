@@ -1,19 +1,39 @@
 package core
 
-import "time"
+import (
+	"context"
+	"fmt"
+	"time"
+)
 
 // Session 是使用者與 Agent 一次對話的上下文容器，由 Channel、使用者、Profile
-// 聯合標識。本切片為記憶體版；SQLite 持久化屬後續 ticket。
+// 聯合標識。
 type Session struct {
+	ID          string // 持久化主鍵，由聯合標識加建立時刻生成（見 NewSession）
 	Channel     string
 	UserID      string
 	ProfileName string
 	Messages    []Message
 }
 
-// NewSession 建立一個空對話歷史的 Session。
+// SessionStore 是 Session 持久化的出向介面，由 internal/storage 以 SQLite 實作。
+// 介面定義在 core 是為了守住依賴方向（storage 依賴 core，core 不反向依賴
+// storage）；實作由組裝點顯式注入（憲法 5.2）。
+type SessionStore interface {
+	// Save 持久化 session 當前的對話歷史，並更新其最後活躍時間。
+	Save(ctx context.Context, session *Session) error
+}
+
+// NewSession 建立一個空對話歷史的 Session。ID 由聯合標識加建立時刻生成：
+// 同一聯合標識「同時」至多一個 active Session，但先後可以有多個（歸檔後再開
+// 新的），所以主鍵不能只由聯合標識決定。
 func NewSession(channel, userID, profileName string) *Session {
-	return &Session{Channel: channel, UserID: userID, ProfileName: profileName}
+	return &Session{
+		ID:          fmt.Sprintf("%s:%s:%s:%d", channel, userID, profileName, time.Now().UnixNano()),
+		Channel:     channel,
+		UserID:      userID,
+		ProfileName: profileName,
+	}
 }
 
 // Append 追加一條訊息到對話歷史；未填時間戳時補上當下時間。

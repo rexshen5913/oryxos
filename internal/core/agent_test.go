@@ -58,13 +58,21 @@ func readFixture(t *testing.T, name string) string {
 	return string(data)
 }
 
-// newAgent 以指向 baseURL 的真實 ProviderService 組出無 Tool 的 AgentService。
+// newAgent 以指向 baseURL 的真實 ProviderService 組出無 Tool 的 AgentService，
+// Session 儲存用落在 t.TempDir() 的真實 SQLite。
 func newAgent(t *testing.T, baseURL string, logger *slog.Logger) *core.AgentService {
+	t.Helper()
+	return newAgentOn(t, baseURL, logger, newSessionStore(t))
+}
+
+// newAgentOn 同 newAgent，但用指定的 Session 儲存——跨重啟與落庫斷言的測試
+// 要對同一個 db 檔先後組兩次引擎。
+func newAgentOn(t *testing.T, baseURL string, logger *slog.Logger, sessions core.SessionStore) *core.AgentService {
 	t.Helper()
 	svc := provider.NewService(map[string]provider.Config{
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, logger)
-	return core.NewAgentService(testProfile(), svc, noTools(t))
+	return core.NewAgentService(testProfile(), svc, noTools(t), sessions)
 }
 
 // noTools 回傳空的 Tool 子集（無 Tool 的 Agent）。

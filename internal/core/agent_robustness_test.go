@@ -21,25 +21,13 @@ import (
 
 	"github.com/rexshen5913/oryxos/internal/core"
 	"github.com/rexshen5913/oryxos/internal/provider"
-	"github.com/rexshen5913/oryxos/internal/tool"
 )
 
 // newToolAgentLogged 同 newToolAgent，但 Tool 執行日誌落到 logger，供斷言
 // tool_invocation 筆數——重試次數在結構化日誌上的外部可觀察行為（User Story 20）。
 func newToolAgentLogged(t *testing.T, baseURL string, profile *core.Profile, subset, allowed []string, logger *slog.Logger) *core.AgentService {
 	t.Helper()
-	r := tool.NewRegistry()
-	if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(allowed)); err != nil {
-		t.Fatalf("RegisterBuiltins: %v", err)
-	}
-	exec, err := r.Subset(subset, logger)
-	if err != nil {
-		t.Fatalf("Subset(%v): %v", subset, err)
-	}
-	svc := provider.NewService(map[string]provider.Config{
-		"openai": {APIKey: "test-key", BaseURL: baseURL},
-	}, discardLogger())
-	return core.NewAgentService(profile, svc, exec)
+	return newToolAgentOn(t, baseURL, profile, subset, allowed, logger, newSessionStore(t))
 }
 
 // TestProcessMultiRoundToolCalls 是 ADR-0002 分支「多輪連續 tool 呼叫」：
@@ -348,7 +336,7 @@ func TestProcessHistoryTruncation(t *testing.T) {
 			svc := provider.NewService(map[string]provider.Config{
 				"openai": {APIKey: "test-key", BaseURL: srv.URL},
 			}, discardLogger())
-			agent := core.NewAgentService(p, svc, noTools(t))
+			agent := core.NewAgentService(p, svc, noTools(t), newSessionStore(t))
 			session := core.NewSession("cli", "local", "default")
 
 			for i := 1; i <= total; i++ {
