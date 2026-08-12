@@ -53,11 +53,11 @@ func setupChatWorkspace(t *testing.T, baseURL string) string {
 	if err := initWorkspace(io.Discard, dir); err != nil {
 		t.Fatalf("initWorkspace: %v", err)
 	}
-	cfg := "providers:\n  openai:\n    api_key: ${OPENAI_API_KEY}\n    base_url: " + baseURL + "\nhttp:\n  allowed_domains: []\n"
+	cfg := "providers:\n  openrouter:\n    api_key: ${OPENROUTER_API_KEY}\n    base_url: " + baseURL + "\nhttp:\n  allowed_domains: []\n"
 	if err := os.WriteFile(filepath.Join(dir, workspaceDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
 		t.Fatalf("覆寫 config.yaml: %v", err)
 	}
-	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENROUTER_API_KEY", "test-key")
 	return dir
 }
 
@@ -205,7 +205,7 @@ func TestChatEmptyWhitelistWarning(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := newReplayServer(t, readFixture(t, "chat_reply_1.json"))
 			dir := setupChatWorkspace(t, srv.URL)
-			cfg := "providers:\n  openai:\n    api_key: ${OPENAI_API_KEY}\n    base_url: " + srv.URL +
+			cfg := "providers:\n  openrouter:\n    api_key: ${OPENROUTER_API_KEY}\n    base_url: " + srv.URL +
 				"\nhttp:\n  allowed_domains: " + tt.allowedDomains + "\n"
 			if err := os.WriteFile(filepath.Join(dir, workspaceDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
 				t.Fatal(err)
@@ -412,7 +412,7 @@ func TestChatNewScopedToProfile(t *testing.T) {
 		readFixture(t, "chat_reply_1.json"))
 	dir := setupChatWorkspace(t, srv.URL)
 	dbPath := filepath.Join(dir, workspaceDir, sessionDBFile)
-	work := "name: work\nidentity:\n  agent_name: Worker\n  prompt: 你是工作助理。\nprovider:\n  name: openai\n  model: gpt-4o-mini\n"
+	work := "name: work\nidentity:\n  agent_name: Worker\n  prompt: 你是工作助理。\nprovider:\n  name: openrouter\n  model: gpt-4o-mini\n"
 	if err := os.WriteFile(filepath.Join(dir, workspaceDir, "profiles", "work.yaml"), []byte(work), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +484,7 @@ func TestChatHelpDescribesNewFlag(t *testing.T) {
 func TestChatProfileFlag(t *testing.T) {
 	srv := newReplayServer(t, readFixture(t, "chat_reply_1.json"))
 	dir := setupChatWorkspace(t, srv.URL)
-	work := "name: work\nidentity:\n  agent_name: Worker\n  prompt: 你是工作助理。\nprovider:\n  name: openai\n  model: gpt-4o-mini\n"
+	work := "name: work\nidentity:\n  agent_name: Worker\n  prompt: 你是工作助理。\nprovider:\n  name: openrouter\n  model: gpt-4o-mini\n"
 	if err := os.WriteFile(filepath.Join(dir, workspaceDir, "profiles", "work.yaml"), []byte(work), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -523,16 +523,16 @@ func TestChatErrors(t *testing.T) {
 			name: "API key 環境變數未設定",
 			setup: func(t *testing.T) (string, string) {
 				dir := setupChatWorkspace(t, "http://127.0.0.1:1")
-				os.Unsetenv("OPENAI_API_KEY") // t.Setenv 已註冊測試結束時還原
+				os.Unsetenv("OPENROUTER_API_KEY") // t.Setenv 已註冊測試結束時還原
 				return dir, "default"
 			},
-			wantSub: "OPENAI_API_KEY",
+			wantSub: "OPENROUTER_API_KEY",
 		},
 		{
 			name: "Profile 引用未註冊的 Tool",
 			setup: func(t *testing.T) (string, string) {
 				dir := setupChatWorkspace(t, "http://127.0.0.1:1")
-				p := "name: default\nprovider:\n  name: openai\n  model: m\ntools:\n  - no_such_tool\n"
+				p := "name: default\nprovider:\n  name: openrouter\n  model: m\ntools:\n  - no_such_tool\n"
 				if err := os.WriteFile(filepath.Join(dir, workspaceDir, "profiles", "default.yaml"), []byte(p), 0o644); err != nil {
 					t.Fatal(err)
 				}

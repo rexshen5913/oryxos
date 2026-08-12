@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -78,13 +79,18 @@ func TestInitCommand(t *testing.T) {
 			t.Fatalf("讀取 default.yaml：%v", err)
 		}
 		profile := string(data)
-		// 只斷言外部可觀察的欄位存在（identity、provider name: openai、tools、settings），
+		// 只斷言外部可觀察的欄位存在（identity、provider name: openrouter、tools、settings），
 		// 不綁死模板全文。
+		// 模板的 base_url 指向 OpenRouter，而它只認 vendor/model 形式的 ID——裸的
+		// `gpt-4o-mini` 會被端點拒絕，快速開始第一步就撞牆。斷言的是**形式**，
+		// 換成別的 vendor 的模型不該讓這條無故轉紅。
+		if !regexp.MustCompile(`(?m)^\s*model:\s+\S+/\S+`).MatchString(profile) {
+			t.Errorf("default.yaml 的 model 不是 vendor/model 形式，實際內容：\n%s", profile)
+		}
 		for _, want := range []string{
 			"identity:",
 			"provider:",
-			"name: openai",
-			"model:",
+			"name: openrouter",
 			"tools:",
 			// 預設 Profile 就帶兩個 Memory Tool，快速開始能直接走 Demo 二的記事場景。
 			"- save_memory",
@@ -111,13 +117,38 @@ func TestInitCommand(t *testing.T) {
 		}
 		cfg := string(data)
 		for _, want := range []string{
-			"${OPENAI_API_KEY}", // API key 以環境變數佔位，敏感值不明文落檔
-			"base_url",          // 可選 base_url（註解形式亦可）
-			"allowed_domains",   // http.allowed_domains 白名單段
+			"${OPENROUTER_API_KEY}", // API key 以環境變數佔位，敏感值不明文落檔
+			// base_url 必須是**生效的設定**而非註解：模板的 provider 是 OpenRouter，
+			// 少了它 go-openai 會打回 OpenAI 的預設端點，憑證與模型 ID 全部對不上。
+			"base_url: https://openrouter.ai/api/v1",
+			"allowed_domains", // http.allowed_domains 白名單段
 		} {
 			if !strings.Contains(cfg, want) {
 				t.Errorf("config.yaml 缺少 %q，實際內容：\n%s", want, cfg)
 			}
+		}
+	})
+
+	// 兩份模板是一組要能直接對話的組合：Profile 的 provider.name 是 config.yaml
+	// providers 段的 key，改一邊沒改另一邊，快速開始就會停在「找不到 provider」。
+	t.Run("Profile 的 provider name 對得上 config.yaml 的 providers key", func(t *testing.T) {
+		dir := t.TempDir()
+		if _, err := runInit(t, dir); err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+
+		profile, err := os.ReadFile(filepath.Join(dir, ".oryxos", "profiles", "default.yaml"))
+		if err != nil {
+			t.Fatalf("讀取 default.yaml：%v", err)
+		}
+		cfg, err := os.ReadFile(filepath.Join(dir, ".oryxos", "config.yaml"))
+		if err != nil {
+			t.Fatalf("讀取 config.yaml：%v", err)
+		}
+
+		name := providerNameOf(t, string(profile))
+		if !strings.Contains(string(cfg), "\n  "+name+":\n") {
+			t.Errorf("config.yaml 的 providers 段沒有 %q，Profile 卻引用它，實際內容：\n%s", name, cfg)
 		}
 	})
 
@@ -202,4 +233,31 @@ func TestInitCommand(t *testing.T) {
 			t.Errorf("錯誤訊息未指出建立目標，實際錯誤：%v", err)
 		}
 	})
+}
+
+// providerNameOf 取出 Profile 模板裡 provider.name 的值。刻意手寫而不引 yaml：
+// 這裡要驗的是模板產物本身，用解析器讀等於拿模板的一種詮釋去驗模板。
+func providerNameOf(t *testing.T, profile string) string {
+	t.Helper()
+	inProvider := false
+	for line := range strings.SplitSeq(profile, "\n") {
+		if strings.HasPrefix(line, "provider:") {
+			inProvider = true
+			continue
+		}
+		// 空行與頂格註解不代表離開區塊——把它們當結束會在模板多一個空行時
+		// 誤報「找不到 provider.name」。
+		if trimmed := strings.TrimSpace(line); trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if inProvider && !strings.HasPrefix(line, "  ") {
+			break // 離開 provider 區塊
+		}
+		if name, ok := strings.CutPrefix(line, "  name:"); inProvider && ok {
+			name, _, _ = strings.Cut(name, "#") // 去掉行末註解
+			return strings.TrimSpace(name)
+		}
+	}
+	t.Fatalf("Profile 模板找不到 provider.name，實際內容：\n%s", profile)
+	return ""
 }
