@@ -131,7 +131,7 @@ func (t *httpTool) Execute(ctx context.Context, input string) core.ToolResult {
 		if errors.As(err, &uerr) {
 			cause = uerr.Err
 		}
-		target := redactURLQuery(in.URL)
+		target := core.RedactErrorText(in.URL)
 		if errors.Is(err, ErrSandboxViolation) {
 			// redirect 校驗失敗：SandboxViolation 不可重試。
 			return core.ToolResult{Error: fmt.Sprintf("%s 請求被攔截（%s）: %v", t.name, target, cause)}

@@ -25,12 +25,12 @@ import (
 // Session 儲存用落在 t.TempDir() 的真實 SQLite。
 func newToolAgent(t *testing.T, baseURL string, profile *core.Profile, subset, allowed []string) *core.AgentService {
 	t.Helper()
-	return newToolAgentOn(t, baseURL, profile, subset, allowed, discardLogger(), newSessionStore(t))
+	return newToolAgentOn(t, baseURL, profile, subset, allowed, discardLogger(), newStore(t))
 }
 
 // newToolAgentOn 是 newToolAgent 的完整形式：另可指定 Tool 執行日誌的去向
 // （斷言重試次數）與 Session 儲存（斷言落庫）。
-func newToolAgentOn(t *testing.T, baseURL string, profile *core.Profile, subset, allowed []string, logger *slog.Logger, sessions core.SessionStore) *core.AgentService {
+func newToolAgentOn(t *testing.T, baseURL string, profile *core.Profile, subset, allowed []string, logger *slog.Logger, st *testStore) *core.AgentService {
 	t.Helper()
 	r := tool.NewRegistry()
 	if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(allowed)); err != nil {
@@ -43,7 +43,7 @@ func newToolAgentOn(t *testing.T, baseURL string, profile *core.Profile, subset,
 	svc := provider.NewService(map[string]provider.Config{
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, discardLogger())
-	return core.NewAgentService(profile, svc, exec, newMemory(t, sessions))
+	return core.NewAgentService(profile, svc, exec, newMemory(t, st.sessions()), st.audit)
 }
 
 // newRecordingReplayServer 同 newReplayServer，另記錄每次 LLM 請求的 body，

@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // 純 Go SQLite 驅動，不引入 cgo（憲法 1.2）
@@ -51,34 +54,121 @@ CREATE UNIQUE INDEX IF NOT EXISTS sessions_single_active
 	ON sessions (channel, user_id, profile_name) WHERE status = 'active';
 `
 
+// DB 是 Workspace 內那個 SQLite 檔的連線。Session 與兩張審計表同庫（技術方案
+// §9.2）：備份或搬遷 Workspace 就是搬一個檔案，日後要以 session_id 還原一場對話
+// 的完整執行軌跡也不必跨庫。
+//
+// 前景與背景**分開兩個連線池**。兩者都限一條連線（SQLite 寫入互斥，單連線讓
+// 寫入天然串行化），但不能共用同一條：審計的背景 worker 若佔著唯一那條連線
+// 等鎖或等 I/O，前景的 Session Save 會連「試著寫」都做不到，只能排隊等到呼叫端
+// 逾期而整輪 rollback——審計就這樣間接把對話弄失敗了，那正是這條旁路不能做的事。
+//
+// 分池收掉的是「排隊」，收不掉的是「搶鎖」：兩個池最終寫的還是同一個檔案，
+// INSERT 之間仍會在 SQLite 的寫鎖上相遇。這是**刻意接受**的語義，界線如下——
+// 前景最多等一筆審計 INSERT 執行完（單一語句、次毫秒級），而不是等整批背景工作
+// 排完；兩邊 DSN 都帶 busy_timeout=5000，等待是對等且有界的。要再往前一步就得引
+// 進前景優先或延後審計那類協調機制，那是為一個量級差三個數量級的等待付出的複雜度
+// （憲法 3.2）。這條界線由 TestSessionSaveSurvivesAuditWriteBurst 守著。
+type DB struct {
+	fg *sql.DB // 前景：Session 讀寫，走使用者對話的關鍵路徑
+	bg *sql.DB // 背景：審計寫入，旁路
+}
+
+// Open 開啟（必要時建立）path 上的 SQLite 資料庫並建好全部表。呼叫端負責 Close。
+func Open(ctx context.Context, path string) (*DB, error) {
+	dsn, err := dataSourceName(path)
+	if err != nil {
+		return nil, err
+	}
+	fg, err := openPool(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("開啟 SQLite %s: %w", path, err)
+	}
+	for _, schema := range []string{sessionsSchema, auditSchema} {
+		if _, err := fg.ExecContext(ctx, schema); err != nil {
+			return nil, errors.Join(fmt.Errorf("建表（%s）: %w", path, err), fg.Close())
+		}
+	}
+	bg, err := openPool(dsn)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("開啟 SQLite %s（背景）: %w", path, err), fg.Close())
+	}
+	return &DB{fg: fg, bg: bg}, nil
+}
+
+// openPool 開一個限單連線的連線池。SQLite 是單檔資料庫、寫入互斥；限一條連線讓
+// 同一個池內的寫入天然串行化。
+func openPool(dsn string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	return db, nil
+}
+
+// busyTimeoutPragma 讓撞上鎖的寫入等一下再試，而不是立刻回 SQLITE_BUSY。
+//
+// `SetMaxOpenConns(1)` 只串行化**同一進程內**的寫入；同一個 Workspace 開兩個
+// oryxos 進程是設想過的情境，而審計把每個 turn 的寫入從一次變成數次，撞鎖的
+// 機率跟著上升——沒有它，別人的 Save 會因為我們在寫審計而失敗、整輪對話 rollback。
+//
+// 設在 **DSN** 而不是開啟後跑一次 `PRAGMA`：pragma 只對當下那條連線生效，
+// database/sql 換掉連線（連線被判定壞掉、或 ctx 中斷後驅動丟棄它）後就回到 0。
+// 實測確認過這個差異。DSN 形式則每條新連線都會套上。
+//
+// 不開 WAL：它會在 Workspace 裡多出 -wal 與 -shm 兩個側車檔案，破壞「備份或
+// 搬遷 Workspace 就是搬一個檔案」這個既定性質。要開該是連帶重新定義那個性質
+// 的一次獨立決定。
+const busyTimeoutPragma = "_pragma=busy_timeout(5000)"
+
+// dataSourceName 把檔案路徑組成 modernc.org/sqlite 的 DSN。
+func dataSourceName(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("解析資料庫路徑 %s: %w", path, err)
+	}
+	return fileDSN(abs), nil
+}
+
+// fileDSN 把一個絕對路徑組成帶 pragma 的 `file:` DSN。
+//
+// 用 url.URL 組而不是字串拼接：路徑含 `?` 或 `#` 時，拼出來的 DSN 會把路徑的
+// 後半當成 query，pragma **靜默失效**（連線照開、表照建，只是 busy_timeout
+// 回到 0，不報任何錯）——這種失敗方式只能靠正確跳脫來避免。
+//
+// 路徑要先正規化成 URI 形式再交給 url.URL：Windows 的 `C:\x\y` 直接放進 Path
+// 會被整段百分號跳脫成 `C:%5Cx%5Cy`，SQLite 認不得那是路徑分隔；UNC 的
+// `\\server\share` 同理。轉成斜線並補上前導斜線後，`C:/x/y` 與 `//server/share`
+// 都是合法的 file URI 路徑。
+func fileDSN(abs string) string {
+	p := filepath.ToSlash(abs)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p // Windows 的 C:/x/y → /C:/x/y
+	}
+	dsn := url.URL{Scheme: "file", Path: p, RawQuery: busyTimeoutPragma}
+	return dsn.String()
+}
+
+// Close 關閉兩個連線池。呼叫端要先關掉審計儲存（見 AuditLog.Close），否則
+// 背景還沒寫出去的記錄會撞上已關閉的連線。
+func (d *DB) Close() error {
+	if err := errors.Join(d.fg.Close(), d.bg.Close()); err != nil {
+		return fmt.Errorf("關閉 SQLite: %w", err)
+	}
+	return nil
+}
+
 // SessionManager 是 Session 的 SQLite 儲存：依聯合標識取回 active Session，
 // 並在每個成功 turn 後持久化對話歷史。實作 core.SessionStore。
 type SessionManager struct {
 	db *sql.DB
 }
 
-// OpenSessionManager 開啟（必要時建立）path 上的 SQLite 資料庫並建表。
-// 呼叫端負責 Close。
-func OpenSessionManager(ctx context.Context, path string) (*SessionManager, error) {
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, fmt.Errorf("開啟 SQLite %s: %w", path, err)
-	}
-	// SQLite 是單檔資料庫、寫入互斥；限一條連線讓寫入天然串行化，免去
-	// SQLITE_BUSY 重試邏輯。核心階段（單機、每個 turn 一次寫）綽綽有餘。
-	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, sessionsSchema); err != nil {
-		return nil, errors.Join(fmt.Errorf("建立 sessions 表（%s）: %w", path, err), db.Close())
-	}
-	return &SessionManager{db: db}, nil
-}
-
-// Close 關閉底層資料庫連線。
-func (m *SessionManager) Close() error {
-	if err := m.db.Close(); err != nil {
-		return fmt.Errorf("關閉 SQLite: %w", err)
-	}
-	return nil
+// NewSessionManager 以已開啟的 DB 建立 Session 儲存；生命週期由 DB 持有，
+// 本型別不負責關閉。
+func NewSessionManager(db *DB) *SessionManager {
+	return &SessionManager{db: db.fg}
 }
 
 // ActiveSession 依（Channel、使用者、Profile）聯合標識取回 active Session；

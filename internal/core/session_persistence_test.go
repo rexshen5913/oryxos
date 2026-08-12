@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -50,18 +51,27 @@ type persistedMessage struct {
 	ToolCallID string `json:"tool_call_id"`
 }
 
-// querySessions 直接查 sessions 表（外部可觀察產物），按 created_at 排序。
-func querySessions(t *testing.T, dbPath string) []sessionRow {
+// openTestDB 以另一條連線開同一個 db 檔做斷言查詢。DSN 要帶 busy_timeout：
+// 引擎那邊的背景審計 worker 可能正在寫，沒有它讀取會立刻吃到 SQLITE_BUSY 而不是
+// 等一下再試——與產品端 storage.Open 的理由相同。
+func openTestDB(t *testing.T, dbPath string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatalf("開啟 db 檔 %s: %v", dbPath, err)
 	}
-	defer func() {
+	t.Cleanup(func() {
 		if err := db.Close(); err != nil {
 			t.Errorf("關閉 db 檔: %v", err)
 		}
-	}()
+	})
+	return db
+}
+
+// querySessions 直接查 sessions 表（外部可觀察產物），按 created_at 排序。
+func querySessions(t *testing.T, dbPath string) []sessionRow {
+	t.Helper()
+	db := openTestDB(t, dbPath)
 
 	rows, err := db.QueryContext(context.Background(),
 		`SELECT session_id, profile_name, channel, user_id, messages_json, status,
@@ -123,27 +133,73 @@ func decodePersisted(t *testing.T, messagesJSON string) []persistedMessage {
 	return msgs
 }
 
-// newSessionStore 開一個落在 t.TempDir() 的真實 SQLite Session 儲存，給不關心
-// 持久化細節、但仍不 mock 可確定化依賴的測試用（憲法 4.3）。
-func newSessionStore(t *testing.T) *storage.SessionManager {
-	t.Helper()
-	return openSessionStore(t, filepath.Join(t.TempDir(), "oryxos.db"))
+// testStore 綁住測試用的 SQLite 與其上的儲存實作（Session 與審計同庫）。
+// 審計寫入在背景進行，斷言前要 flush ——那不是等待，是等背景 worker 把已排入
+// 的寫入做完。
+type testStore struct {
+	db    *storage.DB
+	audit *storage.AuditLog
 }
 
-// openSessionStore 在 dbPath 開啟真實的 SQLite Session 儲存；測試結束時關閉
-// （重複關閉是安全的，跨重啟測試會先自行關掉模擬進程結束）。
-func openSessionStore(t *testing.T, dbPath string) *storage.SessionManager {
+// sessions 取這個 db 上的 Session 儲存。
+func (s *testStore) sessions() *storage.SessionManager {
+	return storage.NewSessionManager(s.db)
+}
+
+// flush 排空背景審計寫入，讓「寫完再查」在測試裡是確定的。ctx 給的上限寬鬆但
+// 有界——排空卡住時要看到是哪個測試卡的，而不是整包 go test 逾時。
+func (s *testStore) flush(t *testing.T) {
 	t.Helper()
-	store, err := storage.OpenSessionManager(context.Background(), dbPath)
-	if err != nil {
-		t.Fatalf("OpenSessionManager(%s): %v", dbPath, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.audit.Flush(ctx); err != nil {
+		t.Fatalf("排空審計寫入: %v", err)
 	}
+}
+
+// close 模擬進程結束：先排空審計再關資料庫（順序與組裝點一致）。
+func (s *testStore) close() error {
+	if err := s.audit.Close(); err != nil {
+		return err
+	}
+	return s.db.Close()
+}
+
+// newStore 開一個落在 t.TempDir() 的真實 SQLite，給不關心持久化細節、但仍不
+// mock 可確定化依賴的測試用（憲法 4.3）。
+func newStore(t *testing.T) *testStore {
+	t.Helper()
+	return openStore(t, filepath.Join(t.TempDir(), "oryxos.db"))
+}
+
+// openStore 在 dbPath 開啟真實的 SQLite；測試結束時關閉（重複關閉是安全的，
+// 跨重啟測試會先自行關掉模擬進程結束）。
+func openStore(t *testing.T, dbPath string) *testStore {
+	t.Helper()
+	return openStoreLogged(t, dbPath, discardLogger())
+}
+
+// openStoreLogged 同 openStore，但指定審計旁路的日誌去向——審計寫入失敗只落
+// 日誌不上拋，要斷言那件事就得看得到它。
+func openStoreLogged(t *testing.T, dbPath string, logger *slog.Logger) *testStore {
+	t.Helper()
+	db, err := storage.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("storage.Open(%s): %v", dbPath, err)
+	}
+	st := &testStore{db: db, audit: storage.NewAuditLog(db, logger)}
 	t.Cleanup(func() {
-		if err := store.Close(); err != nil {
-			t.Errorf("關閉 Session 儲存: %v", err)
+		if err := st.close(); err != nil {
+			t.Errorf("關閉 Workspace 資料庫: %v", err)
 		}
 	})
-	return store
+	return st
+}
+
+// newSessionStore 開一個落在 t.TempDir() 的真實 Session 儲存。
+func newSessionStore(t *testing.T) *storage.SessionManager {
+	t.Helper()
+	return newStore(t).sessions()
 }
 
 // activeSession 依 CLI 的聯合標識取回 active Session（無則為新建的空 Session）。
@@ -202,8 +258,9 @@ func TestProcessPersistsSuccessfulTurn(t *testing.T) {
 	srv := newReplayServer(t, toolCallFixture, readFixture(t, "reply_weather_final.json"))
 
 	dbPath := filepath.Join(t.TempDir(), "oryxos.db")
-	store := openSessionStore(t, dbPath)
-	agent := newToolAgentOn(t, srv.URL, testProfile(), []string{"http_get"}, []string{"127.0.0.1"}, discardLogger(), store)
+	db := openStore(t, dbPath)
+	store := db.sessions()
+	agent := newToolAgentOn(t, srv.URL, testProfile(), []string{"http_get"}, []string{"127.0.0.1"}, discardLogger(), db)
 	session := activeSession(t, store)
 
 	if _, err := agent.Process(context.Background(), session, "查一下北京天氣並告訴我穿什麼"); err != nil {
@@ -312,9 +369,10 @@ func TestSessionRestoreMatrix(t *testing.T) {
 			var seededID string
 			if tt.seedTurn1 {
 				// 第一個進程：對話一輪後關閉儲存，模擬進程結束。
-				store := openSessionStore(t, dbPath)
+				db := openStore(t, dbPath)
+				store := db.sessions()
 				session := activeSession(t, store)
-				if _, err := newAgentOn(t, srv.URL, discardLogger(), store).Process(context.Background(), session, turn1Msg); err != nil {
+				if _, err := newAgentOn(t, srv.URL, discardLogger(), db).Process(context.Background(), session, turn1Msg); err != nil {
 					t.Fatalf("重啟前對話: %v", err)
 				}
 				seededID = session.ID
@@ -323,15 +381,16 @@ func TestSessionRestoreMatrix(t *testing.T) {
 						t.Fatalf("歸檔 active Session: %v", err)
 					}
 				}
-				if err := store.Close(); err != nil {
-					t.Fatalf("關閉 Session 儲存: %v", err)
+				if err := db.close(); err != nil {
+					t.Fatalf("關閉 Workspace 資料庫: %v", err)
 				}
 			}
 
 			// 第二個進程：同一個 db 檔重新組儲存與引擎（不 mock「重啟」）。
-			store := openSessionStore(t, dbPath)
+			db := openStore(t, dbPath)
+			store := db.sessions()
 			session := activeSession(t, store)
-			if _, err := newAgentOn(t, srv.URL, discardLogger(), store).Process(context.Background(), session, turn2Msg); err != nil {
+			if _, err := newAgentOn(t, srv.URL, discardLogger(), db).Process(context.Background(), session, turn2Msg); err != nil {
 				t.Fatalf("重啟後續談: %v", err)
 			}
 
@@ -393,8 +452,9 @@ func TestFailedTurnNotPersisted(t *testing.T) {
 			srv := replayThenFail(t, fixtures...)
 
 			dbPath := filepath.Join(t.TempDir(), "oryxos.db")
-			store := openSessionStore(t, dbPath)
-			agent := newToolAgentOn(t, srv.URL, testProfile(), []string{"http_get"}, []string{"127.0.0.1"}, discardLogger(), store)
+			db := openStore(t, dbPath)
+			store := db.sessions()
+			agent := newToolAgentOn(t, srv.URL, testProfile(), []string{"http_get"}, []string{"127.0.0.1"}, discardLogger(), db)
 			session := activeSession(t, store)
 
 			if _, err := agent.Process(context.Background(), session, "你好"); err != nil {
@@ -427,16 +487,16 @@ func TestSaveRejectsArchivedSession(t *testing.T) {
 	srv := newReplayServer(t, readFixture(t, "reply_turn1.json"), readFixture(t, "reply_turn2.json"))
 	dbPath := filepath.Join(t.TempDir(), "oryxos.db")
 
-	storeA := openSessionStore(t, dbPath)
-	session := activeSession(t, storeA)
-	agent := newAgentOn(t, srv.URL, discardLogger(), storeA)
+	dbA := openStore(t, dbPath)
+	session := activeSession(t, dbA.sessions())
+	agent := newAgentOn(t, srv.URL, discardLogger(), dbA)
 	if _, err := agent.Process(context.Background(), session, "我的專案用 Go 開發"); err != nil {
 		t.Fatalf("第一輪對話: %v", err)
 	}
 	beforeArchive := onlySession(t, dbPath)
 
 	// 另一個進程執行 `oryxos chat --new`，歸檔掉這個進程手上這場。
-	storeB := openSessionStore(t, dbPath)
+	storeB := openStore(t, dbPath).sessions()
 	if err := storeB.ArchiveActive(context.Background(), "cli", "local", "default"); err != nil {
 		t.Fatalf("另一個進程歸檔: %v", err)
 	}
@@ -466,8 +526,9 @@ func TestSaveRejectsArchivedSession(t *testing.T) {
 func TestLastActiveAtUpdatedEachTurn(t *testing.T) {
 	srv := newReplayServer(t, readFixture(t, "reply_turn1.json"), readFixture(t, "reply_turn2.json"))
 	dbPath := filepath.Join(t.TempDir(), "oryxos.db")
-	store := openSessionStore(t, dbPath)
-	agent := newAgentOn(t, srv.URL, discardLogger(), store)
+	db := openStore(t, dbPath)
+	store := db.sessions()
+	agent := newAgentOn(t, srv.URL, discardLogger(), db)
 	session := activeSession(t, store)
 
 	if _, err := agent.Process(context.Background(), session, "我的專案用 Go 開發"); err != nil {

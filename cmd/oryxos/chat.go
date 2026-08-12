@@ -159,16 +159,17 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 		fmt.Fprintf(out, "提醒：%s/config.yaml 的 http.allowed_domains 為空，HTTP Tool 呼叫將全部被攔截；請把允許的域名加入白名單。\n", workspaceDir)
 	}
 
-	// 對話落 Workspace 內單一 SQLite 檔：備份或搬遷 Workspace 就是搬檔案。
-	sessions, err := storage.OpenSessionManager(ctx, filepath.Join(ws, sessionDBFile))
+	// 對話與審計落 Workspace 內單一 SQLite 檔：備份或搬遷 Workspace 就是搬檔案。
+	store, err := storage.Open(ctx, filepath.Join(ws, sessionDBFile))
 	if err != nil {
-		return fmt.Errorf("開啟 Session 儲存: %w", err)
+		return fmt.Errorf("開啟 Workspace 資料庫: %w", err)
 	}
 	defer func() {
-		if cerr := sessions.Close(); cerr != nil && err == nil {
+		if cerr := store.Close(); cerr != nil && err == nil {
 			err = cerr
 		}
 	}()
+	sessions := storage.NewSessionManager(store)
 	// --new：先歸檔當前 active Session，下面的 ActiveSession 就取不到 active 列，
 	// 自然開出一場乾淨的新對話（沒有 active Session 時歸檔是 no-op，不報錯）。
 	if opts.newConversation {
@@ -186,7 +187,16 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	// Memory 統一門面：會話記憶委託 SQLite 的 Session 儲存、長期記憶委託
 	// MEMORY.md，引擎只認這一個介面。
 	memories := memory.NewService(sessions, longTerm)
-	agent := core.NewAgentService(prof, provider.NewService(providerConfigs, logger), executor, memories)
+	// 審計與 Session 同庫；寫入在背景進行、失敗只落錯誤日誌，不中斷對話
+	// （憲法 6.2、3.3）。Close 要排在 store.Close 之前跑，否則佇列裡還沒寫出去
+	// 的記錄會隨進程消失——defer 是後進先出，所以這行寫在開 store 之後。
+	audit := storage.NewAuditLog(store, logger)
+	defer func() {
+		if cerr := audit.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
+	agent := core.NewAgentService(prof, provider.NewService(providerConfigs, logger), executor, memories, audit)
 	ch := cli.New(agent, session, prof.Identity.AgentName, in, out)
 
 	if opts.message != "" {

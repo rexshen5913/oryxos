@@ -2,12 +2,8 @@ package tool
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/url"
-	"regexp"
-	"strings"
 	"time"
 
 	"github.com/rexshen5913/oryxos/internal/core"
@@ -57,91 +53,13 @@ func (e *Executor) Execute(ctx context.Context, call core.ToolCall) core.ToolRes
 	if result.OK {
 		e.logger.InfoContext(ctx, "tool_invocation", append(attrs, "status", "completed")...)
 	} else {
-		e.logger.ErrorContext(ctx, "tool_invocation", append(attrs, "status", "failed", "error", redactErrorText(result.Error))...)
+		e.logger.ErrorContext(ctx, "tool_invocation", append(attrs, "status", "failed", "error", core.RedactErrorText(result.Error))...)
 	}
 	return result
 }
 
-// urlPattern 粗匹配文字中內嵌的 http(s) URL，供 query 遮蔽。
-var urlPattern = regexp.MustCompile(`https?://[^\s"'）)]+`)
-
-// redactErrorText 對錯誤文字中內嵌的 URL 做 query 遮蔽後再落日誌——錯誤訊息
-// 常內嵌完整 URL（如 url.Error），是 args 之外的第二條密鑰洩漏路徑；來源層
-// 已避免內嵌 raw URL，這裡是統一收口的最後防線（未來 Tool 一體適用）。
-func redactErrorText(s string) string {
-	return urlPattern.ReplaceAllStringFunc(s, redactURLQuery)
-}
-
-// sensitiveKeyParts 是參數摘要中須遮蔽值的 key 片段（大小寫不敏感、子串命中）。
-var sensitiveKeyParts = []string{"token", "secret", "password", "api_key", "apikey", "authorization", "credential", "cookie"}
-
-// summarizeArgs 產生可安全落日誌的參數摘要：敏感 key 的值遮蔽、URL query 整段
-// 遮蔽（api key 常放 query）、body 只記長度、非 JSON 參數只記長度，最後截斷。
-// 原樣記錄呼叫參數等於把密鑰寫進日誌，摘要必須先去敏再落盤。
+// summarizeArgs 產生可安全落日誌的參數摘要：去敏後再截斷控制單行長度。去敏規則
+// 與審計落庫共用同一套實作（core.RedactArgs），兩條落盤路徑不該各有一套。
 func summarizeArgs(args string) string {
-	var v any
-	if err := json.Unmarshal([]byte(args), &v); err != nil {
-		return fmt.Sprintf("<非 JSON 參數 %d bytes>", len(args))
-	}
-	summary, err := json.Marshal(redactValue("", v))
-	if err != nil {
-		return fmt.Sprintf("<參數摘要編碼失敗 %d bytes>", len(args))
-	}
-	return truncateRunes(string(summary), 200)
-}
-
-// redactValue 遞迴遮蔽參數值；key 是該值在上層物件中的欄位名（陣列元素沿用）。
-func redactValue(key string, v any) any {
-	if isSensitiveKey(key) {
-		return "[REDACTED]"
-	}
-	switch val := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(val))
-		for k, item := range val {
-			out[k] = redactValue(k, item)
-		}
-		return out
-	case []any:
-		out := make([]any, len(val))
-		for i, item := range val {
-			out[i] = redactValue(key, item)
-		}
-		return out
-	case string:
-		if strings.EqualFold(key, "body") {
-			return fmt.Sprintf("[%d bytes]", len(val))
-		}
-		return redactURLQuery(val)
-	default:
-		return v
-	}
-}
-
-func isSensitiveKey(key string) bool {
-	lower := strings.ToLower(key)
-	for _, part := range sensitiveKeyParts {
-		if strings.Contains(lower, part) {
-			return true
-		}
-	}
-	return false
-}
-
-// redactURLQuery 把帶 query 的 http/https URL 的 query 整段遮蔽。
-func redactURLQuery(s string) string {
-	u, err := url.Parse(s)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.RawQuery == "" {
-		return s
-	}
-	u.RawQuery = ""
-	return u.String() + "?[REDACTED]"
-}
-
-func truncateRunes(s string, maxRunes int) string {
-	r := []rune(s)
-	if len(r) <= maxRunes {
-		return s
-	}
-	return string(r[:maxRunes]) + "…"
+	return core.TruncateRunes(core.RedactArgs(args), 200)
 }

@@ -63,17 +63,25 @@ func readFixture(t *testing.T, name string) string {
 // Session 儲存用落在 t.TempDir() 的真實 SQLite。
 func newAgent(t *testing.T, baseURL string, logger *slog.Logger) *core.AgentService {
 	t.Helper()
-	return newAgentOn(t, baseURL, logger, newSessionStore(t))
+	return newAgentOn(t, baseURL, logger, newStore(t))
 }
 
 // newAgentOn 同 newAgent，但用指定的 Session 儲存——跨重啟與落庫斷言的測試
 // 要對同一個 db 檔先後組兩次引擎。
-func newAgentOn(t *testing.T, baseURL string, logger *slog.Logger, sessions core.SessionStore) *core.AgentService {
+func newAgentOn(t *testing.T, baseURL string, logger *slog.Logger, st *testStore) *core.AgentService {
 	t.Helper()
 	svc := provider.NewService(map[string]provider.Config{
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, logger)
-	return core.NewAgentService(testProfile(), svc, noTools(t), newMemory(t, sessions))
+	return core.NewAgentService(testProfile(), svc, noTools(t), newMemory(t, st.sessions()), st.audit)
+}
+
+// newAgentWithProfile 以指定的 Profile 與 ProviderService 組出無 Tool 的
+// AgentService；Session、Memory、審計都用落在 t.TempDir() 的真實實作。
+func newAgentWithProfile(t *testing.T, profile *core.Profile, svc core.ProviderService) *core.AgentService {
+	t.Helper()
+	db := newStore(t)
+	return core.NewAgentService(profile, svc, noTools(t), newMemory(t, db.sessions()), db.audit)
 }
 
 // newMemory 以指定的 Session 儲存與一份落在 t.TempDir()、尚未建立的 MEMORY.md

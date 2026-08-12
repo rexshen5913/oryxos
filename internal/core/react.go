@@ -22,12 +22,13 @@ type ReActLoop struct {
 	provider ProviderService
 	tools    ToolExecutor
 	memory   MemoryService
+	audit    AuditStore
 }
 
-// NewReActLoop 以 provider、Tool 子集與 Memory 門面建立 ReAct 循環；
-// tools 與 memory 都不得為 nil。
-func NewReActLoop(provider ProviderService, tools ToolExecutor, memory MemoryService) *ReActLoop {
-	return &ReActLoop{provider: provider, tools: tools, memory: memory}
+// NewReActLoop 以 provider、Tool 子集、Memory 門面與審計儲存建立 ReAct 循環；
+// 四者都不得為 nil。
+func NewReActLoop(provider ProviderService, tools ToolExecutor, memory MemoryService, audit AuditStore) *ReActLoop {
+	return &ReActLoop{provider: provider, tools: tools, memory: memory, audit: audit}
 }
 
 // Run 對 session 的當前對話歷史跑 ReAct 循環，回傳 Agent 的最終回應。每輪把
@@ -53,6 +54,7 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 
 	var lastContent string // 最後一輪 LLM 內容，強制終止時作為已知進度附上
 	for range maxIterations {
+		started := time.Now()
 		resp, err := l.provider.Chat(ctx, ChatRequest{
 			Provider:    profile.Provider.Name,
 			Model:       profile.Provider.Model,
@@ -60,6 +62,9 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 			Messages:    buildMessages(profile, session, longTerm),
 			Tools:       defs,
 		})
+		// 每次 LLM 呼叫都落審計，成敗都記——審計記的是已發生的事實，失敗那次
+		// 尤其要留下來。這一行在錯誤處理之前，turn 失敗 rollback 也不會抹掉它。
+		l.recordLLMCall(ctx, profile, session, started, resp, err)
 		if err != nil {
 			return "", fmt.Errorf("呼叫 LLM: %w", err)
 		}
@@ -70,7 +75,7 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 		lastContent = resp.Content
 
 		for _, call := range resp.ToolCalls {
-			result, retries, err := l.executeWithRetry(ctx, call)
+			result, retries, err := l.executeWithRetry(ctx, profile, session, call)
 			if err != nil {
 				return "", err
 			}
@@ -100,8 +105,8 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 // （最多 maxToolRetries 次），回傳最終結果與實際重試次數。退避等待走 ctx：
 // 取消／逾時立即中斷並回傳錯誤（憲法 5.3）——此時本輪已嘗試執行過該 Tool，
 // 錯誤註記外部效果不會因回退而撤銷。
-func (l *ReActLoop) executeWithRetry(ctx context.Context, call ToolCall) (ToolResult, int, error) {
-	result := l.tools.Execute(ctx, call)
+func (l *ReActLoop) executeWithRetry(ctx context.Context, profile *Profile, session *Session, call ToolCall) (ToolResult, int, error) {
+	result := l.execute(ctx, profile, session, call)
 	retries := 0
 	delay := toolRetryBaseDelay
 	for !result.OK && result.Retryable && retries < maxToolRetries {
@@ -112,9 +117,53 @@ func (l *ReActLoop) executeWithRetry(ctx context.Context, call ToolCall) (ToolRe
 		}
 		retries++
 		delay *= 2
-		result = l.tools.Execute(ctx, call)
+		result = l.execute(ctx, profile, session, call)
 	}
 	return result, retries, nil
+}
+
+// execute 執行一次 Tool 呼叫並落審計。每次實際執行都記一筆（重試因此有多筆），
+// 與既有 tool_invocation 結構化日誌的語義一致——它們記的是同一件事。
+func (l *ReActLoop) execute(ctx context.Context, profile *Profile, session *Session, call ToolCall) ToolResult {
+	started := time.Now()
+	result := l.tools.Execute(ctx, call)
+	// 參數與錯誤訊息落庫前先去敏，與結構化日誌共用同一套規則（core.RedactArgs）。
+	// db 檔是使用者會直接打開、隨 Workspace 備份搬遷的東西，比日誌更持久；
+	// 審計要的是「呼叫了誰、結果如何」，密鑰不在其中。
+	//
+	// 這裡與 sessions.messages_json 存原始 arguments 不衝突：那份原文是**必要的**
+	// ——恢復的對話要能原樣重放給 LLM，改過的參數會讓歷史失真。審計記錄不重放，
+	// 沒有這個必要性，就不該多留一份明文。
+	inv := ToolInvocation{
+		SessionID:   session.ID,
+		ProfileName: profile.Name,
+		ToolName:    call.Name,
+		Parameters:  RedactArgs(call.Arguments),
+		Status:      auditStatus(ctx, !result.OK),
+		StartedAt:   started,
+		CompletedAt: time.Now(),
+	}
+	if result.OK {
+		inv.Result = result.Content
+	} else {
+		inv.Error = RedactErrorText(result.Error)
+	}
+	l.audit.RecordToolInvocation(ctx, inv)
+	return result
+}
+
+// recordLLMCall 落一筆 LLM 呼叫的審計記錄；err 非 nil 時記失敗（ctx 逾時記 timeout）。
+func (l *ReActLoop) recordLLMCall(ctx context.Context, profile *Profile, session *Session, started time.Time, resp ChatResponse, err error) {
+	l.audit.RecordLLMCall(ctx, LLMCall{
+		SessionID:   session.ID,
+		Provider:    profile.Provider.Name,
+		Model:       profile.Provider.Model,
+		Usage:       resp.Usage,
+		Latency:     time.Since(started),
+		Status:      auditStatus(ctx, err != nil),
+		StartedAt:   started,
+		CompletedAt: time.Now(),
+	})
 }
 
 // buildMessages 組裝一次 LLM 呼叫的訊息序列：system prompt 為 Profile 的

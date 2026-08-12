@@ -12,9 +12,11 @@ type ChatRequest struct {
 }
 
 // ChatResponse 是一次 LLM 呼叫的輸出；ToolCalls 非空表示 LLM 要求呼叫 Tool。
+// Usage 由 Provider 從回應原樣帶回，供審計落庫記 token 用量。
 type ChatResponse struct {
 	Content   string
 	ToolCalls []ToolCall
+	Usage     TokenUsage
 }
 
 // ProviderService 是 ReAct 循環呼叫 LLM 的介面，由 internal/provider 以

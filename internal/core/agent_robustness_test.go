@@ -27,7 +27,7 @@ import (
 // tool_invocation 筆數——重試次數在結構化日誌上的外部可觀察行為（User Story 20）。
 func newToolAgentLogged(t *testing.T, baseURL string, profile *core.Profile, subset, allowed []string, logger *slog.Logger) *core.AgentService {
 	t.Helper()
-	return newToolAgentOn(t, baseURL, profile, subset, allowed, logger, newSessionStore(t))
+	return newToolAgentOn(t, baseURL, profile, subset, allowed, logger, newStore(t))
 }
 
 // TestProcessMultiRoundToolCalls 是 ADR-0002 分支「多輪連續 tool 呼叫」：
@@ -336,7 +336,7 @@ func TestProcessHistoryTruncation(t *testing.T) {
 			svc := provider.NewService(map[string]provider.Config{
 				"openai": {APIKey: "test-key", BaseURL: srv.URL},
 			}, discardLogger())
-			agent := core.NewAgentService(p, svc, noTools(t), newMemory(t, newSessionStore(t)))
+			agent := newAgentWithProfile(t, p, svc)
 			session := core.NewSession("cli", "local", "default")
 
 			for i := 1; i <= total; i++ {

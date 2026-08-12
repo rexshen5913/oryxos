@@ -79,10 +79,19 @@ func (s *Service) Chat(ctx context.Context, req core.ChatRequest) (core.ChatResp
 		"latency_ms", latency.Milliseconds(),
 	)
 
-	if len(resp.Choices) == 0 {
-		return core.ChatResponse{}, fmt.Errorf("Provider %s 回應不含任何 choice", req.Provider)
+	// token 用量先取出來：即使回應不合用（沒有 choice），這些 token 也已經被計費，
+	// 審計記成零會讓成本歸零，那是錯誤精度。錯誤路徑一併把 Usage 帶回去。
+	usage := core.TokenUsage{
+		PromptTokens:     resp.Usage.PromptTokens,
+		CompletionTokens: resp.Usage.CompletionTokens,
+		TotalTokens:      resp.Usage.TotalTokens,
 	}
-	return fromOpenAIMessage(resp.Choices[0].Message), nil
+	if len(resp.Choices) == 0 {
+		return core.ChatResponse{Usage: usage}, fmt.Errorf("Provider %s 回應不含任何 choice", req.Provider)
+	}
+	out := fromOpenAIMessage(resp.Choices[0].Message)
+	out.Usage = usage
+	return out, nil
 }
 
 // toOpenAIMessages 把 Session 訊息轉成 OpenAI 兼容協議格式：assistant 訊息帶

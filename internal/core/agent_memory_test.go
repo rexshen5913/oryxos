@@ -83,12 +83,12 @@ func saveMemoryFixture(t *testing.T, name, content string) string {
 // 真實 SQLite；兩者都由 MemoryService 門面統一對外。subset 是 Profile 的 tools 欄位。
 func newMemoryAgent(t *testing.T, baseURL string, root *os.Root, subset []string, logger *slog.Logger) *core.AgentService {
 	t.Helper()
-	return newMemoryAgentOn(t, baseURL, root, subset, logger, newSessionStore(t))
+	return newMemoryAgentOn(t, baseURL, root, subset, logger, newStore(t))
 }
 
 // newMemoryAgentOn 同 newMemoryAgent，但用指定的 Session 儲存——`--new` 的歸檔
 // 路徑要對同一個 db 檔先歸檔再開新 Session。
-func newMemoryAgentOn(t *testing.T, baseURL string, root *os.Root, subset []string, logger *slog.Logger, sessions core.SessionStore) *core.AgentService {
+func newMemoryAgentOn(t *testing.T, baseURL string, root *os.Root, subset []string, logger *slog.Logger, st *testStore) *core.AgentService {
 	t.Helper()
 	longTerm := memory.NewLongTermMemory(root, memoryRelPath)
 	r := tool.NewRegistry()
@@ -104,7 +104,7 @@ func newMemoryAgentOn(t *testing.T, baseURL string, root *os.Root, subset []stri
 	svc := provider.NewService(map[string]provider.Config{
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, discardLogger())
-	return core.NewAgentService(testProfile(), svc, exec, memory.NewService(sessions, longTerm))
+	return core.NewAgentService(testProfile(), svc, exec, memory.NewService(st.sessions(), longTerm), st.audit)
 }
 
 // recallMemoryFixture 把錄製回應中的 {{QUERY}} 換成本次檢索的關鍵詞。
@@ -678,8 +678,9 @@ func TestNewConversationStillInjectsLongTermMemory(t *testing.T) {
 
 	root, memPath := workspaceRoot(t)
 	seedMemory(t, memPath, "## 2026-08-01\n\n- "+fact+"\n")
-	store := openSessionStore(t, filepath.Join(t.TempDir(), "oryxos.db"))
-	agent := newMemoryAgentOn(t, srv.URL, root, nil, discardLogger(), store)
+	db := openStore(t, filepath.Join(t.TempDir(), "oryxos.db"))
+	store := db.sessions()
+	agent := newMemoryAgentOn(t, srv.URL, root, nil, discardLogger(), db)
 
 	session := activeSession(t, store)
 	if _, err := agent.Process(context.Background(), session, "第一句"); err != nil {
