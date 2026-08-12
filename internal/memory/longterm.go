@@ -24,6 +24,14 @@ const (
 	// 確保注入預算至少容得下三四條近期記憶與日期 header 的開銷——這個關係是
 	// 它的判準，不是孤立魔數。
 	maxEntryRunes = maxInjectRunes / 4
+	// maxRecallTerms 是單次檢索的關鍵詞數上限。兩個理由：AND 語義下關鍵詞越多
+	// 結果越窄，超過這個數量的查詢實務上必然零匹配，模型該做的是換更少的詞重試；
+	// 而檢索要拿每個相異詞掃過整份記憶，沒有上限的話成本＝記憶量×詞數，兩者都
+	// 來自外部（檔案使用者可手改、query 由 LLM 產生），得在邊界收住。
+	//
+	// 超過一律拒絕、不截掉多餘的詞：AND 之下少幾個詞會讓結果變**寬**，回傳的
+	// 內容就不是模型要求的那個查詢了——與 save_memory 拒絕超長內容同一個判準。
+	maxRecallTerms = 16
 )
 
 // dateHeaderLayout 是每條記憶的日期 header 格式。header 讓使用者翻閱 MEMORY.md
@@ -134,23 +142,30 @@ func (m *LongTermMemory) Load(ctx context.Context) (string, error) {
 // 方法名保留升級空間：擴展階段要加語義檢索時，這裡演進成帶 mode 參數的 recall
 // （keyword ＋ semantic），上層的 recall_memory Tool 不必跟著改（技術方案 §5.1）。
 //
-// 關鍵詞先 TrimSpace 再用於匹配：LLM 送來的關鍵詞可能帶前後空白，而空白在
-// 關鍵詞檢索裡不該有意義——`" Go "` 應該和 `"Go"` 查到同一批行。空白關鍵詞則
-// 一律拒絕：`strings.Contains(x, "")` 恆真，會把整份記憶當成「全部匹配」倒回給
-// LLM，那不是檢索。
+// query 以空白與標點切成多個關鍵詞，一行要**全部**命中才算匹配（AND，作用域
+// 是同一行），大小寫不敏感——切法與理由見 recallMatches。呼叫端因此不該把整句
+// 問題當 query 送進來。
+//
+// 兩種 query 一律拒絕，都以 ErrInvalidEntry 回覆（參數校驗失敗、不可重試）：
+// 切不出任何關鍵詞（`strings.Contains(x, "")` 恆真，會把整份記憶當成「全部匹配」
+// 倒回給 LLM，那不是檢索）；以及關鍵詞多於 maxRecallTerms（見該常數）。
 func (m *LongTermMemory) RecallByKeyword(ctx context.Context, query string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("檢索長期記憶: %w", err)
 	}
-	needle := strings.TrimSpace(query)
-	if needle == "" {
+	// 以**相異**詞數判定：重複的詞在 AND 下是多餘的，既不讓結果更窄也不增加掃描
+	// 成本（recallMatches 會去重），拿它來拒絕使用者只會莫名其妙。
+	if terms := foldedTerms(splitTerms(query)); len(terms) == 0 {
 		return "", fmt.Errorf("%w：關鍵詞為空；請帶上要檢索的關鍵詞後重新呼叫 recall_memory", ErrInvalidEntry)
+	} else if len(terms) > maxRecallTerms {
+		return "", fmt.Errorf("%w：關鍵詞有 %d 個，超過上限 %d；一條記憶要含有全部關鍵詞才會被取回，"+
+			"請只留最關鍵的幾個詞後重新呼叫 recall_memory", ErrInvalidEntry, len(terms), maxRecallTerms)
 	}
 	content, err := m.read()
 	if err != nil {
 		return "", err
 	}
-	return recallMatches(content, needle), nil
+	return recallMatches(content, query), nil
 }
 
 // openAttempts 是「開檔／補建目錄」的嘗試次數上限，見 openForAppend。

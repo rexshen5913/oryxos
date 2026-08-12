@@ -76,19 +76,24 @@ func NewRecallMemoryTool(longTerm *LongTermMemory) *RecallMemoryTool {
 
 func (t *RecallMemoryTool) Name() string { return "recall_memory" }
 
+// Description 與 InputSchema 必須講清楚檢索的語義：關鍵詞是 AND、且要落在
+// **同一行**。少了這段，模型會送整句問題（「使用者的技術棧偏好是什麼」），
+// 那在全詞同行的規則下幾乎不可能匹配——匹配邏輯修好了也白搭。
 func (t *RecallMemoryTool) Description() string {
 	return "以關鍵詞檢索長期記憶，回傳匹配的記憶行。需要回想使用者先前告訴過你的偏好或事實時使用；" +
-		"注入在系統提示詞裡的記憶可能已因長度上限被截斷，這個 Tool 讀的是完整檔案。"
+		"注入在系統提示詞裡的記憶可能已因長度上限被截斷，這個 Tool 讀的是完整檔案。" +
+		fmt.Sprintf("query 以空白分隔關鍵詞，一條記憶要含有**全部**關鍵詞才會被取回，"+
+			"所以關鍵詞越多結果越窄；查不到時請改用更少、更關鍵的詞重試。最多 %d 個關鍵詞。", maxRecallTerms)
 }
 
 func (t *RecallMemoryTool) InputSchema() json.RawMessage {
-	return json.RawMessage(`{
+	return json.RawMessage(fmt.Sprintf(`{
 		"type": "object",
 		"properties": {
-			"query": {"type": "string", "description": "要檢索的關鍵詞，例如某個技術名稱、專案名或主題"}
+			"query": {"type": "string", "description": "以空白分隔的關鍵詞（不是整句問題），例如「Go 部署」。一條記憶要含有全部關鍵詞才算命中，先用一到兩個最關鍵的詞查，查不到再換詞；最多 %d 個。"}
 		},
 		"required": ["query"]
-	}`)
+	}`, maxRecallTerms))
 }
 
 // recallMemoryInput 是 recall_memory 的輸入參數。

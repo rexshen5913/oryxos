@@ -188,6 +188,110 @@ func TestRecallMatches(t *testing.T) {
 			wantLines: nil,
 		},
 		{
+			// LLM 送來的關鍵詞幾乎都是多個詞，而多個詞連起來不會是任何一行的
+			// 連續子字串——整串當子字串比對等於讓這個 Tool 永遠查不到東西（#14）。
+			name:        "多關鍵詞：全部命中的行才算匹配",
+			content:     content,
+			query:       "使用者 Go",
+			wantLines:   []string{"專案用 Go 開發"},
+			wantMissing: []string{"偏好繁體中文回覆", "表格驅動", "部署在 K8s"},
+		},
+		{
+			// 順序顛倒仍要匹配，這條直接證明比對的不是子字串。
+			name:        "多關鍵詞：順序與行內順序相反仍匹配",
+			content:     content,
+			query:       "Go 使用者",
+			wantLines:   []string{"專案用 Go 開發"},
+			wantMissing: []string{"表格驅動"},
+		},
+		{
+			// AND 而非 OR：關鍵詞越多結果應該越窄。OR 會讓「Go Kubernetes 訂單
+			// 部署」把整份記憶倒回去，那不是檢索。
+			name:      "多關鍵詞：只中一部分不算匹配",
+			content:   content,
+			query:     "使用者 Rust",
+			wantLines: nil,
+		},
+		{
+			name:        "多關鍵詞：分隔用的空白多寡不影響",
+			content:     content,
+			query:       "  使用者 \t  Go  ",
+			wantLines:   []string{"專案用 Go 開發"},
+			wantMissing: []string{"表格驅動"},
+		},
+		{
+			// AND 的作用域是「同一行」：關鍵詞分散在不同行不算命中，否則檢索
+			// 回來的行各自只沾到一個詞，合起來答非所問。
+			name:      "多關鍵詞：分屬不同行不算匹配",
+			content:   content,
+			query:     "K8s 表格驅動",
+			wantLines: nil,
+		},
+		{
+			// 中文不做斷詞（要引依賴、且離線不可確定化），所以沒有空白的中文串
+			// 仍走整串比對——這條釘住「只切空白」這個界線。
+			name:      "未以空白分隔的中文串仍整串比對",
+			content:   content,
+			query:     "偏好繁體",
+			wantLines: []string{"偏好繁體中文回覆"},
+		},
+		{
+			// #14 的原始重現：Demo 二驗收時 Agent 就是這樣查不到自己剛存的記憶。
+			name: "#14 重現：Demo 二驗收當下的查詢與記憶",
+			content: "## 2026-08-12\n\n" +
+				"- 使用者團隊後端統一使用 Go 語言，所有服務都部署在 Kubernetes (K8s) 上。\n",
+			query:     "Go 語言 Kubernetes",
+			wantLines: []string{"Kubernetes"},
+		},
+		{
+			// 切完一個詞都不剩時絕不能「全部匹配」——strings.Contains(x, "") 恆真，
+			// 少了這道防線會把整份記憶倒回給 LLM。
+			name:      "只有空白的關鍵詞：不匹配任何行",
+			content:   content,
+			query:     " \t ",
+			wantLines: nil,
+		},
+		{
+			// 只切空白會在標點上破功，而繁中 LLM 送來的關鍵詞幾乎必然帶頓號或
+			// 逗號——「語言、Kubernetes」整團不是任何一行的子字串，等於 #14 換個
+			// 形式復發。標點也算分隔。
+			name:      "標點黏著的關鍵詞：頓號也算分隔",
+			content:   content,
+			query:     "Go、使用者",
+			wantLines: []string{"專案用 Go 開發"},
+		},
+		{
+			name:      "標點黏著的關鍵詞：逗號與空白混用",
+			content:   content,
+			query:     "使用者, Go",
+			wantLines: []string{"專案用 Go 開發"},
+		},
+		{
+			// 記憶行裡的標點不該擋住命中：括號、句號都只是分隔，不進關鍵詞。
+			name: "關鍵詞帶括號時仍命中行內的同一段文字",
+			content: "## 2026-08-12\n\n" +
+				"- 使用者團隊後端統一使用 Go 語言，所有服務都部署在 Kubernetes (K8s) 上。\n",
+			query:     "Kubernetes (K8s)、Go",
+			wantLines: []string{"Kubernetes"},
+		},
+		{
+			// 英數字不該被拆開，否則 K8s 會變成 K 與 8s 兩個詞、命中一堆無關的行。
+			name:        "英數混合詞不被拆開",
+			content:     content,
+			query:       "K8s",
+			wantLines:   []string{"部署在 K8s"},
+			wantMissing: []string{"專案用 Go 開發"},
+		},
+		{
+			// 重複的關鍵詞在 AND 下是多餘的，去重不改變結果——同時讓掃描成本
+			// 由**相異**詞數決定，而不是 LLM 送來幾個詞就掃幾遍。
+			name:        "重複的關鍵詞不改變結果",
+			content:     content,
+			query:       "Go go GO 使用者 使用者",
+			wantLines:   []string{"專案用 Go 開發"},
+			wantMissing: []string{"表格驅動"},
+		},
+		{
 			name:       "匹配總量超上限：保留最近的匹配並附截斷標記",
 			content:    entries(20, 500),
 			query:      "記",
@@ -219,6 +323,27 @@ func TestRecallMatches(t *testing.T) {
 			query:      "尾端關鍵詞",
 			wantLines:  []string{"尾端關鍵詞"},
 			wantMarker: true,
+		},
+		{
+			// 詞距放得進窗口時就該全部保留。以最早命中為中心開窗會讓窗口有一半
+			// 浪費在命中之前的內容上，把本來放得下的後詞裁掉——開窗要看的是
+			// **所有命中的涵蓋區間**，不是單一命中點。
+			name: "多關鍵詞詞距小於窗寬：全部命中都要保留",
+			content: "- " + strings.Repeat("記", 2500) + "前詞" +
+				strings.Repeat("憶", 2500) + "後詞" + strings.Repeat("念", 1000) + "\n",
+			query:      "前詞 後詞",
+			wantLines:  []string{"前詞", "後詞"},
+			wantMarker: true,
+		},
+		{
+			// 詞距超過窗寬時涵蓋不了全部，退回**最早命中**並從它往後展開——
+			// 這是有界限的取捨。這一列有鑑別力：改以最後命中開窗，前詞會整個消失。
+			name:        "多關鍵詞詞距超過窗寬：退回最早命中並往後展開",
+			content:     "- 前詞" + strings.Repeat("記", maxInjectRunes+1000) + "後詞\n",
+			query:       "前詞 後詞",
+			wantLines:   []string{"前詞"},
+			wantMissing: []string{"後詞"},
+			wantMarker:  true,
 		},
 	}
 
@@ -312,8 +437,32 @@ func TestRecallByKeywordReadsFile(t *testing.T) {
 		}
 	}
 
-	if _, err := mem.RecallByKeyword(context.Background(), "   "); !errors.Is(err, ErrInvalidEntry) {
-		t.Errorf("空白關鍵詞應以 ErrInvalidEntry 拒絕，實際 %v", err)
+	// 切不出關鍵詞的 query 一律拒絕：空白、以及只有標點（切詞把標點當分隔，
+	// 「、、、」切完同樣一個詞都不剩）。
+	for _, query := range []string{"   ", "、，。"} {
+		if _, err := mem.RecallByKeyword(context.Background(), query); !errors.Is(err, ErrInvalidEntry) {
+			t.Errorf("切不出關鍵詞的 query %q 應以 ErrInvalidEntry 拒絕，實際 %v", query, err)
+		}
+	}
+
+	// 關鍵詞過多一律拒絕、不截掉多餘的詞：AND 之下少幾個詞會讓結果變寬，回傳的
+	// 就不是模型要求的那個查詢。錯誤訊息要能讓模型自己修（帶上實際數量與上限）。
+	distinct := make([]string, 0, maxRecallTerms+1)
+	for i := range maxRecallTerms + 1 {
+		distinct = append(distinct, fmt.Sprintf("詞%d", i))
+	}
+	_, err := mem.RecallByKeyword(context.Background(), strings.Join(distinct, " "))
+	if !errors.Is(err, ErrInvalidEntry) {
+		t.Errorf("相異關鍵詞超過 %d 個應以 ErrInvalidEntry 拒絕，實際 %v", maxRecallTerms, err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "上限") {
+		t.Errorf("拒絕訊息未告知上限，模型無從修正: %v", err)
+	}
+
+	// 判定看的是相異詞數：重複的詞不該把查詢擋下來。
+	repeated := strings.TrimSpace(strings.Repeat("Go 專案 Go 專案 ", maxRecallTerms))
+	if _, err := mem.RecallByKeyword(context.Background(), repeated); err != nil {
+		t.Errorf("重複的關鍵詞不該觸發詞數上限，實際 %v", err)
 	}
 }
 

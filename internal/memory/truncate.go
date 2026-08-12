@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -45,27 +46,94 @@ func truncateForInjection(content string) string {
 	})
 }
 
-// recallMatches 回傳 content 中含 query 的行（大小寫不敏感），總量同樣受
+// recallMatches 回傳 content 中命中 query 的行（大小寫不敏感），總量同樣受
 // maxInjectRunes 限制——寫入側的單條上限守不住這條路徑，因為 MEMORY.md 是使用者
 // 可直接編輯的純文字檔，手改出來的超長行繞得過寫入校驗。
+//
+// query 切成多個關鍵詞，一行要**全部**命中才算匹配：
+//
+//   - 拿整串當單一子字串比對是錯的（#14）。LLM 送來的幾乎都是多個詞，而那串連
+//     起來不會是任何一行的連續子字串——「Go 語言 Kubernetes」查不到同時寫著
+//     「Go 語言」與「Kubernetes」的那行，這個 Tool 於是永遠回「沒有符合的內容」。
+//     實際後果比查不到更糟：Agent 會據此推翻自己 system prompt 裡確實有的記憶。
+//   - AND 而非 OR：關鍵詞越多，結果應該越窄。OR 會讓「Go Kubernetes 訂單 部署」
+//     幾乎把整份記憶倒回去，那不是檢索。
+//   - 作用域是**同一行**：關鍵詞分散在不同行不算命中，否則回來的每行各自只沾到
+//     一個詞，合起來答非所問。
+//
+// 分隔符是空白**與標點**，不做中文斷詞（斷詞要引依賴、且離線不可確定化，
+// 憲法 4.3 的可確定化精神）。標點必須算分隔：繁中 LLM 送來的關鍵詞幾乎必然帶
+// 頓號或逗號，只切空白的話「語言、Kubernetes」會整團拿去比對，#14 就換個形式
+// 復發。切得比需要的細會讓匹配略寬（`api_key` 拆成 `api` 與 `key`），但那是
+// AND 之下仍然收斂的偏差；切得不夠細則直接回零匹配——後者正是本張要修的失敗。
+// 英數字不算標點，所以 `K8s`、`v4` 這種詞不會被拆開。
 //
 // 超標時保留**最近**的匹配（較新的記憶較可能仍然成立），並附明確的截斷標記，
 // 讓 LLM 知道還有更多、可以換更精確的關鍵詞再查。
 func recallMatches(content, query string) string {
-	needle := strings.ToLower(query)
+	// 切完一個詞都不剩時回空，不是「全部匹配」——strings.Contains(x, "") 恆真，
+	// 少了這道防線會把整份記憶倒回給 LLM。呼叫端已擋掉空白關鍵詞，這裡是本函式
+	// 自己的契約。
+	terms := splitTerms(query)
+	if len(terms) == 0 {
+		return ""
+	}
+
+	// 先折疊、去重一次，而不是每行每詞各折一次：掃描成本因此由**相異**詞數決定
+	// （重複的詞在 AND 下本來就是多餘的），也省掉 行數×詞數 次的配置。
+	folded := foldedTerms(terms)
+
 	var matched []string
 	for line := range strings.SplitSeq(content, "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		if strings.Contains(strings.ToLower(line), needle) {
+		if matchesAll(line, folded) {
 			matched = append(matched, line)
 		}
 	}
 	if len(matched) == 0 {
 		return ""
 	}
-	return joinRecentWithinBudget(matched, query, maxInjectRunes)
+	return joinRecentWithinBudget(matched, folded, maxInjectRunes)
+}
+
+// splitTerms 把 query 切成關鍵詞：空白與標點都算分隔（見 recallMatches）。
+func splitTerms(query string) []string {
+	return strings.FieldsFunc(query, isTermSeparator)
+}
+
+// isTermSeparator 判斷一個 rune 是不是關鍵詞的分隔符。符號（IsSymbol）也算：
+// `+`、`=`、`|` 這類在 Unicode 分類上不是標點，但在關鍵詞裡同樣是分隔而非內容。
+func isTermSeparator(r rune) bool {
+	return unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r)
+}
+
+// foldedTerms 把關鍵詞折疊成小寫並去重，保留首次出現的順序（摘錄超長行時的
+// 開窗會用到順序無關的涵蓋區間，但穩定順序讓行為可預期、測試好寫）。
+func foldedTerms(terms []string) []string {
+	seen := make(map[string]struct{}, len(terms))
+	out := make([]string, 0, len(terms))
+	for _, term := range terms {
+		lower := strings.ToLower(term)
+		if _, dup := seen[lower]; dup {
+			continue
+		}
+		seen[lower] = struct{}{}
+		out = append(out, lower)
+	}
+	return out
+}
+
+// matchesAll 判斷一行是否含有全部關鍵詞；terms 必須是已折疊成小寫的形式。
+func matchesAll(line string, terms []string) bool {
+	folded := strings.ToLower(line)
+	for _, term := range terms {
+		if !strings.Contains(folded, term) {
+			return false
+		}
+	}
+	return true
 }
 
 // matchIndex 回傳 needle 在 line 中的 **rune** 位置（大小寫不敏感）；沒有回 -1。
@@ -86,9 +154,31 @@ func matchIndex(line, needle string) int {
 	return utf8.RuneCountInString(folded[:at])
 }
 
+// hitSpan 回傳涵蓋 line 中全部命中的 rune 區間 [first, last)。全部沒命中時回
+// (0, 0)——呼叫端只用它決定開窗位置，退化成從行首開窗是安全的預設。
+func hitSpan(line string, terms []string) (first, last int) {
+	first, last = -1, -1
+	for _, term := range terms {
+		at := matchIndex(line, term)
+		if at < 0 {
+			continue
+		}
+		if first < 0 || at < first {
+			first = at
+		}
+		if end := at + len([]rune(term)); end > last {
+			last = end
+		}
+	}
+	if first < 0 {
+		return 0, 0
+	}
+	return first, last
+}
+
 // joinRecentWithinBudget 由新到舊收攏匹配行，總量不超過 budget；有行被丟掉時
 // 附截斷標記，標記本身的長度也算進預算。
-func joinRecentWithinBudget(matched []string, query string, budget int) string {
+func joinRecentWithinBudget(matched []string, terms []string, budget int) string {
 	if kept := fittingLines(matched, budget); kept == len(matched) {
 		return strings.Join(matched, "\n")
 	}
@@ -100,7 +190,7 @@ func joinRecentWithinBudget(matched []string, query string, budget int) string {
 	kept := fittingLines(matched, budget-utf8.RuneCountInString(markerFor(len(matched))))
 	if kept == 0 {
 		// 連最新的一行都放不下——使用者手改出來的超長行。
-		return excerptAround(matched[len(matched)-1], query, budget, len(matched)-1)
+		return excerptAround(matched[len(matched)-1], terms, budget, len(matched)-1)
 	}
 	return strings.Join(matched[len(matched)-kept:], "\n") + markerFor(len(matched)-kept)
 }
@@ -109,9 +199,14 @@ func joinRecentWithinBudget(matched []string, query string, budget int) string {
 // ——關鍵詞若落在第 4500 字，回傳的前 4000 字完全不含它，等於回了一段與提問無關
 // 的內容，而且換同一個關鍵詞重查還是拿到同一段，使用者無從補救。
 //
+// 多個關鍵詞時看的是**所有命中的涵蓋區間**，不是單一命中點：區間放得進窗口就
+// 整段保留（全部關鍵詞都看得到），放不進才退回最早命中、從它往後展開——後者是
+// 有界限的取捨，不是遺漏。以單一命中點開窗是錯的：窗口有一半浪費在命中之前的
+// 內容上，會把本來放得下的後段命中裁掉。單一關鍵詞時兩者等價。
+//
 // 兩端各自標註省略量；dropped 大於 0 時再帶上被丟掉的匹配行數，否則 LLM 只看到
 // 一段被切過的內容，不知道還有別的匹配，也就不會想到換更精確的關鍵詞再查。
-func excerptAround(line, query string, budget, dropped int) string {
+func excerptAround(line string, terms []string, budget, dropped int) string {
 	runes := []rune(line)
 	head := func(omitted int) string { return fmt.Sprintf("（前方省略 %d 字）…", omitted) }
 	tail := func(omitted int) string {
@@ -130,10 +225,15 @@ func excerptAround(line, query string, budget, dropped int) string {
 		return line
 	}
 
-	// 能走到這裡代表這一行匹配過；-1 是理論上到不了的分支，夾到 0 當保險。
-	at := max(matchIndex(line, query), 0)
-	// 以命中位置為中心開窗，撞到兩端就往內夾。
-	start := min(max(at+len([]rune(query))/2-window/2, 0), len(runes)-window)
+	// 能走到這裡代表這一行全部命中過；沒有命中是理論上到不了的分支，夾到 0 當保險。
+	first, last := hitSpan(line, terms)
+	start := (first + last) / 2 // 以涵蓋區間為中心
+	if last-first > window {
+		start = first // 涵蓋不了全部命中：從最早那個往後展開
+	} else {
+		start -= window / 2
+	}
+	start = min(max(start, 0), len(runes)-window) // 撞到兩端就往內夾
 	end := start + window
 
 	out := string(runes[start:end])
