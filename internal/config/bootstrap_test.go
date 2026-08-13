@@ -30,6 +30,10 @@ func newLoader(t *testing.T) (*BootstrapLoader, string) {
 	return NewBootstrapLoader(root), dir
 }
 
+// allFiles 是「三份都要」的選擇，等同 Profile 省略 bootstrap 欄位且沒有設
+// identity.prompt——這些測試關心的是載入本身，不是選擇。
+var allFiles = core.BootstrapSelection{Soul: true, Agents: true, User: true}
+
 func write(t *testing.T, dir, name, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
@@ -69,7 +73,7 @@ func TestBootstrapReadsEachFileIndependently(t *testing.T) {
 				write(t, dir, name, content)
 			}
 
-			got, err := loader.Bootstrap(context.Background(), true)
+			got, err := loader.Bootstrap(context.Background(), allFiles)
 			if err != nil {
 				t.Fatalf("Bootstrap: %v", err)
 			}
@@ -90,7 +94,7 @@ func TestBootstrapHonoursCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	got, err := loader.Bootstrap(ctx, true)
+	got, err := loader.Bootstrap(ctx, allFiles)
 	if err == nil {
 		t.Fatal("已取消的 ctx 應回錯誤")
 	}
@@ -108,12 +112,12 @@ func TestBootstrapRereadsEveryCall(t *testing.T) {
 	loader, dir := newLoader(t)
 	write(t, dir, "USER.md", "舊偏好")
 
-	first, err := loader.Bootstrap(context.Background(), true)
+	first, err := loader.Bootstrap(context.Background(), allFiles)
 	if err != nil {
 		t.Fatalf("第一次 Bootstrap: %v", err)
 	}
 	write(t, dir, "USER.md", "新偏好")
-	second, err := loader.Bootstrap(context.Background(), true)
+	second, err := loader.Bootstrap(context.Background(), allFiles)
 	if err != nil {
 		t.Fatalf("第二次 Bootstrap: %v", err)
 	}
@@ -126,31 +130,201 @@ func TestBootstrapRereadsEveryCall(t *testing.T) {
 	}
 }
 
-// TestBootstrapSkipsSoulWhenNotWanted 釘住 wantSoul 的語義：為 false 時完全不碰
-// SOUL.md——連壞掉的都不看。呼叫端在 Profile 已有 identity.prompt 時傳 false，
-// 一個被互斥排除的檔案不該讓對話失敗。
-func TestBootstrapSkipsSoulWhenNotWanted(t *testing.T) {
-	loader, dir := newLoader(t)
-	write(t, dir, "AGENTS.md", "專案慣例")
-	// 讓 SOUL.md 變成讀不到的形態（目錄），wantSoul=true 時必錯、false 時必成功。
-	if err := os.Mkdir(filepath.Join(dir, "SOUL.md"), 0o755); err != nil {
-		t.Fatalf("建立目錄: %v", err)
+// TestBootstrapSkipsUnselectedFiles 釘住 BootstrapSelection 的語義：沒被選中的檔案
+// **完全不碰**——連壞掉的都不看。這是「不讀」與「讀了但丟棄」的差別，只驗回傳值
+// 的話一個「照讀再清空」的實作也會綠，所以每一列都把未選中的那份做成讀不到的形態。
+//
+// 三份各自獨立驗一輪：漏掉任何一份的條件判斷都會被抓到。
+func TestBootstrapSkipsUnselectedFiles(t *testing.T) {
+	tests := []struct {
+		name string
+		// broken 是被做成目錄（存在但不是普通檔）的那份。
+		broken string
+		// withBroken 選中了 broken 那份，必錯；withoutBroken 沒選中，必成功。
+		withBroken    core.BootstrapSelection
+		withoutBroken core.BootstrapSelection
+	}{
+		{
+			name:          "SOUL.md 未選中（identity.prompt 互斥排除的形態）",
+			broken:        "SOUL.md",
+			withBroken:    allFiles,
+			withoutBroken: core.BootstrapSelection{Agents: true, User: true},
+		},
+		{
+			name:          "AGENTS.md 未選中",
+			broken:        "AGENTS.md",
+			withBroken:    allFiles,
+			withoutBroken: core.BootstrapSelection{Soul: true, User: true},
+		},
+		{
+			name:          "USER.md 未選中",
+			broken:        "USER.md",
+			withBroken:    allFiles,
+			withoutBroken: core.BootstrapSelection{Soul: true, Agents: true},
+		},
+		{
+			name:          "一份都不選（bootstrap 空清單的形態）：三份全壞也不失敗",
+			broken:        "AGENTS.md",
+			withBroken:    allFiles,
+			withoutBroken: core.BootstrapSelection{},
+		},
 	}
 
-	if _, err := loader.Bootstrap(context.Background(), true); err == nil {
-		t.Error("wantSoul=true 時壞掉的 SOUL.md 應回錯誤")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loader, dir := newLoader(t)
+			if err := os.Mkdir(filepath.Join(dir, tt.broken), 0o755); err != nil {
+				t.Fatalf("建立目錄 %s: %v", tt.broken, err)
+			}
+
+			if _, err := loader.Bootstrap(context.Background(), tt.withBroken); err == nil {
+				t.Errorf("選中壞掉的 %s 時應回錯誤", tt.broken)
+			}
+
+			got, err := loader.Bootstrap(context.Background(), tt.withoutBroken)
+			if err != nil {
+				t.Fatalf("未選中 %s 時不該去碰它，實際回錯誤: %v", tt.broken, err)
+			}
+			if got != (core.BootstrapContext{}) {
+				t.Errorf("未建立內容的檔案應留空，實際 %+v", got)
+			}
+		})
+	}
+}
+
+// TestValidateBootstrapFiles 釘住啟動時的存在性校驗：**明確要求**的檔案必須存在，
+// 缺一份就是設定錯誤。省略欄位（Explicit 為假）不校驗——那是「載入預設三檔」，
+// 缺檔視為該層為空。
+//
+// 校驗的對象是 selection 而不是欄位的字面清單：被 ADR-0003 互斥排除的 SOUL.md 不在
+// selection 裡，缺了它不該讓程式起不來——否則同一份用不到的檔案會變成「壞掉可以跑、
+// 缺檔卻起不來」。
+func TestValidateBootstrapFiles(t *testing.T) {
+	tests := []struct {
+		name    string
+		present []string
+		sel     core.BootstrapSelection
+		wantSub string // 空字串表示期望通過
+	}{
+		{
+			name: "欄位省略：不校驗，缺檔也放行",
+			sel:  core.BootstrapSelection{Soul: true, Agents: true, User: true},
+		},
+		{
+			name: "空清單：沒有東西要校驗",
+			sel:  core.BootstrapSelection{Explicit: true},
+		},
+		{
+			name:    "列出的都在",
+			present: []string{"AGENTS.md", "USER.md"},
+			sel:     core.BootstrapSelection{Agents: true, User: true, Explicit: true},
+		},
+		{
+			name:    "列出的檔案不存在",
+			sel:     core.BootstrapSelection{Agents: true, Explicit: true},
+			wantSub: "AGENTS.md",
+		},
+		{
+			name:    "列了兩份、缺的是其中一份",
+			present: []string{"AGENTS.md"},
+			sel:     core.BootstrapSelection{Agents: true, Soul: true, Explicit: true},
+			wantSub: "SOUL.md",
+		},
+		{
+			// 空檔是使用者刻意留空，與「檔案不存在」不同——照常放行。
+			name:    "列出的檔案存在但為空：照常",
+			present: []string{"USER.md"},
+			sel:     core.BootstrapSelection{User: true, Explicit: true},
+		},
+		{
+			// 使用者寫了 identity.prompt 又列出 SOUL.md：互斥把它排除在 selection
+			// 之外，缺檔不該讓程式起不來。
+			name:    "列了 SOUL.md 但被互斥排除：缺檔照常放行",
+			present: []string{"AGENTS.md"},
+			sel:     core.BootstrapSelection{Agents: true, Explicit: true},
+		},
 	}
 
-	got, err := loader.Bootstrap(context.Background(), false)
-	if err != nil {
-		t.Fatalf("wantSoul=false 時不該碰 SOUL.md，實際回錯誤: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, name := range tt.present {
+				write(t, dir, name, "")
+			}
+			root, err := os.OpenRoot(dir)
+			if err != nil {
+				t.Fatalf("OpenRoot: %v", err)
+			}
+			t.Cleanup(func() {
+				if err := root.Close(); err != nil {
+					t.Errorf("關閉 root: %v", err)
+				}
+			})
+
+			err = ValidateBootstrapFiles(root, tt.sel)
+			if tt.wantSub != "" {
+				if err == nil {
+					t.Fatalf("期望錯誤含 %q，實際通過", tt.wantSub)
+				}
+				if !strings.Contains(err.Error(), tt.wantSub) {
+					t.Errorf("錯誤訊息 %q 未含 %q", err.Error(), tt.wantSub)
+				}
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("錯誤鏈應 unwrap 得出 os.ErrNotExist: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("期望通過，實際錯誤: %v", err)
+			}
+		})
 	}
-	if got.Soul != "" {
-		t.Errorf("wantSoul=false 時 Soul 應為空，實際 %q", got.Soul)
-	}
-	if got.Agents != "專案慣例" {
-		t.Errorf("其餘層應照常載入，實際 %q", got.Agents)
-	}
+}
+
+// TestExplicitMissingFileFailsEveryLoad 釘住「明確要求」在**載入端**每次都判，而不是
+// 只在啟動時驗過就算。啟動校驗只是提前回報；真正的把關在這裡，否則啟動後才被刪掉的
+// 檔案會安靜地變成空值。
+func TestExplicitMissingFileFailsEveryLoad(t *testing.T) {
+	explicit := core.BootstrapSelection{User: true, Explicit: true}
+	byDefault := core.BootstrapSelection{Soul: true, Agents: true, User: true}
+
+	t.Run("明確要求：缺檔回錯誤且可 unwrap 出 os.ErrNotExist", func(t *testing.T) {
+		loader, dir := newLoader(t)
+		write(t, dir, "USER.md", "偏好")
+
+		if _, err := loader.Bootstrap(context.Background(), explicit); err != nil {
+			t.Fatalf("檔案還在時應成功: %v", err)
+		}
+		if err := os.Remove(filepath.Join(dir, "USER.md")); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loader.Bootstrap(context.Background(), explicit)
+		if err == nil {
+			t.Fatal("明確列出的檔案被刪掉後應回錯誤，不得靜默視為空")
+		}
+		if !strings.Contains(err.Error(), "USER.md") {
+			t.Errorf("錯誤訊息 %q 未指名是哪一份", err.Error())
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("錯誤鏈應 unwrap 得出 os.ErrNotExist: %v", err)
+		}
+	})
+
+	t.Run("預設選取：缺檔仍視為該層為空", func(t *testing.T) {
+		loader, dir := newLoader(t)
+		write(t, dir, "USER.md", "偏好")
+
+		if err := os.Remove(filepath.Join(dir, "USER.md")); err != nil {
+			t.Fatal(err)
+		}
+		got, err := loader.Bootstrap(context.Background(), byDefault)
+		if err != nil {
+			t.Fatalf("省略欄位時缺檔應照常: %v", err)
+		}
+		if got != (core.BootstrapContext{}) {
+			t.Errorf("三份都不在時應回空快照，實際 %+v", got)
+		}
+	})
 }
 
 // TestLegacyTemplatesTreatedAsEmpty 釘住升級相容墊片：spec #1～#2 時期的 `oryxos
@@ -217,7 +391,7 @@ func TestLegacyTemplatesTreatedAsEmpty(t *testing.T) {
 			loader, dir := newLoader(t)
 			write(t, dir, tt.file, tt.content)
 
-			got, err := loader.Bootstrap(context.Background(), true)
+			got, err := loader.Bootstrap(context.Background(), allFiles)
 			if err != nil {
 				t.Fatalf("Bootstrap: %v", err)
 			}

@@ -33,9 +33,35 @@ type ContextLoader interface {
 	// 錯誤；權限不足、I/O 故障、路徑不是普通檔等**真實故障**回錯誤，由呼叫端
 	// fail 該 turn——把故障吞成空值會讓 Agent 在使用者不知情下失去上下文。
 	//
-	// wantSoul 為 false 時**完全不碰 SOUL.md**（回傳的 Soul 必為空）。呼叫端在
-	// Profile 已有 identity.prompt 時傳 false：那份檔案被互斥排除、根本不會進
-	// prompt，一個用不到的檔案壞掉不該讓每個 turn 都失敗。互斥的**判斷**仍在
-	// core（見 composeSystemPrompt），這個參數只是讓載入端別去讀不需要的東西。
-	Bootstrap(ctx context.Context, wantSoul bool) (BootstrapContext, error)
+	// sel 指出這次要讀哪幾份；沒被選中的那些**完全不碰**（對應欄位必為空）。
+	// 由 core 依 Profile 的 bootstrap 欄位與 ADR-0003 的互斥算出（見
+	// Profile.bootstrapSelection），載入端只照著讀——「載入哪些」是配置語義、
+	// 「誰蓋過誰」是架構決策，兩者都留在能被測試釘住的那一層。
+	Bootstrap(ctx context.Context, sel BootstrapSelection) (BootstrapContext, error)
+}
+
+// BootstrapSelection 指出一次載入要讀哪幾份 Bootstrap 檔案，以及缺檔算不算錯。
+//
+// 「不讀」與「讀了但丟棄」不是同一件事：一份被排除的檔案若壞掉（權限不足、被做成
+// 目錄），照讀會讓每個 turn 都失敗——而那份檔案根本不會進 prompt。所以這個選擇必須
+// 傳到載入端，不能在組裝 prompt 時才過濾。
+type BootstrapSelection struct {
+	Soul   bool
+	Agents bool
+	User   bool
+	// Explicit 為真代表這組選擇來自 Profile **明確列出**的 bootstrap 欄位，而不是
+	// 欄位省略時的預設三檔。兩者的缺檔語義相反：
+	//
+	//   省略（false）  缺檔視為該層為空、對話照常——使用者只寫其中一兩份是常態
+	//   列出（true）   缺檔就是設定錯誤，**每個 turn 都報錯**
+	//
+	// 這個旗標描述整組選擇而不是逐檔，因為兩者不會混用：bootstrap 欄位要嘛省略
+	// （全部是預設）、要嘛列出（列到的全部是明確要求），沒有中間態。
+	//
+	// 之所以每個 turn 都要判、而不是啟動時驗過就算：Bootstrap 是**每個 turn 重讀**
+	// 的（技術方案 §5.3），啟動後被刪掉的檔案若在讀取端被當成「該層為空」，Agent
+	// 就會在使用者不知情下少掉一段明確要求的上下文——那正是 fail fast 要避免的
+	// 「半殘運作、對話中途才發現」。組裝點的啟動校驗是同一條規則的**提前**回報，
+	// 不是它的替代。
+	Explicit bool
 }

@@ -61,6 +61,15 @@ func setupChatWorkspace(t *testing.T, baseURL string) string {
 	return dir
 }
 
+// writeProfile 覆寫 Workspace 的 default Profile；body 不含 name 那行（一律 default）。
+func writeProfile(t *testing.T, dir, body string) {
+	t.Helper()
+	path := filepath.Join(dir, workspaceDir, "profiles", "default.yaml")
+	if err := os.WriteFile(path, []byte("name: default\n"+body), 0o644); err != nil {
+		t.Fatalf("覆寫 Profile: %v", err)
+	}
+}
+
 // TestChatCommandMessageMode 走完整 cobra 命令路徑，驗證 --message 單訊息模式
 // 與 --profile 預設值 default。
 func TestChatCommandMessageMode(t *testing.T) {
@@ -551,6 +560,39 @@ func TestChatErrors(t *testing.T) {
 				return dir, "default"
 			},
 			wantSub: "mystery",
+		},
+		{
+			// bootstrap 明確列了一份檔案，磁碟上卻沒有 → 設定錯誤，啟動即報錯。
+			// 與「省略欄位時缺檔視為該層為空」是刻意不同的兩件事：省略是沒意見，
+			// 列出是明確要求。
+			name: "bootstrap 列出的檔案不存在",
+			setup: func(t *testing.T) (string, string) {
+				dir := setupChatWorkspace(t, "http://127.0.0.1:1")
+				if err := os.Remove(filepath.Join(dir, workspaceDir, "AGENTS.md")); err != nil {
+					t.Fatal(err)
+				}
+				writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\nbootstrap:\n  - AGENTS.md\n")
+				return dir, "default"
+			},
+			wantSub: "AGENTS.md",
+		},
+		{
+			name: "bootstrap 列出未知檔名",
+			setup: func(t *testing.T) (string, string) {
+				dir := setupChatWorkspace(t, "http://127.0.0.1:1")
+				writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\nbootstrap:\n  - NOTES.md\n")
+				return dir, "default"
+			},
+			wantSub: "NOTES.md",
+		},
+		{
+			name: "bootstrap 重複列出同一份",
+			setup: func(t *testing.T) (string, string) {
+				dir := setupChatWorkspace(t, "http://127.0.0.1:1")
+				writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\nbootstrap:\n  - USER.md\n  - USER.md\n")
+				return dir, "default"
+			},
+			wantSub: "USER.md",
 		},
 	}
 

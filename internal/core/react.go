@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 )
 
@@ -51,10 +50,14 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 	//
 	// 被快照的只有這兩者——**對話歷史絕不快照**，每次組裝都從當前 Session 重新
 	// 取，否則第二次迭代看不到本 turn 剛回填的 tool 結果，ReAct 循環直接壞掉。
-	// identity.prompt 已設定時不必讀 SOUL.md：它被互斥排除、不會進 prompt，
-	// 讓一個用不到的檔案壞掉就中斷對話是不成比例的。
-	wantSoul := strings.TrimSpace(profile.Identity.Prompt) == ""
-	boot, err := l.bootstrap.Bootstrap(ctx, wantSoul)
+	//
+	// 要讀哪幾份由 Profile 的 bootstrap 欄位與 ADR-0003 的互斥共同決定；沒被選中的
+	// 檔案完全不碰，一個用不到的檔案壞掉不該讓每個 turn 都失敗。
+	sel, err := profile.BootstrapSelection()
+	if err != nil {
+		return "", fmt.Errorf("解析 Profile %s 的 bootstrap 欄位: %w", profile.Name, err)
+	}
+	boot, err := l.bootstrap.Bootstrap(ctx, sel)
 	if err != nil {
 		return "", err // 載入端已帶足夠的上下文，不重複包裝
 	}

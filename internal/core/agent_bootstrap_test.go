@@ -33,6 +33,15 @@ func seedBootstrap(t *testing.T, dir, name, content string) {
 	}
 }
 
+// mkdirBootstrap 把一個 Bootstrap 檔名做成目錄：它**存在**（所以通過啟動時的
+// 存在性校驗）但不是普通檔，讀取端一碰就報錯。用來驗「沒被選中的檔案根本沒被讀」。
+func mkdirBootstrap(t *testing.T, dir, name string) {
+	t.Helper()
+	if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
+		t.Fatalf("建立目錄 %s: %v", name, err)
+	}
+}
+
 // bootstrapWorkspace 開一個 Workspace 根並回傳 root 與其絕對路徑（後者供測試直接
 // 寫檔）。三份 Bootstrap 檔案刻意不預先建立——缺檔視為該層為空是既定行為。
 func bootstrapWorkspace(t *testing.T) (*os.Root, string) {
@@ -57,7 +66,14 @@ func newBootstrapAgent(t *testing.T, baseURL string, root *os.Root, identityProm
 	t.Helper()
 	prof := testProfile()
 	prof.Identity.Prompt = identityPrompt
+	return newBootstrapAgentWithProfile(t, baseURL, root, prof)
+}
 
+// newBootstrapAgentWithProfile 同 newBootstrapAgent，但 Profile 由呼叫端給——
+// ticket #17 要驗的正是「不同 Profile 各自選不同的 Bootstrap 檔案」，Profile 本身
+// 就是被測變數，不能藏在 helper 裡。
+func newBootstrapAgentWithProfile(t *testing.T, baseURL string, root *os.Root, prof *core.Profile) *core.AgentService {
+	t.Helper()
 	st := newStore(t)
 	longTerm := memory.NewLongTermMemory(root, memoryRelPath)
 	svc := provider.NewService(map[string]provider.Config{

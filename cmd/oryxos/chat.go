@@ -141,6 +141,18 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 			err = fmt.Errorf("關閉 Workspace: %w", cerr)
 		}
 	}()
+	// Profile 明確列出的 Bootstrap 檔案必須存在，否則啟動即報錯（設定錯誤，fail
+	// fast）。校驗的是**載入端實際會碰的那些**（同一組 selection），不是欄位的字面
+	// 清單——否則一份被 ADR-0003 互斥排除的 SOUL.md 會變成「壞掉可以跑、缺檔卻起不
+	// 來」。每個 turn 的把關在載入端，這裡只是提前一步回報。
+	bootSel, err := prof.BootstrapSelection()
+	if err != nil {
+		return fmt.Errorf("Profile %s 的 bootstrap 校驗失敗: %w", prof.Name, err)
+	}
+	if err := config.ValidateBootstrapFiles(wsRoot, bootSel); err != nil {
+		return fmt.Errorf("Profile %s 的 bootstrap 校驗失敗: %w", prof.Name, err)
+	}
+
 	longTerm := memory.NewLongTermMemory(wsRoot, filepath.Join("memory", memoryFile))
 
 	// Profile 的 tools 欄位過濾可用子集，引用未註冊的 Tool 在啟動即報清晰錯誤。

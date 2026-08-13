@@ -388,7 +388,24 @@ InitCommand 模組。`oryxos init` 命令的執行邏輯，創建 `.oryxos/` 工
 
 ### 8.2 Profile 配置
 
-ProfileLoader 模組。從 `.oryxos/profiles/` 加載所有 YAML，解析後註冊到 ProfileRegistry。啟動時做合法性校驗：Provider 是否存在、Tool 是否註冊、Channel 是否支援、Bootstrap 檔案是否存在。校驗失敗的 Profile 不阻斷啟動但記錄錯誤日誌。
+ProfileLoader 模組。從 `.oryxos/profiles/` 加載所有 YAML，解析後註冊到 ProfileRegistry。啟動時做合法性校驗：Provider 是否存在、Tool 是否註冊、Channel 是否支援、Bootstrap 檔案是否存在。
+
+校驗失敗的處理**依載入形態而定**（spec #3 定案）：
+
+- **單一 Profile（`oryxos chat`，核心階段）—— fail fast，啟動即報錯。** 與本專案既有的一致語義對齊：`Registry.Subset` 對未註冊的 Tool、組裝點對未配置的 Provider 都是啟動即報錯。一次只跑一個 Profile，它壞了就沒有「其餘 Agent」可保；讓它半殘地啟動、使用者要到對話中途才發現 Agent 少了半個腦袋，比啟動就報錯更難查。
+- **多個 Profile 同時載入（Web Service，後續 spec）—— 不阻斷啟動、記錄錯誤日誌。** 一份 Profile 壞掉不該讓其餘 Agent 都起不來。這個形態尚未實作，契約隨那份 spec 定案。
+
+`bootstrap` 欄位的校驗分三處，各自回答不同的問題：
+
+| 問題 | 落點 | 時機 |
+| --- | --- | --- |
+| 名稱是否為已知的 Bootstrap 檔名、有無重複 | `core.Profile.BootstrapSelection`（`LoadProfile` 也呼叫同一個校驗） | 載入 Profile 時，以及每個 turn |
+| 明確列出的檔案是否存在 | `config.BootstrapLoader` 的讀取路徑 | **每個 turn**（權威） |
+| 同上，提前回報 | `config.ValidateBootstrapFiles`，由組裝點呼叫 | 啟動時 |
+
+存在性的權威把關在**讀取路徑**而不是啟動校驗：Bootstrap 是每個 turn 重讀的（§5.3），啟動後才被刪掉的檔案若在讀取端被當成「該層為空」，Agent 就會安靜地少掉一段明確要求的上下文。啟動校驗是同一條規則的提前回報，讓使用者連一句話都還沒打就知道設定錯了。
+
+兩處校驗看的都是**同一組 selection**（`Profile.BootstrapSelection` 的產物），不是欄位的字面清單——否則一份被 ADR-0003 互斥排除的 `SOUL.md` 會出現「壞掉可以跑、缺檔卻起不來」這種說不通的不對稱。欄位省略時不做存在性校驗：那是「載入預設三檔」，缺檔視為該層為空。
 
 ProfileRegistry 模組。Profile 的記憶體索引，按 name 提供快速查找。Channel 接收訊息時通過它拿到具體 Profile。Profile 的 YAML 包含 name、description、identity（agent_name、prompt）、provider（name、model、temperature）、tools、skills、mcp_servers、channels、bootstrap、settings（max_iterations、max_history_turns）。核心階段支援多個 Profile 並存，多個 Agent 在同一實例上同時可用，這是"OS"在核心階段的最小體現。
 

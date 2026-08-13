@@ -104,6 +104,96 @@ settings:
 	})
 }
 
+// TestLoadProfileBootstrapField 釘住 bootstrap 欄位的三態與名稱校驗（ticket #17）。
+//
+// **三態必須在反序列化層就分得出來**：省略是 nil、空清單是非 nil 的零長切片。
+// 兩者若在這裡就被壓成同一個值，下游再怎麼實作也救不回「省略＝載入預設三檔」與
+// 「空清單＝一份都不載入」的差別，所以斷言直接看 nil 與否。
+func TestLoadProfileBootstrapField(t *testing.T) {
+	const head = "name: d\nprovider:\n  name: openai\n  model: m\n"
+
+	tests := []struct {
+		name    string
+		yaml    string
+		wantNil bool
+		wantLen int
+		wantErr string
+	}{
+		{
+			name:    "欄位省略：nil（沒意見，載入預設三檔）",
+			yaml:    head,
+			wantNil: true,
+		},
+		{
+			name:    "裸 key 無值：仍是 nil，歸省略",
+			yaml:    head + "bootstrap:\n",
+			wantNil: true,
+		},
+		{
+			name:    "空清單：非 nil 的零長切片（明確表達我不要）",
+			yaml:    head + "bootstrap: []\n",
+			wantNil: false,
+			wantLen: 0,
+		},
+		{
+			name:    "列一份",
+			yaml:    head + "bootstrap:\n  - AGENTS.md\n",
+			wantNil: false,
+			wantLen: 1,
+		},
+		{
+			name:    "列滿三份",
+			yaml:    head + "bootstrap:\n  - SOUL.md\n  - AGENTS.md\n  - USER.md\n",
+			wantNil: false,
+			wantLen: 3,
+		},
+		{
+			name:    "未知檔名：報錯（設定筆誤不靜默）",
+			yaml:    head + "bootstrap:\n  - NOTES.md\n",
+			wantErr: "NOTES.md",
+		},
+		{
+			name:    "大小寫不符也算未知檔名",
+			yaml:    head + "bootstrap:\n  - agents.md\n",
+			wantErr: "agents.md",
+		},
+		{
+			name:    "重複列出同一份：報錯（沿 tools 的既有語義）",
+			yaml:    head + "bootstrap:\n  - AGENTS.md\n  - AGENTS.md\n",
+			wantErr: "AGENTS.md",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "p.yaml")
+			if err := os.WriteFile(path, []byte(tt.yaml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := core.LoadProfile(path)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("期望錯誤含 %q，實際成功", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("錯誤訊息 %q 未含 %q", err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("期望成功，實際錯誤: %v", err)
+			}
+			if (got.Bootstrap == nil) != tt.wantNil {
+				t.Fatalf("bootstrap nil = %v, 期望 %v（省略與空清單必須分得出來）", got.Bootstrap == nil, tt.wantNil)
+			}
+			if !tt.wantNil && len(got.Bootstrap) != tt.wantLen {
+				t.Errorf("bootstrap = %v，長度 %d, 期望 %d", got.Bootstrap, len(got.Bootstrap), tt.wantLen)
+			}
+		})
+	}
+}
+
 func assertProfileEqual(t *testing.T, got, want *core.Profile) {
 	t.Helper()
 	if got.Name != want.Name || got.Description != want.Description {
