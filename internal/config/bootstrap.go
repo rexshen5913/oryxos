@@ -150,8 +150,15 @@ func (l *BootstrapLoader) read(name string, mustExist bool) (string, error) {
 	}
 	// 未經編輯的舊版出廠模板視為空——升級後的既有 Workspace 不該把當初那段
 	// 說明文字當成真指令注入（見 legacy_bootstrap.go）。
-	if content := string(data); !isUneditedLegacyTemplate(name, content) {
-		return content, nil
+	//
+	// 比對放在截斷之前：那個判斷問的是「這份檔案是否原封不動」，該看磁碟上的
+	// 原文而不是一份被處理過的視圖。今天這個順序沒有可觀察的差別（舊模板約一百
+	// rune，遠低於上限、截斷對它是恆等），所以沒有測試釘住它——它是邏輯上正確的
+	// 順序，不是修過的 bug。
+	content := string(data)
+	if isUneditedLegacyTemplate(name, content) {
+		return "", nil
 	}
-	return "", nil
+	// 超過上限時只注入開頭，磁碟上的檔案不動（見 truncateForInjection）。
+	return truncateForInjection(name, content), nil
 }
