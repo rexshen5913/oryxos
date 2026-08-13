@@ -51,11 +51,13 @@ const (
 // 使用者手寫的 USER.md——這是刻意的，反過來排會讓使用者口頭更新的偏好被初始設定
 // 蓋回去，save_memory 就廢了一半。
 //
-// Skill 段（漸進揭露的第一層，只有 name ＋ description）排在長期記憶之後，隨
-// SKILL.md 載入落地，本切片不涉。
+// 第 5 層是 Skill 段（漸進揭露的第一層，**只有** name ＋ description，正文不在其中）。
+// 它排在最後：「這次要做什麼」比「這個人偏好什麼」更當下。段落本身由
+// ComposeSkillSection 組好傳進來——它有自己的長度上限與截斷政策，且截斷份數要在
+// 啟動時另發警示，那些不屬於「把各層接起來」這件事。
 //
 // 任一層為空（含只有空白字元）就整段略過，不留一個空標題給 LLM 猜。
-func composeSystemPrompt(identityPrompt string, boot BootstrapContext, longTerm string) string {
+func composeSystemPrompt(identityPrompt string, boot BootstrapContext, longTerm, skillSection string) string {
 	persona := identityPrompt
 	if strings.TrimSpace(persona) == "" {
 		persona = boot.Soul // 互斥：只有 identity.prompt 缺席時 SOUL.md 才生效
@@ -66,6 +68,8 @@ func composeSystemPrompt(identityPrompt string, boot BootstrapContext, longTerm 
 		{agentsIntro, boot.Agents},
 		{userIntro, boot.User},
 		{longTermMemoryIntro, longTerm},
+		// Skill 段自帶引言（ComposeSkillSection 已經拼好），這裡不再加一層。
+		{"", skillSection},
 	}
 	sections := make([]string, 0, len(layers))
 	for _, l := range layers {

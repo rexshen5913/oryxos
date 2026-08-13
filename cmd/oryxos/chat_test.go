@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +60,20 @@ func setupChatWorkspace(t *testing.T, baseURL string) string {
 	}
 	t.Setenv("OPENROUTER_API_KEY", "test-key")
 	return dir
+}
+
+// writeSkillFile 在 Workspace 的 skills/ 底下寫一份 SKILL.md（原始內容，供不合法
+// frontmatter 的案例使用）。`oryxos init` 不建這個目錄——引用 Skill 的 Profile 才需要
+// 它，既有 Workspace 因此免遷移。
+func writeSkillFile(t *testing.T, dir, name, doc string) {
+	t.Helper()
+	skills := filepath.Join(dir, workspaceDir, "skills")
+	if err := os.MkdirAll(skills, 0o755); err != nil {
+		t.Fatalf("建立 skills/: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skills, name+".md"), []byte(doc), 0o644); err != nil {
+		t.Fatalf("寫入 %s.md: %v", name, err)
+	}
 }
 
 // writeProfile 覆寫 Workspace 的 default Profile；body 不含 name 那行（一律 default）。
@@ -229,6 +244,156 @@ func TestChatEmptyWhitelistWarning(t *testing.T) {
 				t.Errorf("警示出現 = %v, 期望 %v; 輸出: %q", warned, tt.wantWarn, out.String())
 			}
 		})
+	}
+}
+
+// TestChatStartupValidationFailsBeforeAnyTurn 釘住「**啟動**即報錯」這件事本身：
+// 不送任何訊息（stdin 直接 EOF）時仍要報錯。
+//
+// 為什麼需要獨立一條：`TestChatErrors` 用 `--message` 驅動，會跑一個 turn，而
+// bootstrap 與 skills 的載入**每個 turn 都會重做一次**——把啟動校驗整個拿掉，第一個
+// turn 照樣失敗、`runChat` 照樣回錯誤，那組測試分不出「啟動就擋」與「第一句話才爆」。
+// 實測確認過：拿掉 chat.go 的兩處校驗，`TestChatErrors` 全綠。
+//
+// 差別在互動模式：有啟動校驗，`oryxos chat` 根本起不來；沒有的話使用者會拿到提示符、
+// 打完一句話才發現設定錯了。AC 要的是前者。
+func TestChatStartupValidationFailsBeforeAnyTurn(t *testing.T) {
+	tests := []struct {
+		name    string
+		setup   func(t *testing.T, dir string)
+		wantSub string
+	}{
+		{
+			name: "bootstrap 列出的檔案不存在",
+			setup: func(t *testing.T, dir string) {
+				if err := os.Remove(filepath.Join(dir, workspaceDir, "AGENTS.md")); err != nil {
+					t.Fatal(err)
+				}
+				writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\nbootstrap:\n  - AGENTS.md\n")
+			},
+			wantSub: "AGENTS.md",
+		},
+		{
+			name: "skills 引用不存在的 Skill",
+			setup: func(t *testing.T, dir string) {
+				writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\nskills:\n  - ghost\n")
+			},
+			wantSub: "ghost",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newReplayServer(t) // 不期望任何 LLM 呼叫——連一個 turn 都不該跑到
+			dir := setupChatWorkspace(t, srv.URL)
+			tt.setup(t, dir)
+
+			var out bytes.Buffer
+			// 互動模式 ＋ 空 stdin：設定沒問題的話會直接 EOF 乾淨返回（nil），
+			// 所以這裡拿到的錯誤只可能來自啟動校驗。
+			err := runChat(context.Background(), strings.NewReader(""), &out, dir, chatOptions{profileName: "default"})
+			if err == nil {
+				t.Fatal("設定錯誤應在啟動時報錯，實際乾淨返回（校驗被推遲到第一個 turn 了）")
+			}
+			if !strings.Contains(err.Error(), tt.wantSub) {
+				t.Errorf("錯誤訊息 %q 未含 %q", err.Error(), tt.wantSub)
+			}
+		})
+	}
+}
+
+// TestChatSkillSectionOverflowWarning 釘住 Skill 段截斷的**啟動警示**（ticket #19）。
+//
+// 被截掉的不是「內容變短」而是**整份 Skill 從 LLM 視野消失**——使用者會看到 Agent
+// 莫名其妙不會做某件事，卻查不出原因。system prompt 裡的標記只有 LLM 看得到，所以
+// 必須另外在啟動時對**使用者**喊一聲。
+//
+// prior art：TestChatEmptyWhitelistWarning（斷言 CLI 輸出含警示字串）。
+func TestChatSkillSectionOverflowWarning(t *testing.T) {
+	// 每份 description 取 900 rune（在標準 1024 上限內），十五份合計約 13500 rune，
+	// 超過 Skill 段的 10000 上限。
+	const (
+		descRunes = 900
+		fitting   = 3
+		overflow  = 15
+	)
+
+	tests := []struct {
+		name     string
+		count    int
+		wantWarn bool
+	}{
+		{name: "沒有超過上限：不警示", count: fitting},
+		{name: "超過上限：啟動時警示", count: overflow, wantWarn: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newReplayServer(t, readFixture(t, "chat_reply_1.json"))
+			dir := setupChatWorkspace(t, srv.URL)
+
+			refs := make([]string, 0, tt.count)
+			for i := range tt.count {
+				name := "skill-" + strconv.Itoa(i)
+				doc := "---\nname: " + name + "\ndescription: " + strings.Repeat("述", descRunes) + "\n---\n\n正文\n"
+				writeSkillFile(t, dir, name, doc)
+				refs = append(refs, "  - "+name)
+			}
+			writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\nskills:\n"+strings.Join(refs, "\n")+"\n")
+
+			var out bytes.Buffer
+			if err := runChat(context.Background(), strings.NewReader(""), &out, dir, chatOptions{profileName: "default", message: "你好"}); err != nil {
+				t.Fatalf("runChat: %v", err)
+			}
+
+			warned := strings.Contains(out.String(), "Skill")
+			if warned != tt.wantWarn {
+				t.Errorf("警示出現 = %v, 期望 %v; 輸出: %q", warned, tt.wantWarn, out.String())
+			}
+			if tt.wantWarn && !strings.ContainsAny(out.String(), "0123456789") {
+				// 警示要說出**有幾份消失了**，不然使用者只知道「有問題」、
+				// 不知道問題多大。份數本身不寫死——那取決於描述長度。
+				t.Errorf("警示未說出被丟棄的份數: %q", out.String())
+			}
+		})
+	}
+}
+
+// TestChatSkillOverflowLoggedWithZeroTurns 釘住啟動時的結構化日誌**不能被每-turn
+// 日誌取代**：互動模式開起來就 EOF（一個 turn 都沒跑）時，引擎層一次都沒被呼叫過，
+// 只有啟動那一次記得下來。
+//
+// 兩個管道各自涵蓋不同的情形：啟動這次涵蓋「零 turn」，每-turn 那次涵蓋「對話中途
+// 才溢出」（見 core 的 TestSkillSectionTruncationLoggedEveryTurn）。
+func TestChatSkillOverflowLoggedWithZeroTurns(t *testing.T) {
+	const (
+		count     = 15
+		descRunes = 900
+	)
+	srv := newReplayServer(t) // 不期望任何 LLM 呼叫
+	dir := setupChatWorkspace(t, srv.URL)
+
+	refs := make([]string, 0, count)
+	for i := range count {
+		name := "skill-" + strconv.Itoa(i)
+		writeSkillFile(t, dir, name,
+			"---\nname: "+name+"\ndescription: "+strings.Repeat("述", descRunes)+"\n---\n\n正文\n")
+		refs = append(refs, "  - "+name)
+	}
+	writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\nskills:\n"+strings.Join(refs, "\n")+"\n")
+
+	var out bytes.Buffer
+	if err := runChat(context.Background(), strings.NewReader(""), &out, dir, chatOptions{profileName: "default"}); err != nil {
+		t.Fatalf("runChat: %v", err)
+	}
+
+	logged, err := os.ReadFile(filepath.Join(dir, workspaceDir, "logs", "oryxos.log"))
+	if err != nil {
+		t.Fatalf("讀取日誌檔: %v", err)
+	}
+	// 斷言事件鍵而非措辭（spec #3 對降級事件的既有形狀）。
+	if !strings.Contains(string(logged), "skill_section_truncated") {
+		t.Errorf("一個 turn 都沒跑時仍應有啟動的結構化警示，日誌內容: %q", string(logged))
 	}
 }
 
@@ -593,6 +758,45 @@ func TestChatErrors(t *testing.T) {
 				return dir, "default"
 			},
 			wantSub: "USER.md",
+		},
+		{
+			name: "skills 引用不存在的 Skill",
+			setup: func(t *testing.T) (string, string) {
+				dir := setupChatWorkspace(t, "http://127.0.0.1:1")
+				writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\nskills:\n  - ghost\n")
+				return dir, "default"
+			},
+			wantSub: "ghost",
+		},
+		{
+			// 引用值不是合法的 Skill 名稱——路徑逃逸在讀檔之前就被擋掉。
+			name: "skills 引用值含路徑逃逸",
+			setup: func(t *testing.T) (string, string) {
+				dir := setupChatWorkspace(t, "http://127.0.0.1:1")
+				writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\nskills:\n  - ../../etc/passwd\n")
+				return dir, "default"
+			},
+			wantSub: "../../etc/passwd",
+		},
+		{
+			name: "skills 引用的 SKILL.md frontmatter 不合法",
+			setup: func(t *testing.T) (string, string) {
+				dir := setupChatWorkspace(t, "http://127.0.0.1:1")
+				writeSkillFile(t, dir, "digest", "---\nname: digest\n---\n\n正文\n") // 缺 description
+				writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\nskills:\n  - digest\n")
+				return dir, "default"
+			},
+			wantSub: "description",
+		},
+		{
+			name: "skills 的 frontmatter name 與引用名不一致",
+			setup: func(t *testing.T) (string, string) {
+				dir := setupChatWorkspace(t, "http://127.0.0.1:1")
+				writeSkillFile(t, dir, "digest", "---\nname: other\ndescription: 做摘要。\n---\n\n正文\n")
+				writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\nskills:\n  - digest\n")
+				return dir, "default"
+			},
+			wantSub: "other",
 		},
 	}
 

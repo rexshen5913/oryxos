@@ -181,7 +181,7 @@ ReActLoop 模組。Agent 的核心循環引擎。輸入 Session 和使用者訊�
 
 PromptBuilder 模組。組裝每次 LLM 呼叫的 Prompt。按四部分順序拼接：
 
-- 第一部分 system prompt（人格加 Bootstrap 檔案加 Skill 檔案內容，統一由下面講的 ContextLoader 提供，內部拼接順序與覆蓋語義見 8.3 與 ADR-0003）；
+- 第一部分 system prompt（人格加 Bootstrap 檔案加 Skill 的 `name` 與 `description`，統一由下面講的 ContextLoader 提供，內部拼接順序與覆蓋語義見 8.3 與 ADR-0003）；Skill 的**正文不在這裡**，按需經 `load_skill` 以 tool 訊息回填（見 6.3 的漸進揭露）；
 - 第二部分 Memory 注入（**只有長期記憶**，由 MemoryService 提供，並由呼叫端在 turn 開始時載入後傳入，PromptBuilder 本身不碰檔案，見 5.3）；
 - 第三部分對話歷史（按 maxHistoryTurns 截斷後的 Session messages，**每次組裝都從當前 Session 重新取**，含本 turn 內剛追加的 assistant 與 tool 訊息）；
 - 第四部分當前 Profile 可用的 Tool 列表（按 Function Calling 格式）。
@@ -255,7 +255,9 @@ Tool 是 Agent 可以呼叫的外部能力。OryxOS 的 Tool 分兩類：內建 
 
 核心階段 Tool 相關合併為一個 `internal/tool` package（內建 Tool、MCP Client、ToolRegistry、Sandbox 都在裡面），**不拆成 builtin/skill/mcp 三個 package**——它們共享同一個 OryxTool 抽象和 ToolRegistry，耦合度高，拆細沒有收益。
 
-另外，SKILL.md 嚴格說不是一種 Tool，而是注入 system prompt 的指令模板，因此 SkillLoader 不放在 Tool 體系裡，歸到上下文加載那一層（見 8.3），跟 Bootstrap 檔案一類。這樣概念更齊整。
+另外，SKILL.md 嚴格說不是一種 Tool，而是給 Agent 讀的指令模板，因此 SkillLoader 不放在 Tool 體系裡，歸到上下文加載那一層（見 8.3），跟 Bootstrap 檔案一類。這樣概念更齊整。
+
+> 漸進揭露之下正文是以 tool 訊息回填的，所以「注入 system prompt」只描述了第一層——但**兩層都屬上下文加載**，取回正文的 `load_skill` 遞的是指令文字、不執行任何東西，這條界線不因此鬆動（同 `CONTEXT.md` 的 Skill 條目）。
 
 ### 6.1 OryxTool 抽象
 
@@ -279,9 +281,13 @@ HttpTools：`http_get`、`http_post`，帶域名白名單。
 
 OryxOS 主推的接入方式。業務方不寫程式碼，只寫一份 markdown 描述要做的事，LLM 自己理解任務、自己組合呼叫 MCP 工具。
 
-SKILL.md 是一份帶 frontmatter（name、description、trigger、required_tools）加任務說明正文的 markdown 檔案。Profile 通過 skills 字段引用它，通過 mcp_servers 字段引用需要的 MCP server。
+SKILL.md 是一份帶 frontmatter 加任務說明正文的 markdown 檔案。Profile 通過 skills 字段引用它，通過 mcp_servers 字段引用需要的 MCP server。
 
-OryxOS 把 SKILL.md 內容加載進 system prompt，LLM 讀到後自己理解任務、自己決定調哪個 MCP 工具、自己組合完成。OryxOS 不解析任務步驟、不做工作流引擎，所有邏輯交給 LLM。
+> **frontmatter 照 agentskills.io 開放標準**（spec #3 定案）：`name`、`description` 必填，`license`／`compatibility`／`metadata`／`allowed-tools` 選填。原文寫的 `trigger` 與 `required_tools` **都不在標準裡，一律不採用**——標準刻意把「何時該用」放進 `description`，留一個不作用的 `trigger` 會引誘 Skill 作者把觸發詞寫進模型看不到的地方。`allowed-tools` 只解析不強制：它的標準語義是 pre-approved，前提是宿主有權限詢問機制可供免除，OryxOS 沒有。實作連這些選填欄位都不宣告型別，交給 YAML 忽略未知欄位——宣告了型別反而會把「在別處跑得動、但欄位寫法略有不同」的 Skill 擋在門外，與宣稱的兼容相衝突。
+
+OryxOS 採**漸進揭露**加載 SKILL.md，LLM 讀到後自己理解任務、自己決定調哪個 MCP 工具、自己組合完成。OryxOS 不解析任務步驟、不做工作流引擎，所有邏輯交給 LLM。
+
+> **兩層加載**（spec #3 定案，ADR-0003 第 5 層）：常駐在 system prompt 的只有每份 Skill 的 `name` 與 `description`（第一層）；**正文不在 system prompt 裡**，Agent 判斷某份與當前任務相關時才經內建 Tool `load_skill` 取回、以 tool 訊息回填進對話（第二層）。因此這一層的體積與 Skill **數量**成正比、與 Skill **內容長度**無關，裝十份也不會把 prompt 撐爆。原文「把 SKILL.md 內容加載進 system prompt」描述的是正文常駐的舊模型，已不適用。
 
 注意 SKILL.md 的加載由 ContextLoader（8.3）負責，不在 Tool 模組裡。它本質是 prompt 的輸入源，跟 Bootstrap 檔案同類。
 
@@ -400,7 +406,7 @@ ProfileLoader 模組。從 `.oryxos/profiles/` 加載所有 YAML，解析後註�
 | 問題 | 落點 | 時機 |
 | --- | --- | --- |
 | 名稱是否為已知的 Bootstrap 檔名、有無重複 | `core.Profile.BootstrapSelection`（`LoadProfile` 也呼叫同一個校驗） | 載入 Profile 時，以及每個 turn |
-| 明確列出的檔案是否存在 | `config.BootstrapLoader` 的讀取路徑 | **每個 turn**（權威） |
+| 明確列出的檔案是否存在 | `config.ContextLoader` 的讀取路徑 | **每個 turn**（權威） |
 | 同上，提前回報 | `config.ValidateBootstrapFiles`，由組裝點呼叫 | 啟動時 |
 
 存在性的權威把關在**讀取路徑**而不是啟動校驗：Bootstrap 是每個 turn 重讀的（§5.3），啟動後才被刪掉的檔案若在讀取端被當成「該層為空」，Agent 就會安靜地少掉一段明確要求的上下文。啟動校驗是同一條規則的提前回報，讓使用者連一句話都還沒打就知道設定錯了。
@@ -414,6 +420,8 @@ ProfileRegistry 模組。Profile 的記憶體索引，按 name 提供快速查�
 Bootstrap 檔案加載和 Skill 檔案加載合併到一個 ContextLoader 模組——兩者本質相同，都是注入 system prompt 的 markdown 上下文，只是來源不同。
 
 ContextLoader 模組。按 Profile 的 bootstrap 字段和 skills 字段，從 `.oryxos/` 讀取 AGENTS.md、SOUL.md、USER.md（Bootstrap）和 `.oryxos/skills/` 下引用的 SKILL.md（Skill），拼接成 system prompt 的上下文部分，提供給 PromptBuilder。**每個 turn 重新加載一次、不緩存**，使用者修改後下一個 turn 立即生效。
+
+> Skill 這一路只取 frontmatter 的 `name` 與 `description` 進 system prompt，**正文不進**（漸進揭露，見 6.3）。`skills` 字段的省略語義與 `bootstrap` **刻意相反**：`bootstrap` 省略是「載入預設三檔」，`skills` 省略是「這個 Agent 沒有 Skill」——`skills/` 底下放著的檔案不會因為 Profile 沒提就自動生效。欄位值是不帶副檔名的 Skill 名（`skills: [daily-pr-digest]` → `skills/daily-pr-digest.md`，扁平單檔），且必須與 frontmatter 的 `name` 一致；值本身套標準的 name 格式約束（只允許小寫英數與連字號），路徑逃逸因此構不出來。
 
 > 載入粒度為 **turn** 而非 iteration（spec #3 定案，原文的「每次組裝 prompt 時」是 iteration 級）。載入點在 ReAct 迭代迴圈**之外**取一次快照：同一個 turn 內 system prompt 保持固定，LLM 第二次迭代看到的前提與它第一次決策時一致，組裝函式也維持無檔案 I/O。「不緩存、使用者修改後生效」的意圖完全保留，只是生效粒度是下一個 turn。與長期記憶（spec #2 §5.3）同一條規則。
 
@@ -553,7 +561,7 @@ oryxos/
 
 ### 11.3 demo 三：Plugin Tool 零程式碼
 
-業務方寫 `.oryxos/skills/daily-pr-digest.md` 描述任務，配 mcp_servers.yaml 聲明 github-mcp 和 slack-mcp，創建 Profile 引用 skill 和 mcp_servers。OryxOS 啟動時 ContextLoader 加載 SKILL.md，McpClientService 連接兩個 MCP server 把工具註冊到 ToolRegistry。觸發後 ReActLoop 組裝 Prompt 把 SKILL.md 注入 system prompt，LLM 自己決定先調 github-mcp 拉 PR，McpToolAdapter 通過 MCP 協議轉發，結果回填，LLM 再調 slack-mcp 推送。業務方零程式碼。涉及能力四方式一加方式二。
+業務方寫 `.oryxos/skills/daily-pr-digest.md` 描述任務，配 mcp_servers.yaml 聲明 github-mcp 和 slack-mcp，創建 Profile 引用 skill 和 mcp_servers。OryxOS 啟動時 ContextLoader 加載 SKILL.md，McpClientService 連接兩個 MCP server 把工具註冊到 ToolRegistry。觸發後 ReActLoop 組裝 Prompt，把該 Skill 的 `name` 與 `description` 放進 system prompt；LLM 判斷這份與當前任務相關，先經 `load_skill` 取回正文（以 tool 訊息回填），再依正文決定先調 github-mcp 拉 PR，McpToolAdapter 通過 MCP 協議轉發，結果回填，LLM 再調 slack-mcp 推送。業務方零程式碼。涉及能力四方式一加方式二。
 
 ### 11.4 demo 四：Web Service 同步呼叫
 

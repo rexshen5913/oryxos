@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 	"time"
 )
@@ -24,12 +25,15 @@ type ReActLoop struct {
 	memory    MemoryService
 	audit     AuditStore
 	bootstrap ContextLoader
+	// logger 落引擎層的結構化日誌。目前只有 Skill 段截斷這一種——它是「持續
+	// 存在的降級」，每個 turn 都成立，得在每個 turn 記得到（見 Run）。
+	logger *slog.Logger
 }
 
-// NewReActLoop 以 provider、Tool 子集、Memory 門面、審計儲存與 Bootstrap 載入器
-// 建立 ReAct 循環；五者都不得為 nil。
-func NewReActLoop(provider ProviderService, tools ToolExecutor, memory MemoryService, audit AuditStore, bootstrap ContextLoader) *ReActLoop {
-	return &ReActLoop{provider: provider, tools: tools, memory: memory, audit: audit, bootstrap: bootstrap}
+// NewReActLoop 以 provider、Tool 子集、Memory 門面、審計儲存、上下文載入器與
+// logger 建立 ReAct 循環；六者都不得為 nil。
+func NewReActLoop(provider ProviderService, tools ToolExecutor, memory MemoryService, audit AuditStore, bootstrap ContextLoader, logger *slog.Logger) *ReActLoop {
+	return &ReActLoop{provider: provider, tools: tools, memory: memory, audit: audit, bootstrap: bootstrap, logger: logger}
 }
 
 // Run 對 session 的當前對話歷史跑 ReAct 循環，回傳 Agent 的最終回應。每輪把
@@ -65,6 +69,26 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 	if err != nil {
 		return "", fmt.Errorf("載入長期記憶: %w", err)
 	}
+	// Skill 段與上面兩者同一條規則：每個 turn 重讀、在迭代迴圈之外取一次快照。
+	// 載入失敗 fail 該 turn，不靜默降級成「這個 Agent 沒有技能」。
+	refs, err := profile.SkillRefs()
+	if err != nil {
+		return "", fmt.Errorf("解析 Profile %s 的 skills 欄位: %w", profile.Name, err)
+	}
+	skills, err := l.bootstrap.Skills(ctx, refs)
+	if err != nil {
+		return "", err // 載入端已指名是哪一份 Skill，不重複包裝
+	}
+	// 截斷要**每個 turn** 記，不能只靠啟動時算的那一次：description 每個 turn 重讀，
+	// 使用者在對話中途把某份寫長就可能跨過上限，而啟動時的快照對此一無所知。
+	// 這裡落結構化日誌、不寫 CLI：對話進行中插播提醒會打斷使用者，而日誌是這類
+	// 「持續存在的降級」該待的地方；啟動時的 CLI 提醒仍在（見 cmd/oryxos/chat.go）。
+	skillSection, dropped := ComposeSkillSection(skills)
+	if dropped > 0 {
+		l.logger.Warn("skill_section_truncated",
+			"profile", profile.Name, "declared", len(skills), "dropped", dropped,
+			"limit_runes", MaxSkillSectionRunes, "phase", "turn")
+	}
 
 	var lastContent string // 最後一輪 LLM 內容，強制終止時作為已知進度附上
 	for range maxIterations {
@@ -73,7 +97,7 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 			Provider:    profile.Provider.Name,
 			Model:       profile.Provider.Model,
 			Temperature: profile.Provider.Temperature,
-			Messages:    buildMessages(profile, session, boot, longTerm),
+			Messages:    buildMessages(profile, session, boot, longTerm, skillSection),
 			Tools:       defs,
 		})
 		// 每次 LLM 呼叫都落審計，成敗都記——審計記的是已發生的事實，失敗那次
@@ -186,10 +210,10 @@ func (l *ReActLoop) recordLLMCall(ctx context.Context, profile *Profile, session
 // boot 與 longTerm 都是呼叫端在 turn 開始時取好的快照，當參數傳入——本函式不碰檔案，
 // 維持無 I/O、好測（技術方案 §4.2）。對話歷史則每次都從當前 session 重新取，
 // 含本 turn 內剛追加的 assistant 與 tool 訊息。
-func buildMessages(profile *Profile, session *Session, boot BootstrapContext, longTerm string) []Message {
+func buildMessages(profile *Profile, session *Session, boot BootstrapContext, longTerm, skillSection string) []Message {
 	history := truncateHistory(session.Messages, profile.Settings.effectiveMaxHistoryTurns())
 	msgs := make([]Message, 0, len(history)+1)
-	if system := composeSystemPrompt(profile.Identity.Prompt, boot, longTerm); system != "" {
+	if system := composeSystemPrompt(profile.Identity.Prompt, boot, longTerm, skillSection); system != "" {
 		msgs = append(msgs, Message{Role: RoleSystem, Content: system})
 	}
 	return append(msgs, history...)

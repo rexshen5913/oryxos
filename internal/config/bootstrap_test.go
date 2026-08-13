@@ -15,7 +15,7 @@ import (
 )
 
 // newLoader 在 t.TempDir() 開一個 Workspace 根與其上的 Bootstrap 載入器。
-func newLoader(t *testing.T) (*BootstrapLoader, string) {
+func newLoader(t *testing.T) (*ContextLoader, string) {
 	t.Helper()
 	dir := t.TempDir()
 	root, err := os.OpenRoot(dir)
@@ -27,7 +27,7 @@ func newLoader(t *testing.T) (*BootstrapLoader, string) {
 			t.Errorf("關閉 root: %v", err)
 		}
 	})
-	return NewBootstrapLoader(root), dir
+	return NewContextLoader(root), dir
 }
 
 // allFiles 是「三份都要」的選擇，等同 Profile 省略 bootstrap 欄位且沒有設

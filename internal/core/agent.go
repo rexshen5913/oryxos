@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"log/slog"
 )
 
 // AgentService 是引擎的唯一對外入口（門面）：CLI Channel 每次輸入調 Process，
@@ -13,13 +14,14 @@ type AgentService struct {
 	memory  MemoryService
 }
 
-// NewAgentService 以 profile、provider、Profile 過濾後的 Tool 子集、Memory 門面
-// 與審計儲存組出 Agent 引擎；tools 不得為 nil（無 Tool 的 Agent 傳空子集），
-// memory 不得為 nil（會話記憶的持久化是成功 turn 的一部分，長期記憶則每個 turn
-// 載入一次），audit 不得為 nil（審計 day-one 落庫，憲法 6.2），bootstrap 不得為
-// nil（Bootstrap 上下文同樣每個 turn 載入一次；沒有檔案時它回空快照，不是 nil）。
-func NewAgentService(profile *Profile, provider ProviderService, tools ToolExecutor, memory MemoryService, audit AuditStore, bootstrap ContextLoader) *AgentService {
-	return &AgentService{profile: profile, loop: NewReActLoop(provider, tools, memory, audit, bootstrap), memory: memory}
+// NewAgentService 以 profile、provider、Profile 過濾後的 Tool 子集、Memory 門面、
+// 審計儲存、上下文載入器與 logger 組出 Agent 引擎；tools 不得為 nil（無 Tool 的
+// Agent 傳空子集），memory 不得為 nil（會話記憶的持久化是成功 turn 的一部分，長期
+// 記憶則每個 turn 載入一次），audit 不得為 nil（審計 day-one 落庫，憲法 6.2），
+// bootstrap 不得為 nil（Bootstrap 與 Skill 同樣每個 turn 載入一次；沒有檔案時它回
+// 空快照，不是 nil），logger 不得為 nil（引擎層的降級要記得下來，見 ReActLoop）。
+func NewAgentService(profile *Profile, provider ProviderService, tools ToolExecutor, memory MemoryService, audit AuditStore, bootstrap ContextLoader, logger *slog.Logger) *AgentService {
+	return &AgentService{profile: profile, loop: NewReActLoop(provider, tools, memory, audit, bootstrap, logger), memory: memory}
 }
 
 // Process 處理一條使用者訊息：追加到 session 對話歷史、跑 ReAct 循環，成功後

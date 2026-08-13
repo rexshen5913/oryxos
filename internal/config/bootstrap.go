@@ -17,22 +17,24 @@ const (
 	soulFile   = core.BootstrapSoulFile
 )
 
-// BootstrapLoader 從 Workspace 讀取 Bootstrap 上下文，實作 core.ContextLoader。
+// ContextLoader 從 Workspace 讀取要注入 system prompt 的 markdown 上下文，實作
+// core.ContextLoader：Bootstrap 三檔（見 Bootstrap）與 Profile 引用的 Skill
+// （見 Skills）。兩者本質相同、只是來源不同，因此同屬一個模組（技術方案 §8.3）。
 //
 // 所有檔案操作都經 root 進行，越界（含經符號連結指到 Workspace 之外）由 os.Root
-// 擋下——理由與長期記憶那份相同、而且更強：這三份檔案隨 Workspace 進 git，一個
-// 惡意的 repo 若把 AGENTS.md 做成指向使用者敏感檔案的符號連結，讀取端會把該檔
-// 內容注入 system prompt 送往 Provider。root 的生命週期由組裝點持有，本型別不
+// 擋下——理由與長期記憶那份相同、而且更強：這些檔案隨 Workspace 進 git，一個惡意的
+// repo 若把 AGENTS.md 或某份 SKILL.md 做成指向使用者敏感檔案的符號連結，讀取端會把
+// 該檔內容注入 system prompt 送往 Provider。root 的生命週期由組裝點持有，本型別不
 // 負責關閉。
-type BootstrapLoader struct {
+type ContextLoader struct {
 	root *os.Root
 }
 
-// NewBootstrapLoader 以 Workspace 根建立 Bootstrap 載入器。三份檔案都不預先建立
-// 也不檢查存在——缺檔視為該層為空是既定行為，spec #1 init 出來的既有 Workspace
-// 免遷移直接可用。
-func NewBootstrapLoader(root *os.Root) *BootstrapLoader {
-	return &BootstrapLoader{root: root}
+// NewContextLoader 以 Workspace 根建立上下文載入器。任何檔案都不預先建立也不檢查
+// 存在——Bootstrap 缺檔視為該層為空是既定行為，skills/ 目錄則只有引用 Skill 的
+// Profile 才需要；spec #1 init 出來的既有 Workspace 免遷移直接可用。
+func NewContextLoader(root *os.Root) *ContextLoader {
+	return &ContextLoader{root: root}
 }
 
 // selectedFiles 回傳這組選擇要碰的檔名，順序固定（讓錯誤訊息可預期；與 prompt 的
@@ -59,7 +61,7 @@ func selectedFiles(sel core.BootstrapSelection) []string {
 // 點在啟動時呼叫。sel.Explicit 為假（bootstrap 欄位省略）時不做任何檢查——那是
 // 「載入預設三檔」，缺檔視為該層為空。
 //
-// 這是載入路徑那條規則的**提前**回報，不是它的替代：真正的把關在 BootstrapLoader
+// 這是載入路徑那條規則的**提前**回報，不是它的替代：真正的把關在 ContextLoader
 // 的每個 turn（見 core.BootstrapSelection.Explicit）。提前一步的價值是使用者連
 // 一句話都還沒打就知道設定錯了，不必等到第一個 turn 才發現——AC 要的「啟動即報錯」
 // 正是這個。
@@ -81,7 +83,7 @@ func ValidateBootstrapFiles(root *os.Root, sel core.BootstrapSelection) error {
 
 // Bootstrap 讀回一份 Bootstrap 快照。每次呼叫都真的讀檔——不緩存，使用者手改
 // 下一個 turn 就生效（載入頻率由呼叫端決定，見 core.ContextLoader）。
-func (l *BootstrapLoader) Bootstrap(ctx context.Context, sel core.BootstrapSelection) (core.BootstrapContext, error) {
+func (l *ContextLoader) Bootstrap(ctx context.Context, sel core.BootstrapSelection) (core.BootstrapContext, error) {
 	var boot core.BootstrapContext
 	// 只讀被選中的那些——沒選中的**完全不碰**，壞掉也不該讓這個 turn 失敗
 	// （見 core.BootstrapSelection）。
@@ -117,7 +119,7 @@ func (l *BootstrapLoader) Bootstrap(ctx context.Context, sel core.BootstrapSelec
 // （使用者只寫其中一兩份是常態）。**每個 turn 都判**是必要的：Bootstrap 每個 turn
 // 重讀，啟動後才被刪掉的檔案若在這裡被當成空值，Agent 就會安靜地少掉一段明確要求
 // 的上下文——那正是 fail fast 要避免的「半殘運作、對話中途才發現」。
-func (l *BootstrapLoader) read(name string, mustExist bool) (string, error) {
+func (l *ContextLoader) read(name string, mustExist bool) (string, error) {
 	info, err := l.root.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
 		if mustExist {

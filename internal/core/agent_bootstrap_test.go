@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -74,13 +75,20 @@ func newBootstrapAgent(t *testing.T, baseURL string, root *os.Root, identityProm
 // 就是被測變數，不能藏在 helper 裡。
 func newBootstrapAgentWithProfile(t *testing.T, baseURL string, root *os.Root, prof *core.Profile) *core.AgentService {
 	t.Helper()
+	return newBootstrapAgentWithLogger(t, baseURL, root, prof, discardLogger())
+}
+
+// newBootstrapAgentWithLogger 同上，但 logger 由呼叫端給——驗引擎層結構化日誌的
+// 測試需要一個看得到記錄的 handler。
+func newBootstrapAgentWithLogger(t *testing.T, baseURL string, root *os.Root, prof *core.Profile, logger *slog.Logger) *core.AgentService {
+	t.Helper()
 	st := newStore(t)
 	longTerm := memory.NewLongTermMemory(root, memoryRelPath)
 	svc := provider.NewService(map[string]provider.Config{
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, discardLogger())
 	return core.NewAgentService(prof, svc, noTools(t),
-		memory.NewService(st.sessions(), longTerm), st.audit, config.NewBootstrapLoader(root))
+		memory.NewService(st.sessions(), longTerm), st.audit, config.NewContextLoader(root), logger)
 }
 
 // promptAfterTurn 跑一個 turn 並回傳該次 LLM 邊界請求的 system prompt。

@@ -38,6 +38,18 @@ type ContextLoader interface {
 	// Profile.bootstrapSelection），載入端只照著讀——「載入哪些」是配置語義、
 	// 「誰蓋過誰」是架構決策，兩者都留在能被測試釘住的那一層。
 	Bootstrap(ctx context.Context, sel BootstrapSelection) (BootstrapContext, error)
+
+	// Skills 回傳 names 引用的每份 Skill 的 name 與 description（漸進揭露第一層，
+	// **不含正文**），順序等於宣告順序。names 為空時回 nil、不算錯誤。
+	//
+	// 任何一份出問題都回錯誤（引用不存在、frontmatter 不合法、name 與引用名不一致
+	// 都是設定錯誤），由呼叫端 fail 該 turn——靜默降級成「這個 Agent 沒有技能」會讓
+	// 使用者以為 Skill 只是沒被觸發，而不是根本沒載入。
+	//
+	// 與 Bootstrap 同在這條介面上（技術方案 §8.3 的 ContextLoader 模組）：兩者本質
+	// 相同，都是注入 system prompt 的 markdown 上下文，只是來源不同。載入時機也
+	// 相同——每個 turn 一次、在 ReAct 迭代迴圈之外取快照。
+	Skills(ctx context.Context, names []string) ([]SkillMeta, error)
 }
 
 // BootstrapSelection 指出一次載入要讀哪幾份 Bootstrap 檔案，以及缺檔算不算錯。

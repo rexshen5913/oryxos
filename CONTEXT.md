@@ -66,7 +66,9 @@ Agent 可呼叫的外部能力。分兩類 —— **內建 Tool** 由 OryxOS 自
 _Avoid_: function、外掛
 
 **Skill**：
-可複用的指令模板，以 `SKILL.md` 描述，兼容 agentskills.io 開放標準。Skill 是注入系統提示詞的**指令**，不是可執行的 Tool——這個區分要守住。
+可複用的指令模板，以 `SKILL.md` 描述，兼容 agentskills.io 開放標準。Skill 是給 Agent 讀的**指令**，不是可執行的 Tool——這個區分要守住。
+
+採**漸進揭露**：常駐在系統提示詞的只有每份 Skill 的 `name` 與 `description`，正文由 Agent 判斷相關時才取回、以 tool 訊息回填進對話。所以「注入系統提示詞」只描述了第一層，不是 Skill 的全部路徑；但兩層都屬**上下文加載**，取回正文的內建 Tool 遞的是指令文字、不執行任何東西。
 
 **Sandbox**：
 Tool 執行的隔離環境。核心階段是應用層白名單校驗（路徑、命令、域名），容器級隔離屬擴展階段。

@@ -105,7 +105,7 @@ func newMemoryAgentOn(t *testing.T, baseURL string, root *os.Root, subset []stri
 	svc := provider.NewService(map[string]provider.Config{
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, discardLogger())
-	return core.NewAgentService(testProfile(), svc, exec, memory.NewService(st.sessions(), longTerm), st.audit, config.NewBootstrapLoader(root))
+	return core.NewAgentService(testProfile(), svc, exec, memory.NewService(st.sessions(), longTerm), st.audit, config.NewContextLoader(root), discardLogger())
 }
 
 // recallMemoryFixture 把錄製回應中的 {{QUERY}} 換成本次檢索的關鍵詞。

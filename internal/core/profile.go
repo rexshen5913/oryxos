@@ -30,7 +30,17 @@ type Profile struct {
 	// 書寫順序無關（見 composeSystemPrompt）；讓每份 Profile 自己改順序會把
 	// ADR-0003 從固定契約降級成預設值，它 Consequences 要求的可測性也跟著失效。
 	Bootstrap []string `yaml:"bootstrap"`
-	Settings  Settings `yaml:"settings"`
+	// Skills 引用這個 Agent 可用的 Skill，值為不帶副檔名的 Skill 名
+	// （`skills: [daily-pr-digest]` → `.oryxos/skills/daily-pr-digest.md`）。
+	//
+	// **語義與 Bootstrap 刻意不同、不可照抄**：省略或空清單都是「這個 Agent 沒有
+	// Skill」，沒有「省略即載入全部」這回事——Workspace 的 skills/ 底下放著的檔案
+	// 不該因為 Profile 沒提就自動生效。所以這裡不需要區分 nil 與零長切片。
+	//
+	// 每個值都必須是合法的 Skill 名稱（見 ValidateSkillName），這順帶讓 `../` 一類
+	// 的路徑逃逸結構上不可能。
+	Skills   []string `yaml:"skills"`
+	Settings Settings `yaml:"settings"`
 }
 
 // Bootstrap 檔案的正式名稱，也就是 Profile bootstrap 欄位的合法值。
@@ -170,6 +180,9 @@ func LoadProfile(path string) (*Profile, error) {
 		return nil, fmt.Errorf("Profile %s 校驗失敗: provider.model 必填", path)
 	}
 	if err := validateBootstrap(p.Bootstrap); err != nil {
+		return nil, fmt.Errorf("Profile %s 校驗失敗: %w", path, err)
+	}
+	if err := validateSkills(p.Skills); err != nil {
 		return nil, fmt.Errorf("Profile %s 校驗失敗: %w", path, err)
 	}
 

@@ -1,5 +1,5 @@
 // Bootstrap 注入來源的長度上限與截斷（ticket #18）。檔案一律用真的
-// （t.TempDir()，憲法 4.3），從 BootstrapLoader.Bootstrap 觀察——截斷是讀取側的
+// （t.TempDir()，憲法 4.3），從 ContextLoader.Bootstrap 觀察——截斷是讀取側的
 // 行為，這裡是它唯一的出口。
 //
 // 斷言只看**結構性事實**：長度有沒有守住、行有沒有被切開、省略量有沒有寫出來、

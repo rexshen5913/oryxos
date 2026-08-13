@@ -153,6 +153,40 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 		return fmt.Errorf("Profile %s 的 bootstrap 校驗失敗: %w", prof.Name, err)
 	}
 
+	// Skill 同樣在啟動時載入一次做校驗（引用不存在、frontmatter 不合法、name 與引用
+	// 名不一致都是設定錯誤，fail fast）。每個 turn 的實際載入仍在 ReAct 循環裡重讀
+	// ——這裡只是提前一步回報，順便拿到份數算 Skill 段會不會溢出。
+	contextLoader := config.NewContextLoader(wsRoot)
+	skillRefs, err := prof.SkillRefs()
+	if err != nil {
+		return fmt.Errorf("Profile %s 的 skills 校驗失敗: %w", prof.Name, err)
+	}
+	skills, err := contextLoader.Skills(ctx, skillRefs)
+	if err != nil {
+		return fmt.Errorf("Profile %s 的 skills 校驗失敗: %w", prof.Name, err)
+	}
+	// Skill 段溢出時**整份 Skill 從 LLM 視野消失**，不是「內容變短」——使用者會看到
+	// Agent 莫名其妙不會做某件事，卻查不出原因。prompt 裡的截斷標記只有 LLM 看得到，
+	// 所以這裡對使用者喊一聲。
+	//
+	// **這只是啟動時的快照。** description 每個 turn 重讀，使用者在對話中途把某份寫長
+	// 就可能跨過上限，那時這行早就印完了——所以 ReActLoop 每個 turn 另記一筆結構化
+	// 日誌（見 core.ReActLoop.Run）。兩者不互相取代：啟動這次涵蓋「一個 turn 都沒跑」
+	// （互動模式開起來就 EOF）的情形，那時引擎層一次都沒被呼叫過。
+	//
+	// CLI 提醒只在啟動發一次：對話進行中插播會打斷使用者，而這是持續存在的設定問題、
+	// 不是某一個 turn 的事件。
+	if _, dropped := core.ComposeSkillSection(skills); dropped > 0 {
+		// 措辭不說「尾端」：`ComposeSkillSection` 在一份都塞不下時會整段略過
+		// （dropped == 全部），那時說「尾端 N 份」會讓人以為前面幾份還在。用一句對
+		// 兩種情況都成立的話，勝過為一個 runChat 走不到的分支加一段測不到的判斷。
+		fmt.Fprintf(out, "提醒：Profile %s 引用的 Skill 描述合計超過 %d 字上限，有 %d 份未進入 Agent 的視野；"+
+			"請減少 skills 或精簡各份 description。\n", prof.Name, core.MaxSkillSectionRunes, dropped)
+		logger.Warn("skill_section_truncated",
+			"profile", prof.Name, "declared", len(skills), "dropped", dropped,
+			"limit_runes", core.MaxSkillSectionRunes, "phase", "startup")
+	}
+
 	longTerm := memory.NewLongTermMemory(wsRoot, filepath.Join("memory", memoryFile))
 
 	// Profile 的 tools 欄位過濾可用子集，引用未註冊的 Tool 在啟動即報清晰錯誤。
@@ -210,7 +244,7 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	}()
 	// Bootstrap 上下文（AGENTS.md／USER.md／SOUL.md）：每個 turn 由 ReAct 循環
 	// 載入一次注入 system prompt，順序與覆蓋語義見 ADR-0003。
-	agent := core.NewAgentService(prof, provider.NewService(providerConfigs, logger), executor, memories, audit, config.NewBootstrapLoader(wsRoot))
+	agent := core.NewAgentService(prof, provider.NewService(providerConfigs, logger), executor, memories, audit, contextLoader, logger)
 	ch := cli.New(agent, session, prof.Identity.AgentName, in, out)
 
 	if opts.message != "" {
