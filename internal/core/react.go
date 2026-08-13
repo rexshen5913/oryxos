@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -19,16 +20,17 @@ const (
 // ReActLoop 是 Agent 的核心工作機制：呼叫 LLM、視回應決定呼叫 Tool 或給出
 // 最終回應，直到終止或達最大迭代次數。自行實作、完全可控（憲法 2.1）。
 type ReActLoop struct {
-	provider ProviderService
-	tools    ToolExecutor
-	memory   MemoryService
-	audit    AuditStore
+	provider  ProviderService
+	tools     ToolExecutor
+	memory    MemoryService
+	audit     AuditStore
+	bootstrap ContextLoader
 }
 
-// NewReActLoop 以 provider、Tool 子集、Memory 門面與審計儲存建立 ReAct 循環；
-// 四者都不得為 nil。
-func NewReActLoop(provider ProviderService, tools ToolExecutor, memory MemoryService, audit AuditStore) *ReActLoop {
-	return &ReActLoop{provider: provider, tools: tools, memory: memory, audit: audit}
+// NewReActLoop 以 provider、Tool 子集、Memory 門面、審計儲存與 Bootstrap 載入器
+// 建立 ReAct 循環；五者都不得為 nil。
+func NewReActLoop(provider ProviderService, tools ToolExecutor, memory MemoryService, audit AuditStore, bootstrap ContextLoader) *ReActLoop {
+	return &ReActLoop{provider: provider, tools: tools, memory: memory, audit: audit, bootstrap: bootstrap}
 }
 
 // Run 對 session 的當前對話歷史跑 ReAct 循環，回傳 Agent 的最終回應。每輪把
@@ -42,11 +44,20 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 	maxIterations := profile.Settings.effectiveMaxIterations()
 	defs := l.tools.Definitions()
 
-	// 長期記憶在**進入迭代迴圈之前**取一次快照，同一 turn 內的後續迭代重用它：
-	// system prompt 在 turn 內固定，LLM 第二次迭代看到的前提與它第一次決策時
-	// 一致，組裝函式也維持無檔案 I/O。同一 turn 內若真要看剛寫入的內容，
-	// recall_memory 直接讀檔必然最新（技術方案 §5.3）。
-	// 被快照的只有長期記憶——對話歷史每次組裝都從當前 Session 重新取。
+	// Bootstrap 與長期記憶都在**進入迭代迴圈之前**取一次快照，同一 turn 內的
+	// 後續迭代重用它：system prompt 在 turn 內固定，LLM 第二次迭代看到的前提與
+	// 它第一次決策時一致，組裝函式也維持無檔案 I/O。使用者手改檔案則在**下一個
+	// turn** 生效——每個 turn 重讀、不緩存（技術方案 §5.3）。
+	//
+	// 被快照的只有這兩者——**對話歷史絕不快照**，每次組裝都從當前 Session 重新
+	// 取，否則第二次迭代看不到本 turn 剛回填的 tool 結果，ReAct 循環直接壞掉。
+	// identity.prompt 已設定時不必讀 SOUL.md：它被互斥排除、不會進 prompt，
+	// 讓一個用不到的檔案壞掉就中斷對話是不成比例的。
+	wantSoul := strings.TrimSpace(profile.Identity.Prompt) == ""
+	boot, err := l.bootstrap.Bootstrap(ctx, wantSoul)
+	if err != nil {
+		return "", err // 載入端已帶足夠的上下文，不重複包裝
+	}
 	longTerm, err := l.memory.LongTermMemory(ctx)
 	if err != nil {
 		return "", fmt.Errorf("載入長期記憶: %w", err)
@@ -59,7 +70,7 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 			Provider:    profile.Provider.Name,
 			Model:       profile.Provider.Model,
 			Temperature: profile.Provider.Temperature,
-			Messages:    buildMessages(profile, session, longTerm),
+			Messages:    buildMessages(profile, session, boot, longTerm),
 			Tools:       defs,
 		})
 		// 每次 LLM 呼叫都落審計，成敗都記——審計記的是已發生的事實，失敗那次
@@ -166,17 +177,16 @@ func (l *ReActLoop) recordLLMCall(ctx context.Context, profile *Profile, session
 	})
 }
 
-// buildMessages 組裝一次 LLM 呼叫的訊息序列：system prompt 為 Profile 的
-// identity.prompt ＋ 長期記憶段（Bootstrap 注入屬 spec #3），加上按
-// max_history_turns 截斷後的近期對話歷史。
+// buildMessages 組裝一次 LLM 呼叫的訊息序列：system prompt 依 ADR-0003 的順序
+// 拼出（見 composeSystemPrompt），加上按 max_history_turns 截斷後的近期對話歷史。
 //
-// longTerm 是呼叫端在 turn 開始時取好的快照，當參數傳入——本函式不碰檔案，
+// boot 與 longTerm 都是呼叫端在 turn 開始時取好的快照，當參數傳入——本函式不碰檔案，
 // 維持無 I/O、好測（技術方案 §4.2）。對話歷史則每次都從當前 session 重新取，
 // 含本 turn 內剛追加的 assistant 與 tool 訊息。
-func buildMessages(profile *Profile, session *Session, longTerm string) []Message {
+func buildMessages(profile *Profile, session *Session, boot BootstrapContext, longTerm string) []Message {
 	history := truncateHistory(session.Messages, profile.Settings.effectiveMaxHistoryTurns())
 	msgs := make([]Message, 0, len(history)+1)
-	if system := composeSystemPrompt(profile.Identity.Prompt, longTerm); system != "" {
+	if system := composeSystemPrompt(profile.Identity.Prompt, boot, longTerm); system != "" {
 		msgs = append(msgs, Message{Role: RoleSystem, Content: system})
 	}
 	return append(msgs, history...)

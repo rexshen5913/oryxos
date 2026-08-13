@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/rexshen5913/oryxos/internal/config"
 	"github.com/rexshen5913/oryxos/internal/core"
 	"github.com/rexshen5913/oryxos/internal/memory"
 	"github.com/rexshen5913/oryxos/internal/provider"
@@ -73,7 +74,7 @@ func newAgentOn(t *testing.T, baseURL string, logger *slog.Logger, st *testStore
 	svc := provider.NewService(map[string]provider.Config{
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, logger)
-	return core.NewAgentService(testProfile(), svc, noTools(t), newMemory(t, st.sessions()), st.audit)
+	return core.NewAgentService(testProfile(), svc, noTools(t), newMemory(t, st.sessions()), st.audit, noBootstrap(t))
 }
 
 // newAgentWithProfile 以指定的 Profile 與 ProviderService 組出無 Tool 的
@@ -81,7 +82,7 @@ func newAgentOn(t *testing.T, baseURL string, logger *slog.Logger, st *testStore
 func newAgentWithProfile(t *testing.T, profile *core.Profile, svc core.ProviderService) *core.AgentService {
 	t.Helper()
 	db := newStore(t)
-	return core.NewAgentService(profile, svc, noTools(t), newMemory(t, db.sessions()), db.audit)
+	return core.NewAgentService(profile, svc, noTools(t), newMemory(t, db.sessions()), db.audit, noBootstrap(t))
 }
 
 // newMemory 以指定的 Session 儲存與一份落在 t.TempDir()、尚未建立的 MEMORY.md
@@ -94,6 +95,23 @@ func newMemory(t *testing.T, sessions core.SessionStore) core.MemoryService {
 }
 
 // noTools 回傳空的 Tool 子集（無 Tool 的 Agent）。
+// noBootstrap 回傳一個指向空 Workspace 的 Bootstrap 載入器：三份檔案都不存在，
+// 每一層都是空的。用真的 os.Root ＋ t.TempDir()（憲法 4.3），不是 nil 也不是 stub
+// ——「缺檔視為該層為空」本來就是既定行為，這裡走的是真實路徑。
+func noBootstrap(t *testing.T) core.ContextLoader {
+	t.Helper()
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := root.Close(); err != nil {
+			t.Errorf("關閉 Workspace root: %v", err)
+		}
+	})
+	return config.NewBootstrapLoader(root)
+}
+
 func noTools(t *testing.T) core.ToolExecutor {
 	t.Helper()
 	exec, err := tool.NewRegistry().Subset(nil, discardLogger())

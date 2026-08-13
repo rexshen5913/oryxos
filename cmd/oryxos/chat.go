@@ -123,12 +123,12 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 		providerConfigs[name] = provider.Config{APIKey: pc.APIKey, BaseURL: pc.BaseURL}
 	}
 
-	// 長期記憶的檔案操作經此 root：越界（含經符號連結指到 Workspace 之外）由
-	// os.Root 擋下。MEMORY.md 隨 Workspace 進 git，一個惡意 repo 若把它做成指向
-	// 使用者敏感檔案的符號連結，讀取端會把該檔內容注入 prompt 送往 Provider、
-	// 寫入端則會覆寫它。
+	// 長期記憶與 Bootstrap 的檔案操作都經此 root：越界（含經符號連結指到
+	// Workspace 之外）由 os.Root 擋下。這幾份 .md 隨 Workspace 進 git，一個惡意
+	// repo 若把它們做成指向使用者敏感檔案的符號連結，讀取端會把該檔內容注入
+	// system prompt 送往 Provider（MEMORY.md 的寫入端則會覆寫它）。
 	//
-	// 範圍僅止於長期記憶：上面的 logs/oryxos.log 與下面的 SQLite 仍各自開檔
+	// 範圍僅止於這些 .md：上面的 logs/oryxos.log 與下面的 SQLite 仍各自開檔
 	// （SQLite 由驅動自己開，接不進 os.Root）。Workspace 級的路徑防護屬 Sandbox
 	// 職責（CONTEXT.md：核心階段做應用層的路徑／命令／域名白名單校驗），隨
 	// File Tool 那張統一處理。
@@ -196,7 +196,9 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 			err = cerr
 		}
 	}()
-	agent := core.NewAgentService(prof, provider.NewService(providerConfigs, logger), executor, memories, audit)
+	// Bootstrap 上下文（AGENTS.md／USER.md／SOUL.md）：每個 turn 由 ReAct 循環
+	// 載入一次注入 system prompt，順序與覆蓋語義見 ADR-0003。
+	agent := core.NewAgentService(prof, provider.NewService(providerConfigs, logger), executor, memories, audit, config.NewBootstrapLoader(wsRoot))
 	ch := cli.New(agent, session, prof.Identity.AgentName, in, out)
 
 	if opts.message != "" {

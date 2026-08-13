@@ -396,7 +396,9 @@ ProfileRegistry 模組。Profile 的記憶體索引，按 name 提供快速查�
 
 Bootstrap 檔案加載和 Skill 檔案加載合併到一個 ContextLoader 模組——兩者本質相同，都是注入 system prompt 的 markdown 上下文，只是來源不同。
 
-ContextLoader 模組。按 Profile 的 bootstrap 字段和 skills 字段，從 `.oryxos/` 讀取 AGENTS.md、SOUL.md、USER.md（Bootstrap）和 `.oryxos/skills/` 下引用的 SKILL.md（Skill），拼接成 system prompt 的上下文部分，提供給 PromptBuilder。每次組裝 prompt 時重新加載不緩存，使用者修改後立即生效。
+ContextLoader 模組。按 Profile 的 bootstrap 字段和 skills 字段，從 `.oryxos/` 讀取 AGENTS.md、SOUL.md、USER.md（Bootstrap）和 `.oryxos/skills/` 下引用的 SKILL.md（Skill），拼接成 system prompt 的上下文部分，提供給 PromptBuilder。**每個 turn 重新加載一次、不緩存**，使用者修改後下一個 turn 立即生效。
+
+> 載入粒度為 **turn** 而非 iteration（spec #3 定案，原文的「每次組裝 prompt 時」是 iteration 級）。載入點在 ReAct 迭代迴圈**之外**取一次快照：同一個 turn 內 system prompt 保持固定，LLM 第二次迭代看到的前提與它第一次決策時一致，組裝函式也維持無檔案 I/O。「不緩存、使用者修改後生效」的意圖完全保留，只是生效粒度是下一個 turn。與長期記憶（spec #2 §5.3）同一條規則。
 
 **拼接順序與覆蓋語義（ADR-0003）**。按「最穩定普遍 → 最具體當下」排列，衝突時後者勝出：
 

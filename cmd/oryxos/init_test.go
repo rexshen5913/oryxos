@@ -29,8 +29,11 @@ func runInit(t *testing.T, dir string) (string, error) {
 func TestInitCommand(t *testing.T) {
 	// Workspace 全部產物：五個子目錄＋三個 Bootstrap 模板＋預設 Profile＋Workspace 設定檔。
 	wantDirs := []string{"profiles", "sessions", "skills", "memory", "logs"}
+	// 三份 Bootstrap 檔案必須**建立且為空**：它們的內容會逐字注入每個 turn 的
+	// system prompt，任何說明文字都會被 LLM 當成真的專案慣例／偏好／人格來遵循。
+	// 說明屬於給人看的東西，歸 init 的輸出訊息。
+	wantEmptyFiles := []string{"AGENTS.md", "SOUL.md", "USER.md"}
 	wantFiles := []string{
-		"AGENTS.md", "SOUL.md", "USER.md",
 		filepath.Join("profiles", "default.yaml"),
 		"config.yaml",
 	}
@@ -61,6 +64,22 @@ func TestInitCommand(t *testing.T) {
 			}
 			if len(data) == 0 {
 				t.Errorf("檔案 %s 為空", f)
+			}
+		}
+		for _, f := range wantEmptyFiles {
+			data, err := os.ReadFile(filepath.Join(ws, f))
+			if err != nil {
+				t.Errorf("檔案 %s 不存在：%v", f, err)
+				continue
+			}
+			if strings.TrimSpace(string(data)) != "" {
+				t.Errorf("Bootstrap 檔案 %s 出廠就有內容，會被逐字注入 system prompt 當成真指令：%q", f, data)
+			}
+		}
+		// 說明要在輸出訊息裡給人看，不在會被送往 Provider 的檔案裡。
+		for _, want := range []string{"AGENTS.md", "USER.md", "SOUL.md", "系統提示詞"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("init 輸出未說明 %q，使用者不知道這幾份空檔要寫什麼：\n%s", want, out)
 			}
 		}
 		if !strings.Contains(out, ".oryxos") {

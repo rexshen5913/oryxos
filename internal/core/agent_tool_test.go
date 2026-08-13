@@ -43,7 +43,7 @@ func newToolAgentOn(t *testing.T, baseURL string, profile *core.Profile, subset,
 	svc := provider.NewService(map[string]provider.Config{
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, discardLogger())
-	return core.NewAgentService(profile, svc, exec, newMemory(t, st.sessions()), st.audit)
+	return core.NewAgentService(profile, svc, exec, newMemory(t, st.sessions()), st.audit, noBootstrap(t))
 }
 
 // newRecordingReplayServer 同 newReplayServer，另記錄每次 LLM 請求的 body，

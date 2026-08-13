@@ -72,28 +72,34 @@ func initWorkspace(out io.Writer, baseDir string) error {
   profiles/default.yaml（預設 Profile）
   config.yaml（Workspace 設定檔）
 
+三份 Bootstrap 檔案刻意留空——它們的內容會逐字注入 Agent 的系統提示詞，寫什麼
+Agent 就照什麼做（載入順序與覆蓋語義見 docs/adr/0003）：
+
+  AGENTS.md  這個專案怎麼做事：慣例、流程、禁忌
+  USER.md    你的偏好：語言、輸出風格、常用約定
+  SOUL.md    Agent 的人格與語氣（Profile 設了 identity.prompt 時本檔不載入，兩者互斥）
+
+留空即代表該層沒有內容，對話一切照常。
+
 下一步：設定環境變數 OPENROUTER_API_KEY，並依需求編輯 config.yaml 與 profiles/default.yaml。
 `, workspaceDir)
 	return nil
 }
 
-// Bootstrap 檔案模板：由使用者手寫、OryxOS 只讀不寫（本切片只建立、不載入）。
-const agentsTemplate = `# AGENTS.md — 專案級行為說明
-
-由你手寫、OryxOS 只讀不寫。描述這個專案怎麼做事：慣例、流程、禁忌。
-內容之後會載入 Agent 的系統提示詞；留空亦可。
-`
-
-const soulTemplate = `# SOUL.md — 預設 Agent 人格定義
-
-由你手寫、OryxOS 只讀不寫。定義 Agent 的人格與語氣。
-注意：若 Profile 已設定 identity.prompt，則以其為準，本檔不載入（兩者互斥）。
-`
-
-const userTemplate = `# USER.md — 使用者偏好
-
-由你手寫、OryxOS 只讀不寫。記錄你的偏好：語言、輸出風格、常用約定等。
-`
+// Bootstrap 檔案模板：由使用者手寫、OryxOS 只讀不寫。
+//
+// **三份一律建成空檔**，這是刻意的：它們的內容會被**逐字注入每個 turn 的
+// system prompt**（ADR-0003），所以檔案裡放任何說明文字，LLM 都會當成真的專案
+// 慣例／使用者偏好／人格定義來遵循。最糟的形態是 Profile 沒設 identity.prompt
+// 時，SOUL.md 的說明文字會直接變成 Agent 的整個人格。
+//
+// 「這幾份檔案是做什麼的」屬於**給人看的說明**，因此放在 init 的輸出訊息裡
+// （見 initWorkspace 的下一步提示），不放進會被送往 Provider 的檔案。
+const (
+	agentsTemplate = ""
+	soulTemplate   = ""
+	userTemplate   = ""
+)
 
 // defaultProfileTemplate 是最簡可用的預設 Profile：填入 API key（見 config.yaml）即可對話。
 const defaultProfileTemplate = `# OryxOS 預設 Profile。Agent 由 Profile 配置出來，一個 Profile 對應一個 Agent。

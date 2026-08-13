@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/rexshen5913/oryxos/internal/config"
 	"github.com/rexshen5913/oryxos/internal/core"
 	"github.com/rexshen5913/oryxos/internal/memory"
 	"github.com/rexshen5913/oryxos/internal/provider"
@@ -104,7 +105,7 @@ func newMemoryAgentOn(t *testing.T, baseURL string, root *os.Root, subset []stri
 	svc := provider.NewService(map[string]provider.Config{
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, discardLogger())
-	return core.NewAgentService(testProfile(), svc, exec, memory.NewService(st.sessions(), longTerm), st.audit)
+	return core.NewAgentService(testProfile(), svc, exec, memory.NewService(st.sessions(), longTerm), st.audit, config.NewBootstrapLoader(root))
 }
 
 // recallMemoryFixture 把錄製回應中的 {{QUERY}} 換成本次檢索的關鍵詞。

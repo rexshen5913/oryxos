@@ -568,3 +568,187 @@ func TestChatErrors(t *testing.T) {
 		})
 	}
 }
+
+// TestStockWorkspaceInjectsNoPlaceholder 是 init → chat 的整合驗證：一個**未經編輯**
+// 的出廠 Workspace，跑一輪對話後 system prompt 只有 Profile 的 identity.prompt，
+// 不含任何 Bootstrap 模板文字。
+//
+// 這條防的是一個很容易漏掉的回歸：Bootstrap 檔案的內容會被逐字注入每個 turn，
+// 所以出廠模板一旦帶說明文字，LLM 就會把「描述這個專案怎麼做事：慣例、流程、
+// 禁忌」當成真的專案慣例來遵循；SOUL.md 更糟——Profile 沒設 identity.prompt 時
+// 那段說明會變成 Agent 的整個人格。
+func TestStockWorkspaceInjectsNoPlaceholder(t *testing.T) {
+	var reqs [][]byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("讀取 LLM 請求: %v", err)
+		}
+		reqs = append(reqs, body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(readFixture(t, "chat_reply_1.json")))
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := setupChatWorkspace(t, srv.URL) // 只覆寫 config.yaml，Bootstrap 三檔維持出廠狀態
+	if err := runChat(context.Background(), strings.NewReader("早安\n/quit\n"), io.Discard, dir, chatOptions{profileName: "default"}); err != nil {
+		t.Fatalf("runChat: %v", err)
+	}
+	if len(reqs) == 0 {
+		t.Fatal("沒有送出任何 LLM 請求")
+	}
+
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(reqs[0], &req); err != nil {
+		t.Fatalf("解析 LLM 請求: %v", err)
+	}
+	var system string
+	for _, m := range req.Messages {
+		if m.Role == "system" {
+			system = m.Content
+			break
+		}
+	}
+
+	// 出廠 Workspace 的 system prompt 應恰好是 Profile 的 identity.prompt。
+	const wantIdentity = "你是 Oryx，一個樂於助人的通用助理。回答力求精確、直接。"
+	if strings.TrimSpace(system) != wantIdentity {
+		t.Errorf("出廠 Workspace 的 system prompt 應恰好是 identity.prompt，實際:\n%s", system)
+	}
+}
+
+// legacyBootstrapTemplates 是 spec #1～#2 時期 `oryxos init` 寫進 Workspace 的三份
+// Bootstrap 說明文字。當時它們從未被載入，所以是無害的；spec #3 讓 Bootstrap 生效
+// 之後，**既有 Workspace 升級就會把這些字逐字注入每個 turn**。
+//
+// 這份副本刻意寫死在測試裡而不從 internal/config 引用：它模擬的是「舊版二進制在
+// 使用者磁碟上留下的東西」，而不是當前程式碼的任何常數——兩者若哪天不同步，該轉紅
+// 的正是這條測試。
+var legacyBootstrapTemplates = map[string]string{
+	"AGENTS.md": `# AGENTS.md — 專案級行為說明
+
+由你手寫、OryxOS 只讀不寫。描述這個專案怎麼做事：慣例、流程、禁忌。
+內容之後會載入 Agent 的系統提示詞；留空亦可。
+`,
+	"SOUL.md": `# SOUL.md — 預設 Agent 人格定義
+
+由你手寫、OryxOS 只讀不寫。定義 Agent 的人格與語氣。
+注意：若 Profile 已設定 identity.prompt，則以其為準，本檔不載入（兩者互斥）。
+`,
+	"USER.md": `# USER.md — 使用者偏好
+
+由你手寫、OryxOS 只讀不寫。記錄你的偏好：語言、輸出風格、常用約定等。
+`,
+}
+
+// crlfLegacyBootstrapTemplates 是同一份舊模板的 CRLF 版本，模擬 Windows 上
+// `core.autocrlf=true`（Git for Windows 安裝時的預設）checkout 出來的形態。
+// Bootstrap 檔案設計成隨 Workspace 進 git，所以這是真會發生的磁碟狀態。
+//
+// 刻意獨立寫死、不從 LF 版轉換：要驗的正是「換行形態不同的同一份未編輯模板」
+// 也要被辨識出來，用程式轉換等於拿實作的假設去驗實作。
+var crlfLegacyBootstrapTemplates = map[string]string{
+	"AGENTS.md": "# AGENTS.md — 專案級行為說明\r\n\r\n由你手寫、OryxOS 只讀不寫。描述這個專案怎麼做事：慣例、流程、禁忌。\r\n內容之後會載入 Agent 的系統提示詞；留空亦可。\r\n",
+	"SOUL.md":   "# SOUL.md — 預設 Agent 人格定義\r\n\r\n由你手寫、OryxOS 只讀不寫。定義 Agent 的人格與語氣。\r\n注意：若 Profile 已設定 identity.prompt，則以其為準，本檔不載入（兩者互斥）。\r\n",
+	"USER.md":   "# USER.md — 使用者偏好\r\n\r\n由你手寫、OryxOS 只讀不寫。記錄你的偏好：語言、輸出風格、常用約定等。\r\n",
+}
+
+// TestUpgradedLegacyWorkspaceInjectsNoPlaceholder 是升級路徑的回歸測試：一個
+// spec #1～#2 時期建立的 Workspace（三份 Bootstrap 帶著當時的說明文字），換上新
+// 二進制後跑對話，那些說明文字**不得**進 system prompt。
+//
+// 「刪掉三份檔案」不能代替這條——真實的舊 Workspace 是檔案在、且帶著舊內容，而
+// `oryxos init` 偵測到既有 Workspace 就完全不動它，使用者不會、也不該被要求手動清檔。
+//
+// 兩種 Profile 都驗：有 identity.prompt 的（舊 AGENTS.md／USER.md 會被注入），
+// 以及**沒有** identity.prompt 的——後者是最糟的形態，舊 SOUL.md 的說明文字會直接
+// 變成 Agent 的整個人格。
+func TestUpgradedLegacyWorkspaceInjectsNoPlaceholder(t *testing.T) {
+	tests := []struct {
+		name           string
+		identityPrompt string // 空字串代表 Profile 不設 identity.prompt
+		// legacy 是磁碟上那三份舊檔的內容，涵蓋 LF 與 CRLF 兩種換行形態。
+		legacy map[string]string
+	}{
+		{name: "LF：Profile 有 identity.prompt", identityPrompt: "你是 Oryx，回答力求精確、直接。", legacy: legacyBootstrapTemplates},
+		{name: "LF：Profile 沒有 identity.prompt（舊 SOUL.md 會當人格）", legacy: legacyBootstrapTemplates},
+		{name: "CRLF：Profile 有 identity.prompt", identityPrompt: "你是 Oryx，回答力求精確、直接。", legacy: crlfLegacyBootstrapTemplates},
+		{name: "CRLF：Profile 沒有 identity.prompt", legacy: crlfLegacyBootstrapTemplates},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var reqs [][]byte
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("讀取 LLM 請求: %v", err)
+				}
+				reqs = append(reqs, body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(readFixture(t, "chat_reply_1.json")))
+			}))
+			t.Cleanup(srv.Close)
+
+			dir := setupChatWorkspace(t, srv.URL)
+			// 把 Workspace 倒回「舊版 init 剛跑完」的狀態。
+			for name, content := range tt.legacy {
+				if err := os.WriteFile(filepath.Join(dir, workspaceDir, name), []byte(content), 0o644); err != nil {
+					t.Fatalf("還原舊版 %s: %v", name, err)
+				}
+			}
+			profile := "name: default\nprovider:\n  name: openrouter\n  model: m\n"
+			if tt.identityPrompt != "" {
+				profile = "name: default\nidentity:\n  agent_name: Oryx\n  prompt: " + tt.identityPrompt +
+					"\nprovider:\n  name: openrouter\n  model: m\n"
+			}
+			if err := os.WriteFile(filepath.Join(dir, workspaceDir, "profiles", "default.yaml"), []byte(profile), 0o644); err != nil {
+				t.Fatalf("覆寫 Profile: %v", err)
+			}
+
+			if err := runChat(context.Background(), strings.NewReader("早安\n/quit\n"), io.Discard, dir, chatOptions{profileName: "default"}); err != nil {
+				t.Fatalf("runChat: %v", err)
+			}
+			if len(reqs) == 0 {
+				t.Fatal("沒有送出任何 LLM 請求")
+			}
+
+			var req struct {
+				Messages []struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			if err := json.Unmarshal(reqs[0], &req); err != nil {
+				t.Fatalf("解析 LLM 請求: %v", err)
+			}
+			var system string
+			for _, m := range req.Messages {
+				if m.Role == "system" {
+					system = m.Content
+					break
+				}
+			}
+
+			// 舊模板的任何一句都不得出現。
+			for _, leaked := range []string{
+				"由你手寫、OryxOS 只讀不寫",
+				"描述這個專案怎麼做事",
+				"定義 Agent 的人格與語氣",
+				"記錄你的偏好",
+			} {
+				if strings.Contains(system, leaked) {
+					t.Errorf("升級後的舊 Workspace 把出廠說明文字注入了 system prompt（%q）:\n%s", leaked, system)
+				}
+			}
+			if strings.TrimSpace(system) != strings.TrimSpace(tt.identityPrompt) {
+				t.Errorf("system prompt 應恰好是 identity.prompt（本例 %q），實際:\n%s", tt.identityPrompt, system)
+			}
+		})
+	}
+}

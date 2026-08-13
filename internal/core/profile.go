@@ -17,8 +17,9 @@ type Profile struct {
 	Settings    Settings    `yaml:"settings"`
 }
 
-// Identity 是 Profile 的身份段。Prompt 為 system prompt 的唯一來源
-// （Bootstrap 載入屬後續 ticket，落地時依 ADR-0003 與 SOUL.md 互斥）。
+// Identity 是 Profile 的身份段。Prompt 是 system prompt 的**人格層**，與
+// Workspace 級的 SOUL.md **互斥、前者優先**（ADR-0003）；其餘各層（AGENTS.md、
+// USER.md、長期記憶）由 ContextLoader 與 MemoryService 各自供給。
 type Identity struct {
 	AgentName string `yaml:"agent_name"`
 	Prompt    string `yaml:"prompt"`
