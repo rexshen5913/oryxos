@@ -32,6 +32,19 @@ func seedSkill(t *testing.T, dir, name, description, body string) {
 	}
 }
 
+// writeRaw 原樣寫一個檔案（不套 SKILL.md 的模板），供「檔案被改壞」的案例使用。
+//
+// 失敗用 **t.Errorf 而不是 t.Fatalf**：這個 helper 會從 newMutatingReplayServer 的
+// mutate callback 呼叫，而那個 callback 跑在 **HTTP handler 的 goroutine** 上。
+// 在非測試 goroutine 呼叫 t.Fatalf 會對那條 goroutine 執行 runtime.Goexit——handler
+// 死在回應中途，測試不會乾淨地失敗，反而變成 Agent 收到半截回應或整個卡住。
+func writeRaw(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Errorf("寫入 %s: %v", path, err)
+	}
+}
+
 // profileWithSkills 回傳一份引用了指定 Skill 的 Profile（帶 identity.prompt，讓
 // 人格層有東西、SOUL.md 被互斥排除，聚焦在 Skill 段本身）。
 func profileWithSkills(skills ...string) *core.Profile {

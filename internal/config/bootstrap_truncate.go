@@ -29,19 +29,36 @@ const maxBootstrapRunes = 4000
 // OryxOS 讀了它而被裁掉。標記讓截斷從無聲的資料遺失變成看得見的降級——LLM 與
 // 使用者都該知道自己看到的是一份被裁過的文件。
 func truncateForInjection(name, content string) string {
-	runes := []rune(content)
-	if len(runes) <= maxBootstrapRunes {
-		return content
-	}
-
-	marker := func(omitted int) string {
+	return truncateHead(content, maxBootstrapRunes, func(omitted int) string {
 		return fmt.Sprintf("\n\n…（%s 超過 %d 字上限，已省略結尾 %d 字；此處只注入開頭，完整內容仍在 Workspace 的 %s）",
 			name, maxBootstrapRunes, omitted, name)
+	})
+}
+
+// truncateHead 把 content 裁到 limit 以內，保留**開頭**、末尾附 marker(省略量)；
+// 塞得下就原樣回傳。
+//
+// 本 package 有兩個保留開頭、切行邊界的截斷來源——Bootstrap 三檔（每份 4000 rune）
+// 與 load_skill 回填的 Skill 正文（10000 rune）。政策相同、只有上限與措辭不同，
+// 所以共用這段機制；各自的上限與標記由呼叫端給。
+//
+// （`internal/memory` 那份**不**共用：它切條目邊界、保留結尾，是不同的政策。
+// 真正相同的只有下面這幾行預算算術，把它從 spec #2 已測過的程式碼裡搬出來，
+// 風險大於收益。）
+//
+// 兩個要點：
+//
+//   - **先看塞不塞得下，再決定要不要預留標記。** 無條件預留會讓宣告的上限縮水，
+//     一組本來裝得下的內容會被判成溢出、白白裁掉一截還發出假警示。
+//   - **標記本身算進預算**，預留長度以「整份都被省略」估算——實際省略量必然更小、
+//     數字位數必然不多於這個估計，所以結果保證不超上限（沿 internal/memory 的
+//     cutPlan 判準）。不這樣做的話回傳長度會是「上限＋標記」，宣稱的上限守不住。
+func truncateHead(content string, limit int, marker func(omitted int) string) string {
+	runes := []rune(content)
+	if len(runes) <= limit {
+		return content
 	}
-	// 標記本身要算進預算，否則回傳長度會是「上限＋標記」，宣稱的上限就守不住。
-	// 預留長度以「整份都被省略」估算——實際省略量必然更小、數字位數必然不多於
-	// 這個估計，所以結果保證不超上限（沿 internal/memory 的 cutPlan 判準）。
-	budget := max(maxBootstrapRunes-utf8.RuneCountInString(marker(len(runes))), 0)
+	budget := max(limit-utf8.RuneCountInString(marker(len(runes))), 0)
 	kept := keepWholeLines(runes, budget)
 	return string(runes[:kept]) + marker(len(runes)-kept)
 }

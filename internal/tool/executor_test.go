@@ -40,7 +40,7 @@ func TestExecutorInvocationLog(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			exec, err := r.Subset([]string{"http_get"}, slog.New(slog.NewJSONHandler(&buf, nil)))
+			exec, err := r.Subset([]string{"http_get"}, nil, slog.New(slog.NewJSONHandler(&buf, nil)))
 			if err != nil {
 				t.Fatalf("Subset: %v", err)
 			}
@@ -130,7 +130,7 @@ func TestExecutorArgsSummaryRedacted(t *testing.T) {
 				t.Fatal(err)
 			}
 			var buf bytes.Buffer
-			exec, err := r.Subset([]string{"http_get", "http_post"}, slog.New(slog.NewJSONHandler(&buf, nil)))
+			exec, err := r.Subset([]string{"http_get", "http_post"}, nil, slog.New(slog.NewJSONHandler(&buf, nil)))
 			if err != nil {
 				t.Fatalf("Subset: %v", err)
 			}
@@ -156,7 +156,7 @@ func TestExecutorArgsSummaryRedacted(t *testing.T) {
 // TestExecutorUnknownTool 驗證呼叫不在可用子集的 Tool 時，以錯誤 ToolResult
 // 回報（回填給 LLM），不 panic、不可重試。
 func TestExecutorUnknownTool(t *testing.T) {
-	exec, err := tool.NewRegistry().Subset(nil, discardLogger())
+	exec, err := tool.NewRegistry().Subset(nil, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("Subset: %v", err)
 	}

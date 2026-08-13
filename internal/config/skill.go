@@ -68,35 +68,67 @@ func (l *ContextLoader) Skills(ctx context.Context, names []string) ([]core.Skil
 	return metas, nil
 }
 
-// readSkill 讀回並解析一份 SKILL.md。
+// SkillBody 回傳一份 Skill 的正文（漸進揭露第二層），超過 core.MaxSkillBodyRunes
+// 時截斷、保留開頭並附自述省略量的標記。
+//
+// 路徑安全與解析走的是與 Skills 完全相同的一條路（readSkill）：名稱校驗擋在讀檔
+// 之前、os.Root 限制範圍、拒絕符號連結與非普通檔、frontmatter 必須合法且 name 與
+// 引用名一致。**不另立一條寬鬆的讀取路徑**——第二層的入口是 LLM 送來的參數，比
+// 第一層（使用者手寫的 Profile 欄位）更該守住同一組檢查。
+//
+// 呼叫端負責先確認這份 Skill 在該 Profile 的引用範圍內（見 tool.LoadSkillTool）；
+// 這裡只回答讀不讀得到。
+func (l *ContextLoader) SkillBody(ctx context.Context, name string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("載入 Skill 正文: %w", err)
+	}
+	_, body, err := l.readSkillWithBody(name)
+	if err != nil {
+		return "", err
+	}
+	return truncateHead(body, core.MaxSkillBodyRunes, func(omitted int) string {
+		return fmt.Sprintf("\n\n…（Skill %q 的正文超過 %d 字上限，已省略結尾 %d 字；"+
+			"此處只回填開頭，完整內容仍在 Workspace 的 %s）",
+			name, core.MaxSkillBodyRunes, omitted, path.Join(skillsDir, name+".md"))
+	}), nil
+}
+
+// readSkill 讀回並解析一份 SKILL.md 的 metadata（正文丟棄，見漸進揭露第一層）。
 func (l *ContextLoader) readSkill(ref string) (core.SkillMeta, error) {
+	meta, _, err := l.readSkillWithBody(ref)
+	return meta, err
+}
+
+// readSkillWithBody 同 readSkill，但一併回傳正文。兩層走**同一條**讀取與解析路徑：
+// 第二層的入口是 LLM 送來的參數，不該有一條檢查較鬆的旁路。
+func (l *ContextLoader) readSkillWithBody(ref string) (core.SkillMeta, string, error) {
 	// 引用值本身必須是合法的 Skill 名稱。這道校驗擋在讀檔**之前**，順帶讓路徑逃逸
 	// 結構上不可能——`../`、斜線、絕對路徑都構不出一個只有小寫英數與連字號的字串
 	// （見 core.ValidateSkillName）。os.Root 是第二道防線，兩者不互相取代。
 	if err := core.ValidateSkillName(ref); err != nil {
-		return core.SkillMeta{}, fmt.Errorf("Profile 的 skills 引用了 %q: %w", ref, err)
+		return core.SkillMeta{}, "", fmt.Errorf("Profile 的 skills 引用了 %q: %w", ref, err)
 	}
 	name := path.Join(skillsDir, ref+".md")
 
 	info, err := l.root.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
-		return core.SkillMeta{}, fmt.Errorf("Profile 的 skills 引用的 Skill %q 不存在（找不到 %s）: %w", ref, name, err)
+		return core.SkillMeta{}, "", fmt.Errorf("Profile 的 skills 引用的 Skill %q 不存在（找不到 %s）: %w", ref, name, err)
 	}
 	if err != nil {
-		return core.SkillMeta{}, fmt.Errorf("檢查 Skill %q: %w", ref, err)
+		return core.SkillMeta{}, "", fmt.Errorf("檢查 Skill %q: %w", ref, err)
 	}
 	// 與 Bootstrap 同一條規則：符號連結一律拒絕、不跟隨。Skill 的內容會被送往
 	// Provider，而 skills/ 隨 Workspace 進 git。
 	if info.Mode()&os.ModeSymlink != 0 {
-		return core.SkillMeta{}, fmt.Errorf("Skill %q 是符號連結，拒絕跟隨（它只能是 Workspace 內的實體檔案）", ref)
+		return core.SkillMeta{}, "", fmt.Errorf("Skill %q 是符號連結，拒絕跟隨（它只能是 Workspace 內的實體檔案）", ref)
 	}
 	if !info.Mode().IsRegular() {
-		return core.SkillMeta{}, fmt.Errorf("Skill %q 不是普通檔（實際為 %s）", ref, info.Mode().Type())
+		return core.SkillMeta{}, "", fmt.Errorf("Skill %q 不是普通檔（實際為 %s）", ref, info.Mode().Type())
 	}
 
 	data, err := l.root.ReadFile(name)
 	if err != nil {
-		return core.SkillMeta{}, fmt.Errorf("讀取 Skill %q: %w", ref, err)
+		return core.SkillMeta{}, "", fmt.Errorf("讀取 Skill %q: %w", ref, err)
 	}
 	return parseSkill(ref, string(data))
 }
@@ -107,44 +139,44 @@ func (l *ContextLoader) readSkill(ref string) (core.SkillMeta, error) {
 // 預設 `core.autocrlf=true`——不正規化的話 frontmatter 的 `---` 分隔線在 Windows
 // checkout 出來是 `---\r`，整份 Skill 會被判成「沒有 frontmatter」（#16 已為 Bootstrap
 // 的舊模板比對付過同一筆學費）。
-func parseSkill(ref, content string) (core.SkillMeta, error) {
+func parseSkill(ref, content string) (core.SkillMeta, string, error) {
 	front, body, err := splitFrontmatter(normalizeNewlines(content))
 	if err != nil {
-		return core.SkillMeta{}, fmt.Errorf("Skill %q 的 frontmatter 不合法: %w", ref, err)
+		return core.SkillMeta{}, "", fmt.Errorf("Skill %q 的 frontmatter 不合法: %w", ref, err)
 	}
 
 	var fm skillFrontmatter
 	if err := yaml.Unmarshal([]byte(front), &fm); err != nil {
-		return core.SkillMeta{}, fmt.Errorf("Skill %q 的 frontmatter 不是合法 YAML: %w", ref, err)
+		return core.SkillMeta{}, "", fmt.Errorf("Skill %q 的 frontmatter 不是合法 YAML: %w", ref, err)
 	}
 
 	if fm.Name == "" {
-		return core.SkillMeta{}, fmt.Errorf("Skill %q 的 frontmatter 缺少必填欄位 name", ref)
+		return core.SkillMeta{}, "", fmt.Errorf("Skill %q 的 frontmatter 缺少必填欄位 name", ref)
 	}
 	if fm.Description == "" {
-		return core.SkillMeta{}, fmt.Errorf("Skill %q 的 frontmatter 缺少必填欄位 description", ref)
+		return core.SkillMeta{}, "", fmt.Errorf("Skill %q 的 frontmatter 缺少必填欄位 description", ref)
 	}
 	if err := core.ValidateSkillName(fm.Name); err != nil {
-		return core.SkillMeta{}, fmt.Errorf("Skill %q 的 frontmatter name 不合法: %w", ref, err)
+		return core.SkillMeta{}, "", fmt.Errorf("Skill %q 的 frontmatter name 不合法: %w", ref, err)
 	}
 	// 標準要求 name 與所在目錄名一致；單檔模式下以「與引用名一致」承接同一條約束。
 	// 錯誤要同時指出兩者，否則使用者不知道該改哪一邊。
 	if fm.Name != ref {
-		return core.SkillMeta{}, fmt.Errorf(
+		return core.SkillMeta{}, "", fmt.Errorf(
 			"Skill %q 的 frontmatter name 是 %q，與引用名不一致（請讓兩者相同：改 Profile 的 skills 或改 %s 的 name）",
 			ref, fm.Name, path.Join(skillsDir, ref+".md"))
 	}
 	if n := utf8.RuneCountInString(fm.Description); n > core.MaxSkillDescriptionRunes {
-		return core.SkillMeta{}, fmt.Errorf("Skill %q 的 description 長 %d 字，超過上限 %d",
+		return core.SkillMeta{}, "", fmt.Errorf("Skill %q 的 description 長 %d 字，超過上限 %d",
 			ref, n, core.MaxSkillDescriptionRunes)
 	}
 	// 正文為空的 Skill 是一個空承諾：LLM 會看到描述、以為有這個技能可用，取回正文
 	// 時卻什麼都拿不到（#20 的 load_skill 走的正是這條路）。
 	if strings.TrimSpace(body) == "" {
-		return core.SkillMeta{}, fmt.Errorf("Skill %q 的正文為空（frontmatter 之後要寫這份 Skill 實際怎麼做）", ref)
+		return core.SkillMeta{}, "", fmt.Errorf("Skill %q 的正文為空（frontmatter 之後要寫這份 Skill 實際怎麼做）", ref)
 	}
 
-	return core.SkillMeta{Name: fm.Name, Description: fm.Description}, nil
+	return core.SkillMeta{Name: fm.Name, Description: fm.Description}, body, nil
 }
 
 // frontmatterDelim 是 frontmatter 的分隔線。

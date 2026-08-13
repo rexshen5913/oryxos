@@ -89,6 +89,22 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 			"profile", profile.Name, "declared", len(skills), "dropped", dropped,
 			"limit_runes", MaxSkillSectionRunes, "phase", "turn")
 	}
+	// Skill 段叫 LLM 用 load_skill 取回正文（見 skillSectionIntro），但那個 Tool 在
+	// 不在可用集合裡是**組裝點**決定的。兩邊分屬不同 package，中間沒有東西盯著的話，
+	// 日後多一個組裝點忘了那條推導就會安靜地重現這條鏈路最該避免的失敗形態：LLM 被
+	// 叫去呼叫一個工具清單裡不存在的 Tool，然後拿描述硬編出步驟。
+	//
+	// **在送出任何請求之前**擋下來、fail 這個 turn。偵測到之後還把那份自相矛盾的
+	// prompt 送出去，等於明知會壞還讓它壞——那正是這道檢查要防的事。這是組裝點的
+	// bug（使用者改不動的東西），照本專案對配置不一致的既有判準一律 fail fast：
+	// Registry.Subset 對未註冊的 Tool、Bootstrap 對列出卻缺檔的檔案都是這樣。
+	if len(skills) > 0 && !slices.ContainsFunc(defs, func(d ToolDefinition) bool { return d.Name == LoadSkillToolName }) {
+		l.logger.Warn("skill_section_promises_missing_tool",
+			"profile", profile.Name, "tool", LoadSkillToolName, "declared_skills", len(skills))
+		return "", fmt.Errorf("Profile %s 宣告了 %d 份 Skill，但 %s 不在這個 Agent 的可用工具裡"+
+			"（Skill 段的引言承諾了它）：組裝點必須把它加進 Tool 子集",
+			profile.Name, len(skills), LoadSkillToolName)
+	}
 
 	var lastContent string // 最後一輪 LLM 內容，強制終止時作為已知進度附上
 	for range maxIterations {

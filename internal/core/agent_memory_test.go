@@ -98,7 +98,7 @@ func newMemoryAgentOn(t *testing.T, baseURL string, root *os.Root, subset []stri
 			t.Fatalf("註冊 %s: %v", memTool.Name(), err)
 		}
 	}
-	exec, err := r.Subset(subset, logger)
+	exec, err := r.Subset(subset, nil, logger)
 	if err != nil {
 		t.Fatalf("Subset(%v): %v", subset, err)
 	}

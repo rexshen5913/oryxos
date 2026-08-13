@@ -36,7 +36,7 @@ func newToolAgentOn(t *testing.T, baseURL string, profile *core.Profile, subset,
 	if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(allowed)); err != nil {
 		t.Fatalf("RegisterBuiltins: %v", err)
 	}
-	exec, err := r.Subset(subset, logger)
+	exec, err := r.Subset(subset, nil, logger)
 	if err != nil {
 		t.Fatalf("Subset(%v): %v", subset, err)
 	}

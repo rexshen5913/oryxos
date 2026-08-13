@@ -78,7 +78,7 @@ AI ticket 必須包含 evaluation 或固定測試案例。明確標記 blocking 
 | 1 | 採用框架的自動執行 Agent 抽象幫忙跑循環 | 憲法 2.1、2.2 |
 | 2 | Provider 靠反射或型別掃描區分，而非顯式 map 註冊表 | 憲法 2.3、技術方案 §3.2 |
 | 3 | Tool 被拆成 builtin／skill／mcp 多個 package | 技術方案 §6 |
-| 4 | `SKILL.md` 被當成可執行 Tool，而非注入 system prompt 的指令模板 | `CONTEXT.md`、技術方案 §6 |
+| 4 | `SKILL.md` 被當成可執行 Tool，而非提供給 Agent 閱讀的指令模板（漸進揭露之下正文以 tool 訊息回填，但那個 Tool 遞的是指令文字，Skill 本身沒有 `execute`） | `CONTEXT.md`、技術方案 §6 |
 | 5 | 審計表沒落庫，只寫日誌 | 憲法 6.2 |
 | 6 | 引入 cgo 依賴（典型如 `mattn/go-sqlite3`） | 憲法 1.2 |
 | 7 | 阻塞路徑沒走 `context`，goroutine 洩漏 | 憲法 5.3 |

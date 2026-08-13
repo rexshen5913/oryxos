@@ -70,7 +70,8 @@ func newChatCmd() *cobra.Command {
 // internal/tool 自帶的 HTTP Tool，加上住在 internal/memory、需要 Workspace 路徑的
 // Memory Tool。每個組裝點都該經此函式取得 Registry——`oryxos init` 的預設 Profile
 // 已列出 save_memory，漏註冊會讓 stock Workspace 在 Subset 時直接啟動失敗。
-func buildToolRegistry(allowedDomains []string, longTerm *memory.LongTermMemory) (*tool.Registry, error) {
+func buildToolRegistry(allowedDomains []string, longTerm *memory.LongTermMemory,
+	skills core.ContextLoader, skillRefs []string) (*tool.Registry, error) {
 	registry := tool.NewRegistry()
 	if err := tool.RegisterBuiltins(registry, tool.NewSandboxChecker(allowedDomains)); err != nil {
 		return nil, fmt.Errorf("組裝 Tool registry: %w", err)
@@ -80,7 +81,29 @@ func buildToolRegistry(allowedDomains []string, longTerm *memory.LongTermMemory)
 			return nil, fmt.Errorf("註冊 Memory Tool: %w", err)
 		}
 	}
+	// load_skill **一律註冊**進全域 Registry，與 skills 是否為空無關：註冊與「進不進
+	// 這個 Agent 的可用子集」是兩件事，後者由 Subset 的 autoIncluded 決定。一律註冊
+	// 讓「skills 為空但使用者顯式列了 load_skill」這個邊界格能正常啟動——那時它會在
+	// 呼叫時回明確的錯誤回填，比啟動失敗好。
+	if err := registry.Register(tool.NewLoadSkillTool(skills, skillRefs)); err != nil {
+		return nil, fmt.Errorf("註冊 load_skill: %w", err)
+	}
 	return registry, nil
+}
+
+// autoIncludedTools 依配置推導出要自動加進可用子集的 Tool。
+//
+// 目前唯一一條：Profile 的 skills 非空 → load_skill。若要求使用者自行列出，宣告了
+// `skills:` 卻忘記帶 load_skill 的 Profile 會**安靜退化**成「LLM 看得到 Skill 描述、
+// 永遠載不到正文」——漸進揭露這條鏈路最該避免的失敗形態，而且從外部完全看不出來。
+//
+// 這仍是顯式的（憲法 2.3）：觸發條件是使用者自己寫的 skills 欄位，不是反射或型別
+// 掃描；Tool 本身也仍要先 Register 才推導得到。
+func autoIncludedTools(skillRefs []string) []string {
+	if len(skillRefs) == 0 {
+		return nil
+	}
+	return []string{tool.LoadSkillToolName}
 }
 
 // runChat 載入 Workspace 設定檔與 Profile、校驗 Provider 可解析，組出
@@ -190,11 +213,11 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	longTerm := memory.NewLongTermMemory(wsRoot, filepath.Join("memory", memoryFile))
 
 	// Profile 的 tools 欄位過濾可用子集，引用未註冊的 Tool 在啟動即報清晰錯誤。
-	registry, err := buildToolRegistry(cfg.HTTP.AllowedDomains, longTerm)
+	registry, err := buildToolRegistry(cfg.HTTP.AllowedDomains, longTerm, contextLoader, skillRefs)
 	if err != nil {
 		return err
 	}
-	executor, err := registry.Subset(prof.Tools, logger)
+	executor, err := registry.Subset(prof.Tools, autoIncludedTools(skillRefs), logger)
 	if err != nil {
 		return fmt.Errorf("Profile %s 的 tools 校驗失敗: %w", prof.Name, err)
 	}

@@ -367,6 +367,86 @@ func TestSkillsRereadsEveryCall(t *testing.T) {
 	}
 }
 
+// TestSkillBodyGoesThroughSameChecks 釘住第二層**不另立一條寬鬆的讀取路徑**：
+// SkillBody 與 Skills 走同一組校驗。
+//
+// 這比第一層更要緊——第二層的入口是 **LLM 送來的參數**，第一層是使用者手寫的
+// Profile 欄位。少了任何一道，一個被誘導的模型就能拿它讀 Workspace 外的檔案。
+func TestSkillBodyGoesThroughSameChecks(t *testing.T) {
+	tests := []struct {
+		name    string
+		ref     string
+		setup   func(t *testing.T, dir string)
+		skip    func() string
+		wantSub string
+	}{
+		{name: "路徑逃逸：名稱規則擋在讀檔之前", ref: "../../etc/passwd", wantSub: "Skill 名稱"},
+		{name: "帶副檔名", ref: "digest.md", wantSub: "Skill 名稱"},
+		{name: "不存在", ref: "ghost", wantSub: "ghost"},
+		{
+			name: "符號連結：拒絕跟隨",
+			ref:  "digest",
+			setup: func(t *testing.T, dir string) {
+				writeSkill(t, dir, "real", skillDoc("real", "真的。", "正文"))
+				if err := os.Symlink("real.md", filepath.Join(dir, "skills", "digest.md")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			skip:    skipIfNoSymlink,
+			wantSub: "符號連結",
+		},
+		{
+			name:    "frontmatter name 與引用名不一致",
+			ref:     "digest",
+			setup:   func(t *testing.T, dir string) { writeSkill(t, dir, "digest", skillDoc("other", "描述。", "正文")) },
+			wantSub: "other",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.skip != nil {
+				if reason := tt.skip(); reason != "" {
+					t.Skip(reason)
+				}
+			}
+			loader, dir := newLoader(t)
+			if tt.setup != nil {
+				tt.setup(t, dir)
+			}
+
+			_, err := loader.SkillBody(context.Background(), tt.ref)
+			if err == nil {
+				t.Fatalf("SkillBody(%q) 應報錯", tt.ref)
+			}
+			if !strings.Contains(err.Error(), tt.wantSub) {
+				t.Errorf("錯誤訊息 %q 未含 %q", err.Error(), tt.wantSub)
+			}
+		})
+	}
+}
+
+// TestSkillBodyReturnsBodyOnly 釘住 SkillBody 回的是**正文**、不含 frontmatter：
+// 回填給 LLM 的應該是任務說明，不是那幾行 YAML metadata（那已經在 system prompt
+// 的第一層了，重複送等於白花 token）。
+func TestSkillBodyReturnsBodyOnly(t *testing.T) {
+	loader, dir := newLoader(t)
+	writeSkill(t, dir, "digest", skillDoc("digest", "做摘要。需要摘要時使用。", "## 步驟\n\n1. 拉 PR\n2. 寫摘要"))
+
+	body, err := loader.SkillBody(context.Background(), "digest")
+	if err != nil {
+		t.Fatalf("SkillBody: %v", err)
+	}
+	if !strings.Contains(body, "拉 PR") {
+		t.Errorf("回傳未含正文: %q", body)
+	}
+	for _, notWant := range []string{"---", "name: digest", "description:"} {
+		if strings.Contains(body, notWant) {
+			t.Errorf("回傳含 frontmatter 片段 %q，那已經在第一層了: %q", notWant, body)
+		}
+	}
+}
+
 // TestSkillBodyNotReturned 釘住漸進揭露的第一層：載入器回傳的只有 name 與
 // description，**正文不在其中**。正文按需回填是第二層的事（#20）。
 func TestSkillBodyNotReturned(t *testing.T) {

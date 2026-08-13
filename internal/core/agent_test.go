@@ -114,7 +114,7 @@ func noBootstrap(t *testing.T) core.ContextLoader {
 
 func noTools(t *testing.T) core.ToolExecutor {
 	t.Helper()
-	exec, err := tool.NewRegistry().Subset(nil, discardLogger())
+	exec, err := tool.NewRegistry().Subset(nil, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("Subset: %v", err)
 	}

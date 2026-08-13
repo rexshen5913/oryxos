@@ -10,8 +10,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,6 +34,34 @@ func newReplayServer(t *testing.T, fixtures ...string) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(fixtures[served]))
 		served++
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// newRecordingReplayServer 同 newReplayServer，但把每次 LLM 請求的 body 收下來供
+// 斷言——組裝點的行為（例如送出去的工具清單）只有從那裡看得到。
+func newRecordingReplayServer(t *testing.T, bodies *[][]byte, fixtures ...string) *httptest.Server {
+	t.Helper()
+	var mu sync.Mutex
+	var served int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("讀取 LLM 請求 body: %v", err)
+		}
+		mu.Lock()
+		*bodies = append(*bodies, body)
+		idx := served
+		served++
+		mu.Unlock()
+		if idx >= len(fixtures) {
+			t.Errorf("LLM 請求數超出錄製回應數 %d", len(fixtures))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(fixtures[idx]))
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -395,6 +425,113 @@ func TestChatSkillOverflowLoggedWithZeroTurns(t *testing.T) {
 	if !strings.Contains(string(logged), "skill_section_truncated") {
 		t.Errorf("一個 turn 都沒跑時仍應有啟動的結構化警示，日誌內容: %q", string(logged))
 	}
+}
+
+// TestChatLoadSkillAutoIncluded 釘住 ticket #20 的自動加入語義，從**組裝點**驗——
+// 三個邊界格分別對應三種使用者寫法。
+//
+// 驗的方式是看送往 LLM 邊界的 tools 清單裡有沒有 load_skill：那是「這個 Agent 能不
+// 能用它」的唯一外部可觀察形式。
+func TestChatLoadSkillAutoIncluded(t *testing.T) {
+	tests := []struct {
+		name string
+		// profileBody 是 default.yaml 除 name 外的內容。
+		profileBody string
+		seedSkill   bool
+		wantTool    bool
+	}{
+		{
+			// 最該保護的一格：宣告了 skills 卻沒列 load_skill，不能安靜退化成
+			// 「看得到描述、永遠載不到正文」。
+			name:        "skills 非空、tools 沒列：自動加入",
+			profileBody: "provider:\n  name: openrouter\n  model: m\nskills:\n  - digest\n",
+			seedSkill:   true,
+			wantTool:    true,
+		},
+		{
+			// 使用者把設定寫清楚不該被懲罰——冪等合併，不報錯也不重複。
+			name:        "skills 非空、tools 也顯式列了：冪等合併不報錯",
+			profileBody: "provider:\n  name: openrouter\n  model: m\ntools:\n  - load_skill\nskills:\n  - digest\n",
+			seedSkill:   true,
+			wantTool:    true,
+		},
+		{
+			// 允許啟動；呼叫時才回「這個 Profile 沒有宣告任何 Skill」的錯誤回填。
+			// 一個沒有 Skill 的 Agent 沒理由起不來。
+			name:        "skills 為空但 tools 顯式列了：允許啟動",
+			profileBody: "provider:\n  name: openrouter\n  model: m\ntools:\n  - load_skill\n",
+			wantTool:    true,
+		},
+		{
+			name:        "skills 為空、tools 也沒列：不出現",
+			profileBody: "provider:\n  name: openrouter\n  model: m\n",
+			wantTool:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var reqs [][]byte
+			srv := newRecordingReplayServer(t, &reqs, readFixture(t, "chat_reply_1.json"))
+			dir := setupChatWorkspace(t, srv.URL)
+			if tt.seedSkill {
+				writeSkillFile(t, dir, "digest",
+					"---\nname: digest\ndescription: 做摘要。需要摘要時使用。\n---\n\n## 步驟\n\n1. 做摘要\n")
+			}
+			writeProfile(t, dir, tt.profileBody)
+
+			var out bytes.Buffer
+			if err := runChat(context.Background(), strings.NewReader(""), &out, dir,
+				chatOptions{profileName: "default", message: "你好"}); err != nil {
+				t.Fatalf("runChat: %v", err)
+			}
+
+			if len(reqs) == 0 {
+				t.Fatal("沒有收到任何 LLM 請求，取不到工具清單")
+			}
+			got := requestToolNames(t, reqs[0])
+			if slices.Contains(got, "load_skill") != tt.wantTool {
+				t.Errorf("送往 LLM 的工具清單 = %v，load_skill 出現 = %v，期望 %v",
+					got, slices.Contains(got, "load_skill"), tt.wantTool)
+			}
+			// 冪等：出現就只能出現一次，重複會讓 OpenAI 兼容端點拒絕請求。
+			if n := slices.Index(got, "load_skill"); n >= 0 {
+				if c := countName(got, "load_skill"); c != 1 {
+					t.Errorf("load_skill 在工具清單裡出現 %d 次，期望 1 次: %v", c, got)
+				}
+			}
+		})
+	}
+}
+
+// requestToolNames 取出一次 LLM 邊界請求宣告的工具名。
+func requestToolNames(t *testing.T, body []byte) []string {
+	t.Helper()
+	var req struct {
+		Tools []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("解析 LLM 請求: %v", err)
+	}
+	names := make([]string, 0, len(req.Tools))
+	for _, tl := range req.Tools {
+		names = append(names, tl.Function.Name)
+	}
+	return names
+}
+
+func countName(names []string, want string) int {
+	n := 0
+	for _, s := range names {
+		if s == want {
+			n++
+		}
+	}
+	return n
 }
 
 // sessionRow 是 sessions 表一列在 CLI 端的斷言形狀。

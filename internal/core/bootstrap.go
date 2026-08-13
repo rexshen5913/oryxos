@@ -50,6 +50,16 @@ type ContextLoader interface {
 	// 相同，都是注入 system prompt 的 markdown 上下文，只是來源不同。載入時機也
 	// 相同——每個 turn 一次、在 ReAct 迭代迴圈之外取快照。
 	Skills(ctx context.Context, names []string) ([]SkillMeta, error)
+
+	// SkillBody 回傳一份 Skill 的**正文**（漸進揭露第二層），供 load_skill 以 tool
+	// 訊息回填進對話。超過 MaxSkillBodyRunes 時截斷並附自述省略量的標記。
+	//
+	// 與 Skills 分成兩個方法是刻意的：第一層每個 turn 都要、且只要 metadata；第二層
+	// 只在 Agent 主動要的那一次才讀正文。合成一個「連正文一起回」的方法會讓第一層
+	// 每個 turn 都把所有正文讀進記憶體——那正是漸進揭露要避免的成本。
+	//
+	// 呼叫端負責先確認這份 Skill 在該 Profile 的引用範圍內；這裡只管讀得到讀不到。
+	SkillBody(ctx context.Context, name string) (string, error)
 }
 
 // BootstrapSelection 指出一次載入要讀哪幾份 Bootstrap 檔案，以及缺檔算不算錯。

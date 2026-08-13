@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-after-skill-body",
+  "object": "chat.completion",
+  "created": 1722925502,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "我讀完這份 Skill 的步驟了，先去拉昨天的 PR 清單，再整理成摘要。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 320,
+    "completion_tokens": 22,
+    "total_tokens": 342
+  }
+}

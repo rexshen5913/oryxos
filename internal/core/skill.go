@@ -27,6 +27,13 @@ const (
 	// 標準原文同樣寫「字元」但未定義是 byte 還是 code point；本專案一律以 rune 計
 	// （沿 spec #2 的判準），對 ASCII 等價、對中文較寬鬆，不會低估。
 	MaxSkillDescriptionRunes = 1024
+	// MaxSkillBodyRunes 是 load_skill 單次回填的正文上限（漸進揭露第二層）。
+	//
+	// 回填走的是 tool 訊息，同樣留在對話歷史裡、同樣每個 turn 隨歷史重送，所以一樣
+	// 要有上限——「按需載入」省掉的是**沒用到的** Skill，不是用到的那份的長度。
+	// 與 Skill 段取同一個數字：一份寫得完整的任務說明與一份二十來個 Skill 的清單，
+	// 量級相當。
+	MaxSkillBodyRunes = 10000
 	// MaxSkillSectionRunes 是 Skill 段（全部 name ＋ description 合計）的上限。
 	//
 	// 取 10000 是因為這一層裝的是 N 份 Skill 的描述：以典型描述約 500 rune 計容得下
@@ -35,14 +42,26 @@ const (
 	MaxSkillSectionRunes = 10000
 )
 
+// LoadSkillToolName 是漸進揭露第二層那個內建 Tool 的名字。
+//
+// 定義在 core 而不是 internal/tool：core 需要它才能檢查「Skill 段承諾的那個 Tool
+// 真的在這個 Agent 的工具清單裡」（見 ReActLoop.Run），而 core 不能反向 import
+// internal/tool。與 Bootstrap 檔名常數、Skill 名稱規則同一個位置、同一個理由——
+// 跨 package 共用的**詞彙**放 core，避免兩邊各寫一份字串。
+const LoadSkillToolName = "load_skill"
+
 // skillSectionIntro 是 Skill 段注入時標明來源的引言。措辭不進測試斷言。
 //
-// **刻意不承諾「可以取回正文」**：取回正文的內建 Tool（load_skill）屬漸進揭露第二層、
-// 由 #20 交付，本切片還沒有它。引言若先寫上「判斷相關時再取回正文」，LLM 會去找一個
-// 工具清單裡不存在的 Tool，然後要嘛告訴使用者載不到、要嘛拿描述硬編出步驟——那比
-// 「只列出名稱與用途」更糟。#20 落地時連同這段引言一起改。
-const skillSectionIntro = "以下是你可以使用的 Skill（可複用的任務說明，由使用者手寫），" +
-	"這裡列出它們的名稱與用途："
+// 引言承諾「可以取回正文」是有前提的：load_skill 必須真的在這個 Agent 的可用工具
+// 裡。組裝點以「skills 非空 → 自動加入 load_skill」保證了這一點（見
+// cmd/oryxos/chat.go 的 autoIncludedTools）——沒有那條推導的話，這段話會叫 LLM 去找
+// 一個工具清單裡不存在的 Tool，然後要嘛告訴使用者載不到、要嘛拿描述硬編出步驟。
+//
+// 這個前提由 ReActLoop.Run 每個 turn 檢查一次並在違反時落警示日誌：承諾寫在這裡、
+// 前提卻由**別的 package 的組裝點**維護，中間沒有東西盯著的話，日後多一個組裝點
+// （例如 Web Service）忘了那條推導就會安靜地重現同一個失敗形態。
+const skillSectionIntro = "以下是你可以使用的 Skill（可複用的任務說明，由使用者手寫）。" +
+	"這裡只列出名稱與用途；判斷某份與當前任務相關時，用 " + LoadSkillToolName + " 取回它的正文再照著做："
 
 // newlineCollapser 把描述裡的換行折成空白。
 //

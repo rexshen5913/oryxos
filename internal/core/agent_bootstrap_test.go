@@ -24,6 +24,7 @@ import (
 	"github.com/rexshen5913/oryxos/internal/core"
 	"github.com/rexshen5913/oryxos/internal/memory"
 	"github.com/rexshen5913/oryxos/internal/provider"
+	"github.com/rexshen5913/oryxos/internal/tool"
 )
 
 // seedBootstrap 在 Workspace 根寫下一份 Bootstrap 檔案（真實檔案）。
@@ -80,15 +81,39 @@ func newBootstrapAgentWithProfile(t *testing.T, baseURL string, root *os.Root, p
 
 // newBootstrapAgentWithLogger 同上，但 logger 由呼叫端給——驗引擎層結構化日誌的
 // 測試需要一個看得到記錄的 handler。
+//
+// Tool 子集**照組裝點的規則推導**：Profile 的 skills 非空時把 load_skill 加進來
+// （見 cmd/oryxos/chat.go 的 autoIncludedTools）。這不是為了讓測試通過而加的順從——
+// Skill 段的引言承諾了那個 Tool，宣告了 skills 卻沒有它的 Agent 是組裝點永遠不會
+// 產生的狀態，helper 照著真實組裝走，測試才不會建出一個現實中不存在的東西。
 func newBootstrapAgentWithLogger(t *testing.T, baseURL string, root *os.Root, prof *core.Profile, logger *slog.Logger) *core.AgentService {
 	t.Helper()
 	st := newStore(t)
+	loader := config.NewContextLoader(root)
 	longTerm := memory.NewLongTermMemory(root, memoryRelPath)
 	svc := provider.NewService(map[string]provider.Config{
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, discardLogger())
-	return core.NewAgentService(prof, svc, noTools(t),
-		memory.NewService(st.sessions(), longTerm), st.audit, config.NewContextLoader(root), logger)
+	return core.NewAgentService(prof, svc, skillAwareTools(t, loader, prof),
+		memory.NewService(st.sessions(), longTerm), st.audit, loader, logger)
+}
+
+// skillAwareTools 回傳這個 Profile 該有的 Tool 子集：沒有 Skill 時是空集合，
+// 有 Skill 時帶著 load_skill（與組裝點同一條推導）。
+func skillAwareTools(t *testing.T, loader core.ContextLoader, prof *core.Profile) core.ToolExecutor {
+	t.Helper()
+	if len(prof.Skills) == 0 {
+		return noTools(t)
+	}
+	registry := tool.NewRegistry()
+	if err := registry.Register(tool.NewLoadSkillTool(loader, prof.Skills)); err != nil {
+		t.Fatalf("註冊 load_skill: %v", err)
+	}
+	exec, err := registry.Subset(nil, []string{tool.LoadSkillToolName}, discardLogger())
+	if err != nil {
+		t.Fatalf("Subset: %v", err)
+	}
+	return exec
 }
 
 // promptAfterTurn 跑一個 turn 並回傳該次 LLM 邊界請求的 system prompt。

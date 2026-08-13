@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-fixture-load-skill-1",
+  "object": "chat.completion",
+  "created": 1722925500,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_load_skill_1",
+            "type": "function",
+            "function": {
+              "name": "load_skill",
+              "arguments": "{\"name\":\"daily-pr-digest\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 210,
+    "completion_tokens": 16,
+    "total_tokens": 226
+  }
+}
