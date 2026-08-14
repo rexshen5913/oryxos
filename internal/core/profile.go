@@ -39,8 +39,20 @@ type Profile struct {
 	//
 	// 每個值都必須是合法的 Skill 名稱（見 ValidateSkillName），這順帶讓 `../` 一類
 	// 的路徑逃逸結構上不可能。
-	Skills   []string `yaml:"skills"`
-	Settings Settings `yaml:"settings"`
+	Skills []string `yaml:"skills"`
+	// McpServers 宣告這個 Agent 要接哪幾個外部 MCP server（Agent 級隔離），值是
+	// mcp_servers.yaml 裡的宣告名。
+	//
+	// 這是**兩層過濾的第一層**：先由這個欄位決定這個 Agent 看得到哪些 server 的工具，
+	// 再由 tools 欄位從中挑出具體工具（工具級控制），兩層都要通過。沒有第一層的話每個
+	// Agent 都吃到所有 server 的工具，只能靠逐個列長名字收斂——那是把隔離責任推給
+	// 使用者的書寫紀律。
+	//
+	// 語義同 Skills、與 Bootstrap 刻意不同：省略或空清單都是「不接任何 server」，
+	// 沒有「省略即全部」（見 McpServerRefs）。既有 Profile 因此免遷移——沒寫這個欄位
+	// 的 Profile 行為與本票之前完全相同。
+	McpServers []string `yaml:"mcp_servers"`
+	Settings   Settings `yaml:"settings"`
 }
 
 // Bootstrap 檔案的正式名稱，也就是 Profile bootstrap 欄位的合法值。

@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-after-mcp-tool",
+  "object": "chat.completion",
+  "created": 1722925601,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "外部工具已經回覆了，我把結果整理如下給你。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 260,
+    "completion_tokens": 22,
+    "total_tokens": 282
+  }
+}

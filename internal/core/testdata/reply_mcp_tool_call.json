@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-fixture-mcp-tool-call",
+  "object": "chat.completion",
+  "created": 1722925600,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_mcp_1",
+            "type": "function",
+            "function": {
+              "name": "{{TOOL_NAME}}",
+              "arguments": "{\"text\":\"哈囉\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 220,
+    "completion_tokens": 18,
+    "total_tokens": 238
+  }
+}

@@ -27,7 +27,8 @@ func runInit(t *testing.T, dir string) (string, error) {
 }
 
 func TestInitCommand(t *testing.T) {
-	// Workspace 全部產物：五個子目錄＋三個 Bootstrap 模板＋預設 Profile＋Workspace 設定檔。
+	// Workspace 全部產物：五個子目錄＋三個 Bootstrap 模板＋預設 Profile＋Workspace 設定檔
+	// ＋MCP server 宣告檔。
 	wantDirs := []string{"profiles", "sessions", "skills", "memory", "logs"}
 	// 三份 Bootstrap 檔案必須**建立且為空**：它們的內容會逐字注入每個 turn 的
 	// system prompt，任何說明文字都會被 LLM 當成真的專案慣例／偏好／人格來遵循。
@@ -36,6 +37,9 @@ func TestInitCommand(t *testing.T) {
 	wantFiles := []string{
 		filepath.Join("profiles", "default.yaml"),
 		"config.yaml",
+		// 模板的內容契約（帶註解、且能被載入器讀成 0 個 server）另見
+		// TestInitMcpServersTemplate；這裡只驗它存在且非空。
+		"mcp_servers.yaml",
 	}
 
 	t.Run("首次 init 建立全部產物", func(t *testing.T) {

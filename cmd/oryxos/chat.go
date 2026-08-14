@@ -217,6 +217,45 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	if err != nil {
 		return err
 	}
+
+	// 外部 MCP server：宣告檔 → Profile 引用 → 連線 → tools/list → 包成 OryxTool 註冊
+	// 進**同一個** Registry。之後的 Subset 對它們與內建 Tool 一視同仁，ReAct 循環也
+	// 不感知工具來自哪裡。
+	//
+	// 順序上必須夾在 buildToolRegistry 與 Subset 之間：早於註冊的話 Registry 還不存在，
+	// 晚於 Subset 的話 Profile 引用 MCP 工具會被判成「未註冊」。
+	mcpDeclared, err := config.LoadMcpServers(filepath.Join(ws, core.McpServersFile))
+	if err != nil {
+		return fmt.Errorf("載入 MCP server 宣告: %w", err)
+	}
+	mcpRefs, err := prof.McpServerRefs()
+	if err != nil {
+		return fmt.Errorf("Profile %s 的 mcp_servers 校驗失敗: %w", prof.Name, err)
+	}
+	// 只解析出**這個 Profile 引用到的**那幾份，未被引用的宣告連子進程都不會 spawn。
+	mcpSpecs, err := core.ResolveMcpServers(mcpRefs, mcpDeclared)
+	if err != nil {
+		return fmt.Errorf("Profile %s 的 mcp_servers 校驗失敗: %w", prof.Name, err)
+	}
+	// 憑證的 ${ENV_VAR} 展開在過濾**之後**：一個沒被這個 Agent 引用的 server 缺環境變數
+	// 不該擋下啟動（只接 Slack 的 Agent 不該因為機器上沒有 GitHub token 而起不來）。
+	mcpSpecs, err = config.ExpandMcpServerEnv(mcpSpecs)
+	if err != nil {
+		return fmt.Errorf("載入 MCP server 憑證: %w", err)
+	}
+	mcpClients, err := tool.ConnectMcpServers(ctx, registry, mcpSpecs, logger)
+	// Close 無條件排進 defer，連線中途失敗時也要收掉**已經起來的**那些子進程：
+	// ConnectMcpServers 在回錯誤前已自行收過一次，這裡是第二道保險（Close 對空清單
+	// 是 no-op），漏掉的話會留下孤兒進程。
+	defer func() {
+		if cerr := mcpClients.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
+	if err != nil {
+		return fmt.Errorf("連線 MCP server: %w", err)
+	}
+
 	executor, err := registry.Subset(prof.Tools, autoIncludedTools(skillRefs), logger)
 	if err != nil {
 		return fmt.Errorf("Profile %s 的 tools 校驗失敗: %w", prof.Name, err)

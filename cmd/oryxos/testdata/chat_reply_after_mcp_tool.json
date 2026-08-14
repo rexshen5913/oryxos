@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-chat-after-mcp-tool",
+  "object": "chat.completion",
+  "created": 1722925701,
+  "model": "deepseek/deepseek-v4-flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "外部 MCP 工具已回覆，這是整理後的結果。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 270,
+    "completion_tokens": 20,
+    "total_tokens": 290
+  }
+}

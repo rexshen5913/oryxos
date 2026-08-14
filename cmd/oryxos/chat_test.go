@@ -310,6 +310,24 @@ func TestChatStartupValidationFailsBeforeAnyTurn(t *testing.T) {
 			},
 			wantSub: "ghost",
 		},
+		{
+			// 設定錯誤（打錯 server 名），與「server 連不上」的環境問題不同質：
+			// 這裡 fail fast，連一個 turn 都不跑。
+			name: "mcp_servers 引用宣告檔裡沒有的 server",
+			setup: func(t *testing.T, dir string) {
+				writeMcpServers(t, dir, "mcp_servers:\n  demo:\n    transport: stdio\n    command: [true]\n")
+				writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\nmcp_servers:\n  - ghost-server\n")
+			},
+			wantSub: "ghost-server",
+		},
+		{
+			name: "mcp_servers 重複列出同一個 server",
+			setup: func(t *testing.T, dir string) {
+				writeMcpServers(t, dir, "mcp_servers:\n  demo:\n    transport: stdio\n    command: [true]\n")
+				writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\nmcp_servers:\n  - demo\n  - demo\n")
+			},
+			wantSub: "demo",
+		},
 	}
 
 	for _, tt := range tests {
