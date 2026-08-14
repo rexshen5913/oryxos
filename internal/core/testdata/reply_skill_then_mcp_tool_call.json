@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-fixture-skill-then-mcp",
+  "object": "chat.completion",
+  "created": 1722926000,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_gh_list_prs_1",
+            "type": "function",
+            "function": {
+              "name": "gh__list_prs",
+              "arguments": "{\"text\":\"昨天合併的 PR\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 402,
+    "completion_tokens": 24,
+    "total_tokens": 426
+  }
+}

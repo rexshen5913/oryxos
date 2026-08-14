@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-fixture-chained-mcp",
+  "object": "chat.completion",
+  "created": 1722926001,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_slack_post_1",
+            "type": "function",
+            "function": {
+              "name": "slack__post_message",
+              "arguments": "{\"text\":\"gh/list_prs 收到：昨天合併的 PR\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 448,
+    "completion_tokens": 31,
+    "total_tokens": 479
+  }
+}

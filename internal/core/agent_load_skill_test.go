@@ -28,7 +28,13 @@ func newLoadSkillAgent(t *testing.T, baseURL string, root *os.Root, prof *core.P
 
 // newLoadSkillAgentOn 同上，但用指定的 Session／審計儲存——要查 tool_invocations 的
 // 測試得自己持有那個 db 檔的路徑。
-func newLoadSkillAgentOn(t *testing.T, baseURL string, root *os.Root, prof *core.Profile, st *testStore) *core.AgentService {
+//
+// specs 是要一併連上的真實 MCP server，跨鏈路編排的測試走這條
+// （agent_skill_mcp_test.go）。它們與 load_skill 進**同一個** Registry，因為那正是
+// 「零程式碼跨工具編排」的前提：ReAct 循環不感知工具來自 Skill 那條線還是 MCP 那條線。
+// 空 specs 時 ConnectMcpServers 是 no-op，既有呼叫端不受影響。
+func newLoadSkillAgentOn(t *testing.T, baseURL string, root *os.Root, prof *core.Profile,
+	st *testStore, specs ...core.McpServerSpec) *core.AgentService {
 	t.Helper()
 	loader := config.NewContextLoader(root)
 
@@ -36,6 +42,7 @@ func newLoadSkillAgentOn(t *testing.T, baseURL string, root *os.Root, prof *core
 	if err := registry.Register(tool.NewLoadSkillTool(loader, prof.Skills)); err != nil {
 		t.Fatalf("註冊 load_skill: %v", err)
 	}
+	connectMcp(t, registry, specs)
 	exec, err := registry.Subset(prof.Tools, []string{"load_skill"}, discardLogger())
 	if err != nil {
 		t.Fatalf("Subset: %v", err)
