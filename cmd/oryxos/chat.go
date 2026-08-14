@@ -89,6 +89,14 @@ func buildToolRegistry(allowedDomains []string, longTerm *memory.LongTermMemory,
 	if err := registry.Register(tool.NewLoadSkillTool(skills, skillRefs)); err != nil {
 		return nil, fmt.Errorf("註冊 load_skill: %w", err)
 	}
+	// 原生 Go Tool 示例（Plugin Tool 方式三）。**這一行就是業務方要照抄的東西**：
+	// 自己寫一個實作 OryxTool 的型別，在這裡多加一次 Register，它就與內建 Tool 一視
+	// 同仁——受 Profile 的 tools 欄位過濾、落 tool_invocations、ReAct 循環不感知來源。
+	//
+	// 一律註冊，理由同上：沒列到它的 Profile 完全不受影響，既有 Workspace 免遷移。
+	if err := registry.Register(tool.NewTextStatsTool()); err != nil {
+		return nil, fmt.Errorf("註冊原生 Go Tool 示例 text_stats: %w", err)
+	}
 	return registry, nil
 }
 

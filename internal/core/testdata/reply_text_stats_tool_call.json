@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-fixture-text-stats-1",
+  "object": "chat.completion",
+  "created": 1722925600,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_text_stats_1",
+            "type": "function",
+            "function": {
+              "name": "text_stats",
+              "arguments": "{\"text\":\"OryxOS 是 Agent OS\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 168,
+    "completion_tokens": 22,
+    "total_tokens": 190
+  }
+}

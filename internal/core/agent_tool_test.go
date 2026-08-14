@@ -30,11 +30,22 @@ func newToolAgent(t *testing.T, baseURL string, profile *core.Profile, subset, a
 
 // newToolAgentOn 是 newToolAgent 的完整形式：另可指定 Tool 執行日誌的去向
 // （斷言重試次數）與 Session 儲存（斷言落庫）。
-func newToolAgentOn(t *testing.T, baseURL string, profile *core.Profile, subset, allowed []string, logger *slog.Logger, st *testStore) *core.AgentService {
+//
+// extra 是要與內建 Tool 一起註冊進**同一個** Registry 的額外 Tool——原生 Go Tool 示例
+// 走這條（agent_plugin_tool_test.go）。共用這個 helper 不只是省行數：本票要證的正是
+// 「方式三的組裝與斷言形狀與內建 Tool 完全一樣」，示例若需要自己一套 helper 才組得
+// 起來，那句話就先破了。
+func newToolAgentOn(t *testing.T, baseURL string, profile *core.Profile, subset, allowed []string,
+	logger *slog.Logger, st *testStore, extra ...tool.OryxTool) *core.AgentService {
 	t.Helper()
 	r := tool.NewRegistry()
 	if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(allowed)); err != nil {
 		t.Fatalf("RegisterBuiltins: %v", err)
+	}
+	for _, et := range extra {
+		if err := r.Register(et); err != nil {
+			t.Fatalf("註冊 %s: %v", et.Name(), err)
+		}
 	}
 	exec, err := r.Subset(subset, nil, logger)
 	if err != nil {

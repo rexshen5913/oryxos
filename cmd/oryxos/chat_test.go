@@ -555,6 +555,33 @@ func TestChatLoadSkillAutoIncluded(t *testing.T) {
 	}
 }
 
+// TestChatRegistersNativeGoToolExample 釘住原生 Go Tool 示例（Plugin Tool 方式三）
+// **在組裝點被顯式註冊**（憲法 2.3）。少了 buildToolRegistry 那一行 Register，Profile
+// 一列 text_stats 就會在 Subset 被判成「未註冊」而整個起不來——業務方照抄樣板時第一
+// 個會撞上的坑，而 internal/core 那邊自組 Registry 的測試看不到它。
+//
+// 驗的方式與 TestChatLoadSkillAutoIncluded 同形：看送往 LLM 邊界的 tools 清單，那是
+// 「這個 Agent 能不能用它」唯一的外部可觀察形式。
+func TestChatRegistersNativeGoToolExample(t *testing.T) {
+	var reqs [][]byte
+	srv := newRecordingReplayServer(t, &reqs, readFixture(t, "chat_reply_1.json"))
+	dir := setupChatWorkspace(t, srv.URL)
+	writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\ntools:\n  - text_stats\n")
+
+	var out bytes.Buffer
+	if err := runChat(context.Background(), strings.NewReader(""), &out, dir,
+		chatOptions{profileName: "default", message: "你好"}); err != nil {
+		t.Fatalf("runChat: %v", err)
+	}
+
+	if len(reqs) == 0 {
+		t.Fatal("沒有收到任何 LLM 請求，取不到工具清單")
+	}
+	if got := requestToolNames(t, reqs[0]); !slices.Contains(got, "text_stats") {
+		t.Errorf("送往 LLM 的工具清單 = %v, 期望含 text_stats", got)
+	}
+}
+
 // requestToolNames 取出一次 LLM 邊界請求宣告的工具名。
 func requestToolNames(t *testing.T, body []byte) []string {
 	t.Helper()

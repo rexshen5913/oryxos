@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-text-stats-2",
+  "object": "chat.completion",
+  "created": 1722925601,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "「OryxOS 是 Agent OS」共 17 個字元、4 個詞。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 196,
+    "completion_tokens": 24,
+    "total_tokens": 220
+  }
+}
