@@ -90,6 +90,83 @@ func TestChatMcpToolEndToEnd(t *testing.T) {
 	}
 }
 
+// testMcpServerEntry 組出一份指向測試二進制的 stdio server 宣告（YAML 片段）。
+func testMcpServerEntry(t *testing.T, name string, tools ...string) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("取得測試二進制路徑: %v", err)
+	}
+	return "  " + name + ":\n    transport: stdio\n" +
+		"    command: [" + exe + "]\n" +
+		"    env:\n" +
+		"      " + mcpServerModeEnv + ": \"1\"\n" +
+		"      " + mcpServerNameEnv + ": " + name + "\n" +
+		"      " + mcpServerToolsEnv + ": " + strings.Join(tools, ",") + "\n"
+}
+
+// TestChatMcpServerUnavailableDegradesWithWarning 是本票（#22）在組裝點的主場景：
+// **一個 MCP server 連不上，Agent 照樣起得來、其餘工具照樣可用，但使用者看得見**。
+//
+// 這一格同時釘住三件事，少任何一件這個功能就沒有意義：
+//
+//  1. 啟動不中斷——一個外部依賴掛掉不該讓整個 Agent 起不來（使用者故事 28）。
+//  2. CLI 有可見警示——「安靜地少了幾個工具」比起不來更糟：Agent 會表現成莫名其妙
+//     不會做某件事，而使用者不會想到去翻日誌（使用者故事 29）。斷言用輸出內容，
+//     prior art 是 TestChatEmptyWhitelistWarning。
+//  3. 活著的 server 的工具真的還能用——降級不是「大家一起半殘」。
+//
+// **Profile 的 tools 列了掛掉那個 server 的工具**，這是刻意的：那才是真實的配置
+// （使用者當然會列他要用的工具）。少了這一點，降級在現實中幾乎永遠走不到——
+// Registry.Subset 會先以「Tool 未註冊」擋下啟動，警示根本印不出來。
+func TestChatMcpServerUnavailableDegradesWithWarning(t *testing.T) {
+	var reqs [][]byte
+	srv := newRecordingReplayServer(t, &reqs,
+		readFixture(t, "chat_reply_mcp_tool_call.json"),
+		readFixture(t, "chat_reply_after_mcp_tool.json"))
+	dir := setupChatWorkspace(t, srv.URL)
+
+	// demo 是真的起得來的 server；broken 指向一個不存在的執行檔——那正是最常見的
+	// 現實形態（機器上沒裝 node、路徑打錯、套件沒安裝好）。
+	writeMcpServers(t, dir, "mcp_servers:\n"+
+		testMcpServerEntry(t, "demo", "echo")+
+		"  broken:\n    transport: stdio\n    command: [/nonexistent/oryxos-mcp-server]\n")
+	writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\n"+
+		"mcp_servers:\n  - demo\n  - broken\ntools:\n  - demo__echo\n  - broken__echo\n")
+
+	var out bytes.Buffer
+	if err := runChat(context.Background(), strings.NewReader(""), &out, dir,
+		chatOptions{profileName: "default", message: "幫我呼叫外部工具"}); err != nil {
+		t.Fatalf("一個 server 連不上不該讓啟動失敗: %v", err)
+	}
+
+	// 1. CLI 可見警示，且指名是哪個 server——使用者要知道該去修哪一個。
+	if !strings.Contains(out.String(), "broken") {
+		t.Errorf("輸出沒有指名連不上的 server:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "警告") {
+		t.Errorf("輸出沒有可見警示:\n%s", out.String())
+	}
+	// 2. 對話照常走完。
+	if !strings.Contains(out.String(), "外部 MCP 工具已回覆") {
+		t.Errorf("輸出未含最終回應:\n%s", out.String())
+	}
+
+	// 3. 活著那個 server 的工具照常可用，掛掉那個的不出現在 LLM 邊界——降級的範圍
+	// 剛好是那一個 server，不多不少。
+	names := llmToolNames(t, reqs, 0)
+	if !slices.Contains(names, "demo__echo") {
+		t.Errorf("連得上的 server 的工具不見了: %v", names)
+	}
+	if slices.Contains(names, "broken__echo") {
+		t.Errorf("連不上的 server 的工具竟然還在工具清單裡: %v", names)
+	}
+	// 4. 結構化錯誤日誌（維運要查「Agent 的能力為什麼不完整」）。
+	if logs := readWorkspaceLog(t, dir); !strings.Contains(logs, "mcp_server_unavailable") {
+		t.Errorf("日誌沒有連線失敗的記錄:\n%s", logs)
+	}
+}
+
 // TestChatUnreferencedServerMissingCredentialDoesNotBlockStartup 釘住憑證展開的範圍：
 // **沒被這個 Profile 引用的 server，缺環境變數也不該擋下啟動**。
 //

@@ -58,7 +58,47 @@ const (
 	mcpClientVersion = "0.1.0"
 
 	// mcpTransportStdio 是核心階段唯一支援的 transport。
-	mcpTransportStdio = "stdio"
+	//
+	// 值的來源是 core：宣告檔的載入端也要用同一個字串校驗使用者寫了什麼（見
+	// config.validateMcpServerEntry）。這裡取別名而不是各寫一份字面字串，沿
+	// LoadSkillToolName 的既有形狀。
+	mcpTransportStdio = core.McpTransportStdio
+)
+
+// MCP 的三個時間上限。全部是**顯式參數**傳進各層，不是從全域讀（憲法 5.2）：
+// production 傳這裡的常數，測試傳毫秒級的短值，兩邊走的是同一條路。
+//
+// 為什麼三個都要有：呼叫端的 ctx 能貫穿（#21 已做）不代表就有期限——`oryxos chat`
+// 互動模式的 ctx **沒有 deadline**，一個半死不活的 server 會讓啟動、某個 turn、或
+// 退出永遠掛住，而使用者只看得到游標在閃。每一條阻塞路徑都要有自己的終點。
+const (
+	// mcpConnectTimeout 是啟動時**單一 server** 的連線期限，涵蓋 spawn → initialize
+	// → tools/list 整段。
+	//
+	// 給到 30 秒是因為它涵蓋的是冷啟動：`npx -y some-server` 第一次跑可能要下載套件。
+	// 逾時的代價只是這一個 server 降級（其餘照常啟動），寧可寬鬆一點。
+	mcpConnectTimeout = 30 * time.Second
+
+	// mcpToolCallTimeout 是**單次工具呼叫**的期限。
+	//
+	// 比連線期限長：MCP 工具背後常是外部 API（開一個 PR、送一則訊息），60 秒是給
+	// 那類操作的餘裕。逾時以 ToolResult.Error 回填，turn 不中斷——LLM 會看到一句
+	// 「這個工具沒回應」然後換一條路，那比讓整個 turn 卡死好得多。
+	mcpToolCallTimeout = 60 * time.Second
+
+	// mcpCloseTimeout 是關閉**單一子進程**的整體期限，逾期強制終止。
+	//
+	// 短，因為這裡在使用者面前：他已經下了退出的指令。守規矩的 server 收到 stdin
+	// 關閉會立刻退出（遠快於這個值），這個期限只對「不理會關閉訊號」的那種生效。
+	mcpCloseTimeout = 5 * time.Second
+
+	// mcpKillReapGrace 是**強制終止之後**等待回收的寬限，用在 close 的後兩段（見
+	// forceClose）。
+	//
+	// 刻意比 mcpCloseTimeout 短且是固定值：SIGKILL 之後的回收是毫秒級的，這個值不是
+	// 用來「等它做完」，而是用來在極端情況下不卡住。關閉的最壞總耗時因此是
+	// mcpCloseTimeout ＋ 2×mcpKillReapGrace，仍然是個使用者等得起的常數。
+	mcpKillReapGrace = 2 * time.Second
 )
 
 // mcpSupportedProtocolVersions 是本 client 認得的協議版本，交握時用來判斷 server 回的
@@ -257,6 +297,11 @@ type mcpConn struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	logger *slog.Logger
+	// stdout／stderr 留著只為了一個用途：關閉時的**最後一道防線**。孫行程抓著寫入端
+	// 不放時，讀取端等不到 EOF，兩條讀取 goroutine 就收不了工——自己把讀取端關掉會讓
+	// 它們立刻拿到錯誤而返回（見 close）。正常路徑不碰它們。
+	stdout io.Closer
+	stderr io.Closer
 
 	// 交握協商出來的結果，initialize 成功後才有值，之後唯讀（只給日誌用）。
 	protocolVersion string
@@ -311,6 +356,9 @@ func dialMcpStdio(ctx context.Context, spec core.McpServerSpec, logger *slog.Log
 	// 這類基本變數才跑得起來（node、python 尤其）。使用者宣告的是「額外要給的憑證」，
 	// 不是「這個進程的完整環境」。
 	cmd.Env = append(os.Environ(), envPairs(spec.Env)...)
+	// 自成一個 process group，關閉時才殺得到孫行程（npx 一類的啟動器會有）。
+	// 必須在 Start 之前設定。
+	setProcessGroup(cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -333,6 +381,8 @@ func dialMcpStdio(ctx context.Context, spec core.McpServerSpec, logger *slog.Log
 		name:      spec.Name,
 		cmd:       cmd,
 		stdin:     stdin,
+		stdout:    stdout,
+		stderr:    stderr,
 		logger:    logger,
 		pending:   make(map[int]chan rpcMessage),
 		done:      make(chan struct{}),
@@ -352,8 +402,10 @@ func dialMcpStdio(ctx context.Context, spec core.McpServerSpec, logger *slog.Log
 	go conn.forwardStderr(stderr)
 
 	if err := conn.initialize(ctx); err != nil {
-		// 交握失敗就把已經起來的子進程收掉，不留孤兒。
-		if cerr := conn.close(); cerr != nil {
+		// 交握失敗就把已經起來的子進程收掉，不留孤兒。**期限用 mcpCloseTimeout 而不是
+		// 傳進來的 ctx**：走到這裡最常見的原因正是 ctx 已經逾時，拿一個已經過期的期限
+		// 去關等於直接跳過「先禮」那一步，每次交握逾時都變成強制終止。
+		if cerr := conn.close(mcpCloseTimeout); cerr != nil {
 			logger.Warn("mcp_server_close_failed", "server", spec.Name, "error", cerr.Error())
 		}
 		return nil, err
@@ -718,14 +770,14 @@ func (c *mcpConn) dispatch(line []byte) {
 //
 // 寫入用 context.Background() 是因為這裡**沒有呼叫端的 ctx**——這則回覆是 server 要的，
 // 不屬於任何一次 Tool 呼叫。實務上它只有幾十位元組（遠小於 pipe 緩衝），只有在 server
-// 同時停止讀 stdin 又寫滿我們的 stdout 時才可能卡住，而那時連線已經壞了。那種情形下
-// readLoop 停擺不會拖住任何 Tool 呼叫（它們各自的 ctx 現在真的生效了），只會讓 close()
-// 等到子進程退出為止——與 close() 沒有整體期限是**同一個**已知缺口，歸 ticket #22。
+// 同時停止讀 stdin 又寫滿我們的 stdout 時才可能卡住，而那時連線已經壞了。
+//
+// **那個殘餘風險已經有出口了**（ticket #22）：那種情形下 readLoop 停擺不會拖住任何 Tool
+// 呼叫（它們各自的 ctx 生效，且 Execute 另有自己的上限），而 close() 逾期會強制終止
+// 子進程——所以最壞的後果是退出時多等一個 mcpCloseTimeout，不再是永遠掛住。
 //
 // 回應直接在 readLoop 這條 goroutine 上寫出去。訊息只有幾十位元組、遠小於 pipe 緩衝，
-// 正常情況不會阻塞；改成每個請求開一條 goroutine 反而多出洩漏面與亂序。真正會卡住的
-// 情形是 server 同時停止讀 stdin 又寫滿我們的 stdout——那是壞掉的 server，逾時保護
-// 歸 ticket #22。
+// 正常情況不會阻塞；改成每個請求開一條 goroutine 反而多出洩漏面與亂序。
 func (c *mcpConn) handleServerRequest(msg rpcMessage) {
 	switch msg.Method {
 	case "ping":
@@ -790,34 +842,114 @@ func (c *mcpConn) failureErr() error {
 	return fmt.Errorf("MCP server %q 的連線已關閉", c.name)
 }
 
-// close 關掉這條連線的子進程。
+// close 關掉這條連線的子進程，逾期強制終止。
 //
 // 照 MCP stdio 規範先關 stdin：那是通知 server「沒有更多請求了」的標準方式，讓它
-// 自己收乾淨再退出，比直接發訊號溫和。
+// 自己收乾淨再退出，比直接發訊號溫和。**先禮後兵**——timeout 之內沒退出才 Kill。
 //
-// **關閉的整體期限與逾期強制終止歸 ticket #22**（進程生命週期那張票）。這裡只做把
-// 子進程收掉這件事——不收會留下孤兒進程，那是本票自己造出來的問題。
-func (c *mcpConn) close() error {
+// **為什麼一定要有期限**：關 stdin 只是一個請求，server 可以不理（卡在自己的清理
+// 程式、或根本沒在讀 stdin）。沒有期限的話 `oryxos chat` 會在使用者按下離開之後停在
+// 那裡不動；而使用者對這種情況唯一的手段是 Ctrl-C，那又會留下孤兒進程——正好是關閉
+// 這件事本來要避免的東西。
+//
+// 期限是**顯式參數**而不是常數：組裝點傳 mcpCloseTimeout，測試傳毫秒級的短值去驗
+// 強制終止那條路徑（秒級的常數等不動）。
+func (c *mcpConn) close(timeout time.Duration) error {
 	var errs []error
 	if err := c.stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
 		errs = append(errs, fmt.Errorf("關閉 MCP server %q 的 stdin: %w", c.name, err))
 	}
-	// 先等兩條讀取 goroutine 收完，才能呼叫 Wait（見 readers 欄位的說明）。stdin 一關，
-	// 照規範實作的 server 就會退出、它的 stdout 與 stderr 隨之關閉，兩條讀取因此收到
-	// EOF 結束。**不理會關閉訊號的 server 會讓這裡等下去——那個期限歸 ticket #22**，
-	// 與下面的 Wait 是同一個洞，不是這一行新增的。
-	c.readers.Wait()
-	if err := c.cmd.Wait(); err != nil {
-		// 非零離開碼不算我們的錯誤：server 收到 stdin 關閉後怎麼結束是它的事，
-		// 為此讓 oryxos chat 的退出碼變紅只會製造噪音。留在日誌裡可查即可。
+
+	// 「等兩條讀取 goroutine 收完 → 回收子進程」這一串挪到一條 goroutine 上，主線才
+	// 有辦法在旁邊擺一個計時器。順序不能反：Wait 會關掉 stdout／stderr 這兩個 pipe，
+	// 而 os/exec 明載「在所有讀取完成前呼叫 Wait 是不正確的」（見 readers 欄位）。
+	reaped := make(chan error, 1)
+	go func() {
+		c.readers.Wait()
+		reaped <- c.cmd.Wait()
+	}()
+
+	waitErr, ok := awaitReap(reaped, timeout)
+	if !ok {
+		// 先禮之後是兵。這裡分三段，每一段都有期限——因為每一段都有它擋不住的情形：
+		var err error
+		if waitErr, err = c.forceClose(reaped); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if waitErr != nil {
+		// 非零離開碼不算我們的錯誤：server 收到 stdin 關閉後怎麼結束是它的事，被我們
+		// Kill 掉的那個更是必然非零。為此讓 oryxos chat 的退出碼變紅只會製造噪音——
+		// 強制終止是**預期中的**收尾路徑，不是失敗。留在日誌裡可查即可。
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if errors.As(waitErr, &exitErr) {
 			c.logger.Info("mcp_server_exited", "server", c.name, "status", exitErr.String())
 		} else {
-			errs = append(errs, fmt.Errorf("等待 MCP server %q 退出: %w", c.name, err))
+			errs = append(errs, fmt.Errorf("等待 MCP server %q 退出: %w", c.name, waitErr))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// forceClose 是 close 的強制路徑：溫和的關 stdin 沒讓子進程退出時走這裡。
+//
+// **為什麼不是「Kill 完就等」**：那個「等」在真實世界會永遠等下去。讀取 goroutine 要
+// 等到 stdout／stderr 的**所有**寫入端關閉才收得到 EOF，而 `npx` 一類的啟動器會把那些
+// 寫入端傳給孫行程——只殺直接子進程的話，孫行程還抓著 pipe，回收永遠等不到。這正是
+// 我們自己的 init 模板示範的用法，不是理論上的邊角。
+//
+// 三段，每段都有期限：
+//
+//  1. 殺**整棵樹**（process group）→ 等 mcpKillReapGrace
+//  2. 仍卡住 → 自己關掉讀取端，讀取 goroutine 立刻拿到錯誤收工 → 再等一次
+//  3. 還是卡住 → 放棄等待、回錯誤
+//
+// 第三段幾乎到不了（SIGKILL 擋不住，剩下的只有 uninterruptible sleep 那種情形），但它
+// 是這張票語義的最後保障：**不得讓 CLI 卡在退出上**。代價是那條回收 goroutine 會留著，
+// 這是刻意的取捨——一條卡在已經無法回收的進程上的 goroutine，好過一個永遠回不來的
+// `oryxos chat`。
+func (c *mcpConn) forceClose(reaped <-chan error) (error, error) {
+	c.logger.Warn("mcp_server_close_timeout", "server", c.name, "action", "kill_process_group")
+
+	var killErr error
+	if err := killProcessTree(c.cmd); err != nil {
+		killErr = fmt.Errorf("強制終止 MCP server %q: %w", c.name, err)
+	}
+	if waitErr, ok := awaitReap(reaped, mcpKillReapGrace); ok {
+		return waitErr, killErr
+	}
+
+	// 還沒回收，代表有東西仍抓著讀取端（孫行程，或非 Unix 平台上殺不到的那些）。
+	// 關掉我們這一側，讀取 goroutine 就會拿到「檔案已關閉」而返回。
+	c.logger.Warn("mcp_server_close_pipes_held", "server", c.name, "action", "close_read_pipes")
+	for _, pipe := range []io.Closer{c.stdout, c.stderr} {
+		if pipe == nil {
+			continue
+		}
+		if err := pipe.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			c.logger.Warn("mcp_server_pipe_close_failed", "server", c.name, "error", err.Error())
+		}
+	}
+	if waitErr, ok := awaitReap(reaped, mcpKillReapGrace); ok {
+		return waitErr, killErr
+	}
+
+	return nil, errors.Join(killErr,
+		fmt.Errorf("MCP server %q 強制終止後仍未回收，放棄等待（可能有殘留進程）", c.name))
+}
+
+// awaitReap 等子進程被回收，最多等 d。第二個回傳值是「等到了沒有」。
+func awaitReap(reaped <-chan error, d time.Duration) (error, bool) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case err := <-reaped:
+		// 守規矩的 server 走這裡，而且是**立刻**——不等滿期限。
+		return err, true
+	case <-timer.C:
+		return nil, false
+	}
 }
 
 // ── McpToolAdapter ──────────────────────────────────────────────────────
@@ -829,11 +961,16 @@ type McpToolAdapter struct {
 	// server 是宣告名，用來組註冊名（<server>__<tool>）。
 	server string
 	decl   mcpToolDecl
+	// callTimeout 是這個工具**單次呼叫**的時間上限（見 Execute）。
+	callTimeout time.Duration
 }
 
 // newMcpToolAdapter 包裝一個從 tools/list 拿到的工具宣告。
-func newMcpToolAdapter(conn *mcpConn, server string, decl mcpToolDecl) *McpToolAdapter {
-	return &McpToolAdapter{conn: conn, server: server, decl: decl}
+//
+// callTimeout 是顯式參數：production 由 ConnectMcpServers 傳 mcpToolCallTimeout，
+// 測試傳短值去驗「掛住的 server 不會拖垮 turn」——秒級的常數等不動那條路徑。
+func newMcpToolAdapter(conn *mcpConn, server string, decl mcpToolDecl, callTimeout time.Duration) *McpToolAdapter {
+	return &McpToolAdapter{conn: conn, server: server, decl: decl, callTimeout: callTimeout}
 }
 
 func (a *McpToolAdapter) Name() string { return McpToolName(a.server, a.decl.Name) }
@@ -858,8 +995,15 @@ func (a *McpToolAdapter) InputSchema() json.RawMessage {
 
 // Execute 經 MCP 協議轉發這次呼叫，結果包成 core.ToolResult。
 //
-// 逾時與取消走呼叫端的 ctx（憲法 5.3）。一切失敗都以 ToolResult.Error 回填、**不中斷
-// turn**——沿 spec #1 既有的 Tool 失敗語義，讓 LLM 據此換一條路。
+// 逾時與取消走呼叫端的 ctx（憲法 5.3），**另外自己也有一個上限**：呼叫端的 ctx 能貫穿
+// 不代表它有期限——`oryxos chat` 互動模式的 ctx 沒有 deadline，一個收下請求卻不回應的
+// server 會讓那個 turn 永遠掛住，使用者只能 Ctrl-C 殺掉整個進程。所以這一層必須自備
+// 終點，而不是指望呼叫端給。兩者取較嚴的那個（context.WithTimeout 對已有的更短期限
+// 是 no-op），呼叫端想更快放棄仍然有效。
+//
+// 一切失敗都以 ToolResult.Error 回填、**不中斷 turn**——沿 spec #1 既有的 Tool 失敗
+// 語義，讓 LLM 據此換一條路。失敗另記一筆結構化日誌：回填只有 LLM 看得到，而「這個
+// server 是不是掛了」是維運要查的事（spec #3 使用者故事 35）。
 //
 // 全部標 Retryable: false：server 掛掉重試幾次都一樣（核心階段不自動重連），參數錯
 // 更是重試無用。
@@ -873,8 +1017,15 @@ func (a *McpToolAdapter) Execute(ctx context.Context, input string) core.ToolRes
 		return core.ToolResult{Error: fmt.Sprintf("%s 的參數不是合法的 JSON：%s", a.Name(), input)}
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, a.callTimeout)
+	defer cancel()
+
 	result, raw, err := a.conn.callTool(ctx, a.decl.Name, args)
 	if err != nil {
+		// server 中途死掉之後的每一次呼叫都會走到這裡（核心階段不自動重連），所以
+		// 這筆日誌是「為什麼這個 Agent 突然不會做那件事了」的答案。
+		a.conn.logger.Warn("mcp_tool_call_failed",
+			"server", a.server, "tool", a.decl.Name, "error", err.Error())
 		return core.ToolResult{Error: fmt.Sprintf("呼叫 %s 失敗: %v", a.Name(), err)}
 	}
 	text := result.text(raw)
@@ -890,8 +1041,33 @@ func (a *McpToolAdapter) Execute(ctx context.Context, input string) core.ToolRes
 
 // McpClientService 持有這次啟動所連上的每條 MCP 連線，負責在退出時把子進程收掉。
 type McpClientService struct {
-	conns  []*mcpConn
-	logger *slog.Logger
+	conns    []*mcpConn
+	failures []McpConnectFailure
+	logger   *slog.Logger
+}
+
+// McpConnectFailure 是一個**沒連上**的 server：它的工具這次不可用。
+//
+// 之所以要把它帶回組裝點而不是只寫進日誌：降級必須是**使用者看得見**的。安靜地少了
+// 幾個工具比起不來更糟——Agent 會表現成「莫名其妙不會做某件事」，而使用者不會想到去
+// 翻日誌。組裝點據此在 CLI 印出警示（spec #3 使用者故事 29）。
+type McpConnectFailure struct {
+	// Server 是宣告名，也就是使用者在 Profile 的 mcp_servers 裡寫的那個字。
+	Server string
+	// Err 是連不上的原因，原文帶給使用者——「命令找不到」與「交握逾時」要修的東西
+	// 完全不同，摘要成一句「連線失敗」等於把唯一有用的線索丟掉。
+	Err error
+}
+
+// Failures 回傳這次啟動沒連上的 server。組裝點據此對使用者發警示。
+//
+// 對 nil 接收者是 no-op，理由同 Close：組裝點在 ConnectMcpServers 回錯誤的路徑上
+// 也可能拿到半成品。
+func (s *McpClientService) Failures() []McpConnectFailure {
+	if s == nil {
+		return nil
+	}
+	return s.failures
 }
 
 // ConnectMcpServers 依 specs 逐一連線、取回工具清單，並把每個工具包成 OryxTool
@@ -900,27 +1076,55 @@ type McpClientService struct {
 // specs 已經是「這個 Profile 引用到的那幾個」（見 core.ResolveMcpServers）：沒被引用的
 // 宣告連子進程都不會 spawn。
 //
-// **連線失敗目前直接上拋**（該 server 之前已連上的那些會先收乾淨）。spec #3 定的最終
-// 語義是降級：該 server 的工具不註冊、記錯誤日誌加 CLI 可見警示、其餘 server 與內建
-// Tool 照常啟動——那整套失敗語義歸 **ticket #22**。本票先把失敗做成大聲的錯誤而不是
-// 安靜的降級，兩者之間絕不選第三條「靜默少幾個工具」。
+// **連不上就降級，但絕不安靜**：該 server 的工具不註冊、記結構化錯誤日誌、把失敗
+// 記進 svc.Failures() 讓組裝點在 CLI 喊一聲，**其餘 server 與內建 Tool 照常啟動**。
+// 一個外部依賴掛掉不該讓整個 Agent 起不來；但「安靜地少了幾個工具」比起不來更糟——
+// Agent 會表現成莫名其妙不會做某件事。兩者之間絕不選第三條「靜默少幾個工具」。
+//
+// **哪些失敗降級、哪些 fail fast，判準是「換一台機器會不會就好了」**：
+//
+//	子進程起不來、交握逾時、tools/list 失敗  → 環境問題，降級並警示
+//	註冊名送不進 Function Calling、工具撞名   → 設定錯誤，回錯誤擋下啟動
+//
+// 後者換幾台機器都一樣壞，而且壞的方式是**每一輪** LLM 請求被端點以 400 打回（連沒用
+// 到那個工具的純對話也一起死）。那種東西要在啟動時擋，不能等到對話中途。宣告本身的
+// 靜態缺陷（transport 不支援、沒有 command）更早，在載入宣告檔那一步就擋掉了（見
+// config.validateMcpServerEntry）。
 func ConnectMcpServers(ctx context.Context, registry *Registry, specs []core.McpServerSpec,
 	logger *slog.Logger) (*McpClientService, error) {
 	svc := &McpClientService{logger: logger}
 	for _, spec := range specs {
-		conn, err := dialMcpStdio(ctx, spec, logger)
-		if err != nil {
-			return svc, errors.Join(err, svc.Close())
+		// **呼叫端取消不是「這個 server 掛了」**，是「不要再啟動了」。少了這道檢查，
+		// 使用者在啟動途中按 Ctrl-C 會變成：剩下的每個 server 各自以 context.Canceled
+		// 失敗、各自被記成「連不上」、各自再花一次清理時間，最後 ConnectMcpServers
+		// 還回 nil——於是 Agent 帶著一組空的 MCP 工具照常起來，取消等於沒按。
+		if err := ctx.Err(); err != nil {
+			return svc, errors.Join(
+				fmt.Errorf("連線 MCP server 中止（還有 %d 個未連）: %w", len(specs)-len(svc.conns)-len(svc.failures), err),
+				svc.Close())
 		}
-		// 先收下連線再取工具：後面任何一步失敗，Close 都要能把這個子進程收掉。
+
+		conn, decls, err := connectMcpServer(ctx, spec, mcpConnectTimeout, logger)
+		if err != nil {
+			// 分辨「這個 server 的問題」與「呼叫端取消了」：兩者在這裡都表現成一個
+			// 錯誤，但只有前者該降級。判準是**外層** ctx——每個 server 自己的期限走的是
+			// 衍生 ctx，它逾時不會讓外層 ctx.Err() 有值。
+			if cerr := ctx.Err(); cerr != nil {
+				return svc, errors.Join(
+					fmt.Errorf("連線 MCP server %q 時中止: %w", spec.Name, cerr),
+					svc.Close())
+			}
+			// 降級：記下來、喊出去、繼續下一個 server。
+			svc.failures = append(svc.failures, McpConnectFailure{Server: spec.Name, Err: err})
+			logger.ErrorContext(ctx, "mcp_server_unavailable",
+				"server", spec.Name, "transport", mcpTransportStdio, "error", err.Error())
+			continue
+		}
+		// 先收下連線再註冊工具：後面任何一步失敗，Close 都要能把這個子進程收掉。
 		svc.conns = append(svc.conns, conn)
 
-		decls, err := conn.listTools(ctx)
-		if err != nil {
-			return svc, errors.Join(err, svc.Close())
-		}
 		for _, decl := range decls {
-			adapter := newMcpToolAdapter(conn, spec.Name, decl)
+			adapter := newMcpToolAdapter(conn, spec.Name, decl, mcpToolCallTimeout)
 			// 名字送不進 Function Calling 的話，啟動就擋——否則每一輪 LLM 請求都會被
 			// 端點以 400 打回，連沒用到這個工具的純對話也一起死。
 			if err := validateToolFunctionName(spec.Name, decl.Name, adapter.Name()); err != nil {
@@ -933,14 +1137,50 @@ func ConnectMcpServers(ctx context.Context, registry *Registry, specs []core.Mcp
 			}
 		}
 		// 成功側也要有訊號：使用者要能判斷 Agent 現在的能力範圍，不能只在失敗時才有
-		// 訊息。取回 0 個工具是合法的（那個 server 就是沒有工具），但看得到才知道。
+		// 訊息。
 		logger.InfoContext(ctx, "mcp_server_connected",
 			"server", spec.Name, "transport", mcpTransportStdio,
 			"protocol", conn.protocolVersion,
 			"server_name", conn.serverName, "server_version", conn.serverVersion,
 			"tools", len(decls))
+		if len(decls) == 0 {
+			// **回空不是錯誤**：一個沒有工具的 server 是合法的（工具還沒設定好、或它
+			// 主要提供別的能力）。但它與「連上了、工具也拿到了」在使用者眼裡沒有差別，
+			// 所以單獨記一筆——否則「為什麼這個 server 沒給我工具」只能靠猜。
+			logger.InfoContext(ctx, "mcp_server_no_tools", "server", spec.Name)
+		}
 	}
 	return svc, nil
+}
+
+// connectMcpServer 連上單一 server 並取回它的工具清單，整段受 timeout 約束。
+//
+// **期限涵蓋 spawn → initialize → tools/list 整段而不是各給一個**：使用者在意的是
+// 「啟動卡了多久」，那是這一整段的總和；分開給的話三段各自沒超時、加起來仍然可以讓
+// 啟動停很久。期限是顯式參數，理由同其他兩個上限。
+//
+// ctx 逾時只約束**這一段**：dialMcpStdio 明載它的 ctx 不約束子進程的壽命（那個進程要
+// 活到整場對話結束），所以這裡 cancel 掉不會影響回傳的連線。
+//
+// 取工具失敗時把已經起來的子進程收掉再回錯誤：留著一條沒有任何工具的連線既沒有用處，
+// 又是一個孤兒進程。
+func connectMcpServer(ctx context.Context, spec core.McpServerSpec, timeout time.Duration,
+	logger *slog.Logger) (*mcpConn, []mcpToolDecl, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	conn, err := dialMcpStdio(ctx, spec, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	decls, err := conn.listTools(ctx)
+	if err != nil {
+		if cerr := conn.close(mcpCloseTimeout); cerr != nil {
+			logger.Warn("mcp_server_close_failed", "server", spec.Name, "error", cerr.Error())
+		}
+		return nil, nil, err
+	}
+	return conn, decls, nil
 }
 
 // Close 關掉全部 MCP 子進程。組裝點必須在退出前呼叫，否則留下孤兒進程（同
@@ -956,7 +1196,7 @@ func (s *McpClientService) Close() error {
 	}
 	var errs []error
 	for _, conn := range s.conns {
-		if err := conn.close(); err != nil {
+		if err := conn.close(mcpCloseTimeout); err != nil {
 			errs = append(errs, err)
 		}
 	}

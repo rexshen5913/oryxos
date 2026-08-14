@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-after-mcp-tool-error",
+  "object": "chat.completion",
+  "created": 1722925602,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "那個外部工具這次沒有成功，我改用手上已有的資料先回答你：目前查不到那筆記錄，你可以稍後再試一次。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 268,
+    "completion_tokens": 34,
+    "total_tokens": 302
+  }
+}

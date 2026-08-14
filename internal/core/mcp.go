@@ -9,6 +9,14 @@ import "fmt"
 // 只有 config 與組裝點知道，依賴方向不變——同 Bootstrap 檔名常數的位置與理由。
 const McpServersFile = "mcp_servers.yaml"
 
+// McpTransportStdio 是核心階段唯一支援的 transport（技術方案 §6.4；SSE 屬後續，
+// Demo 三 的場景是本地子進程，沒有驅動它的用例——憲法 3.1）。
+//
+// 與 McpServersFile 同理放在 core：宣告檔的載入端（internal/config，校驗宣告值）與
+// MCP Client（internal/tool，撥號前的前提檢查）都要用它，而那兩個 package 互不依賴。
+// 兩邊各寫一份字面字串的話，日後支援 SSE 時會改一邊漏一邊。
+const McpTransportStdio = "stdio"
+
 // McpServerSpec 是連上一個外部 MCP server 所需的宣告，由 mcp_servers.yaml 解出
 // （internal/config），由 MCP Client 消費（internal/tool）。
 //

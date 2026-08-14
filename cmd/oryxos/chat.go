@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -104,6 +105,50 @@ func autoIncludedTools(skillRefs []string) []string {
 		return nil
 	}
 	return []string{tool.LoadSkillToolName}
+}
+
+// degradeUnavailableMcpTools 對每個連不上的 MCP server 發一次 CLI 警示，並把它的工具
+// 從 Profile 的 tools 清單裡拿掉，回傳要送進 Registry.Subset 的那一份。
+//
+// **為什麼要拿掉，而不是讓 Subset 照常報錯**：Subset 對未註冊的 Tool fail fast，那條
+// 語義是給**設定錯誤**（工具名打錯、server 改了名）用的——換幾台機器都一樣壞，早點
+// 擋下才對。但「今天這台機器連不上 Slack」是**環境問題**，把它也判成打錯字的話，降級
+// 在現實中永遠走不到：使用者當然會在 tools 列出他要用的工具，於是任何一個 server 掛掉
+// 都會讓整個 Agent 起不來——正是「一個外部依賴掛掉不該讓整個 Agent 起不來」要防的事
+// （spec #3 使用者故事 28）。
+//
+// 判斷「這個名字屬於哪個 server」靠的是註冊名的前綴（<server>__<tool>）。這正是那個
+// 命名契約帶前綴的原因之一：來源看得出來。範圍剛好是掛掉的那個 server，其餘的名字
+// （含打錯字的）照舊由 Subset 擋下。
+//
+// 警示帶上原始錯誤而不是摘要成一句「連線失敗」：「命令找不到」與「交握逾時」要修的
+// 東西完全不同，那句原文是使用者唯一的線索。
+func degradeUnavailableMcpTools(out io.Writer, prof *core.Profile, failures []tool.McpConnectFailure) []string {
+	if len(failures) == 0 {
+		return prof.Tools
+	}
+	// Clone 一份再刪：prof.Tools 是 Profile 的欄位，就地刪除會讓後面任何人看到的
+	// Profile 與使用者寫的那份不一樣。
+	remaining := slices.Clone(prof.Tools)
+	for _, failure := range failures {
+		prefix := failure.Server + tool.McpToolSeparator
+		var dropped []string
+		remaining = slices.DeleteFunc(remaining, func(name string) bool {
+			if !strings.HasPrefix(name, prefix) {
+				return false
+			}
+			dropped = append(dropped, name)
+			return true
+		})
+
+		fmt.Fprintf(out, "警告：MCP server %s 連線失敗，這次啟動不會有它的工具"+
+			"（其餘 Tool 與對話照常）：%v\n", failure.Server, failure.Err)
+		if len(dropped) > 0 {
+			fmt.Fprintf(out, "      Profile %s 列出的 %s 本次略過。\n",
+				prof.Name, strings.Join(dropped, "、"))
+		}
+	}
+	return remaining
 }
 
 // runChat 載入 Workspace 設定檔與 Profile、校驗 Provider 可解析，組出
@@ -255,8 +300,12 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	if err != nil {
 		return fmt.Errorf("連線 MCP server: %w", err)
 	}
+	// 連不上的 server 已經降級（它的工具沒有註冊，錯誤也已落日誌），這裡補上**使用者
+	// 看得見**的那一半：安靜地少了幾個工具比起不來更糟——Agent 會表現成莫名其妙不會
+	// 做某件事，而沒有人會想到去翻日誌。
+	profileTools := degradeUnavailableMcpTools(out, prof, mcpClients.Failures())
 
-	executor, err := registry.Subset(prof.Tools, autoIncludedTools(skillRefs), logger)
+	executor, err := registry.Subset(profileTools, autoIncludedTools(skillRefs), logger)
 	if err != nil {
 		return fmt.Errorf("Profile %s 的 tools 校驗失敗: %w", prof.Name, err)
 	}

@@ -328,6 +328,39 @@ func TestChatStartupValidationFailsBeforeAnyTurn(t *testing.T) {
 			},
 			wantSub: "demo",
 		},
+		{
+			// **即使這個 Profile 根本不用 MCP 也要擋**。壞掉的宣告檔最常見的形態是某個
+			// server 的縮排或引號寫錯，靜默忽略會讓那個 server 無聲消失——使用者只會
+			// 看到 Agent 少了一半能力，卻沒有任何線索。這與「檔案不存在」不同質，後者
+			// 是明確的「這個 Workspace 不用 MCP」。
+			name: "mcp_servers.yaml 解析失敗：即使 Profile 沒引用任何 server 也擋下啟動",
+			setup: func(t *testing.T, dir string) {
+				writeMcpServers(t, dir, "mcp_servers:\n  demo:\n   transport: stdio\n     command: [true]\n")
+				writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\n")
+			},
+			wantSub: "mcp_servers.yaml",
+		},
+		{
+			// 同名重複宣告不得靜默覆蓋成最後一份。這條由 YAML 的 map key 唯一性擋下，
+			// 在組裝點再驗一次是因為使用者實際踩到的是這一層。
+			name: "同名 server 重複宣告：啟動報錯",
+			setup: func(t *testing.T, dir string) {
+				writeMcpServers(t, dir, "mcp_servers:\n  demo:\n    transport: stdio\n    command: [a]\n"+
+					"  demo:\n    transport: stdio\n    command: [b]\n")
+				writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\nmcp_servers:\n  - demo\n")
+			},
+			wantSub: "demo",
+		},
+		{
+			// 非 stdio 是**靜態宣告缺陷**：換一台機器也不會好，所以 fail fast 而不是
+			// 降級警示。錯誤要指出核心階段只支援 stdio，不能只說「不支援」。
+			name: "宣告 transport: sse：啟動報錯指出只支援 stdio",
+			setup: func(t *testing.T, dir string) {
+				writeMcpServers(t, dir, "mcp_servers:\n  remote:\n    transport: sse\n    command: [x]\n")
+				writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\nmcp_servers:\n  - remote\n")
+			},
+			wantSub: "stdio",
+		},
 	}
 
 	for _, tt := range tests {

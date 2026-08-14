@@ -297,18 +297,44 @@ func TestMcpHandshakeNegotiation(t *testing.T) {
 					t.Errorf("關閉 MCP server: %v", cerr)
 				}
 			})
+			// 交握不通過是**環境問題**（那台機器上的 server 講的協議我們接不上），
+			// 自 ticket #22 起一律降級而不是回錯誤：ConnectMcpServers 照常回 nil，
+			// 原因記進 Failures()，其餘 server 與內建 Tool 不受影響。
+			if err != nil {
+				t.Fatalf("連線失敗不該中斷啟動: %v", err)
+			}
+
+			// 「工具在不在」一律經 Subset 斷言——那是 Profile 過濾實際走的路，也是
+			// 使用者真正會碰到的行為，不必為測試在 Registry 上開一個查詢方法。
+			echo := tool.McpToolName("demo", "echo")
+			_, subsetErr := registry.Subset([]string{echo}, nil, discardLogger())
 
 			if tt.wantErrSub == "" {
-				if err != nil {
-					t.Fatalf("這一格應該連得上: %v", err)
+				if got := clients.Failures(); len(got) != 0 {
+					t.Fatalf("這一格應該連得上，卻被記成失敗: %v", got)
+				}
+				if subsetErr != nil {
+					t.Errorf("連得上卻沒有註冊它的工具: %v", subsetErr)
 				}
 				return
 			}
-			if err == nil {
-				t.Fatal("交握協商不通過時應該報錯")
+
+			failures := clients.Failures()
+			if len(failures) != 1 {
+				t.Fatalf("交握協商不通過時應該記成一筆失敗，實際 %d 筆: %v", len(failures), failures)
 			}
-			if !strings.Contains(err.Error(), tt.wantErrSub) {
-				t.Errorf("錯誤 %q 未含 %q", err.Error(), tt.wantErrSub)
+			if failures[0].Server != "demo" {
+				t.Errorf("失敗記在 %q，期望 demo", failures[0].Server)
+			}
+			// 原因必須完整帶到使用者面前：協商失敗要修的東西（換 server 版本、換一個
+			// 有 tools 能力的 server）全靠這句話，摘要成「連線失敗」等於把線索丟掉。
+			if !strings.Contains(failures[0].Err.Error(), tt.wantErrSub) {
+				t.Errorf("失敗原因 %q 未含 %q", failures[0].Err.Error(), tt.wantErrSub)
+			}
+			// 降級的實質：這個 server 的工具**不可以**進 Registry。少了這條斷言，
+			// 一個「記了失敗卻照樣註冊工具」的實作也會通過。
+			if subsetErr == nil {
+				t.Error("交握失敗的 server 的工具竟然還可用")
 			}
 		})
 	}
@@ -466,8 +492,9 @@ func TestMcpToolCallSurvivesServerExitingRightAfterReply(t *testing.T) {
 // 中途放棄的辦法），呼叫端已經給的逾時與取消完全不生效——Tool 呼叫永久掛住，整個 turn
 // 跟著死，連 Ctrl-C 都救不了。
 //
-// **這與 #22 的「單次呼叫自有時間上限」是不同的兩件事**：那張票要加的是我們自己補一個
-// 期限；這裡壞的是呼叫端**已經提供**的期限失效。
+// **這與 #22 加的「單次呼叫自有時間上限」是不同的兩件事**：那個是我們自己補的期限
+// （呼叫端沒給時的兜底）；這裡壞的是呼叫端**已經提供**的期限失效。兩者都要有——只有
+// 前者的話，使用者按下取消要等滿上限才停得下來。
 //
 // 三個時間刻意分開，順序不能亂（deadline ≪ 斷言視窗 ≪ server 退出）：
 //   - ctx deadline 500ms：修好之後應該在這時返回

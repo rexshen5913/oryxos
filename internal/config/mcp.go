@@ -3,7 +3,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -58,7 +61,13 @@ func LoadMcpServers(path string) (map[string]core.McpServerSpec, error) {
 	}
 
 	specs := make(map[string]core.McpServerSpec, len(file.McpServers))
-	for name, entry := range file.McpServers {
+	// 名字先排序再逐一校驗：map 的迭代順序是隨機的，不排序的話一份有兩個缺陷的宣告檔
+	// 每次會報不同的那一個，使用者修完一個又冒出另一個、還以為自己改壞了。
+	for _, name := range slices.Sorted(maps.Keys(file.McpServers)) {
+		entry := file.McpServers[name]
+		if err := validateMcpServerEntry(name, entry); err != nil {
+			return nil, fmt.Errorf("MCP server 宣告檔 %s: %w", path, err)
+		}
 		specs[name] = core.McpServerSpec{
 			Name:      name,
 			Transport: entry.Transport,
@@ -67,6 +76,42 @@ func LoadMcpServers(path string) (map[string]core.McpServerSpec, error) {
 		}
 	}
 	return specs, nil
+}
+
+// validateMcpServerEntry 校驗單一宣告的**靜態缺陷**。
+//
+// 這裡與連線失敗的分界是本票的核心判斷，要記明白：
+//
+//	靜態宣告缺陷（transport 不支援、沒有 command、YAML 壞掉）→ 啟動即報錯
+//	環境／執行期問題（子進程起不來、交握逾時、server 中途死掉）→ 降級並警示
+//
+// 判準是「這個缺陷會不會因為換一台機器、換一個時間就消失」。非 stdio 的 transport 與
+// 空的 command 對**任何** Agent 在**任何**環境都不會 work，那是使用者打錯字；而連不上
+// 可能只是那台機器上沒裝 node。前者靜默忽略會讓那個 server 無聲消失（spec #3 的
+// Failure and Fallback 明列這條），後者擋下啟動則會讓一個外部依賴掛掉就癱瘓整個 Agent。
+//
+// **校驗在載入端、對宣告檔裡的每一份做，不管當前 Profile 有沒有引用它**。與憑證展開
+// （ticket #21 特意搬到 Profile 過濾之後）刻意相反：缺一個環境變數只是「這台機器上還
+// 沒設定」，一份宣告檔常同時服務多個 Agent，不該讓只接 Slack 的 Agent 因為缺 GitHub
+// token 起不來；而 transport: sse 是宣告檔自己壞了，那是所有 Agent 共用的那份東西。
+func validateMcpServerEntry(name string, entry mcpServerEntry) error {
+	if entry.Transport != "" && entry.Transport != core.McpTransportStdio {
+		return fmt.Errorf("server %q 宣告的 transport %q 不支援：核心階段只支援 %s"+
+			"（省略這個欄位即為 %s）",
+			name, entry.Transport, core.McpTransportStdio, core.McpTransportStdio)
+	}
+	if len(entry.Command) == 0 {
+		return fmt.Errorf("server %q 沒有宣告 command，無法啟動它的子進程"+
+			"（command 是 argv 陣列，例如 [npx, -y, some-mcp-server]）", name)
+	}
+	// **只看長度不夠**：`command: [""]` 的長度是 1，會通過長度檢查、然後在 exec.Start
+	// 失敗，被降級成一句「環境問題」的警示。但空白的 argv0 跟 command 整個沒寫是同一種
+	// 筆誤——它換幾台機器都一樣壞，屬於靜態宣告缺陷那一類，該在這裡擋。
+	if strings.TrimSpace(entry.Command[0]) == "" {
+		return fmt.Errorf("server %q 的 command 第一個元素是空的，沒有可執行的程式"+
+			"（第一個元素是執行檔，其餘是它的參數）", name)
+	}
+	return nil
 }
 
 // ExpandMcpServerEnv 把 specs 的 env 值裡的 ${ENV_VAR} 佔位以環境變數展開，回傳展開後

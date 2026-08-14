@@ -98,6 +98,63 @@ func TestLoadMcpServers(t *testing.T) {
 			},
 		},
 		{
+			// 省略 transport 就是預設的 stdio：核心階段只有這一種，要求每份宣告都寫一次
+			// 只是噪音。空字串在撥號端與 "stdio" 等價，這一列把那條等價釘在載入端。
+			name: "transport 省略：視為 stdio，照常載入",
+			yaml: "mcp_servers:\n  demo:\n    command: [demo-mcp]\n",
+			check: func(t *testing.T, got map[string]core.McpServerSpec) {
+				if len(got) != 1 {
+					t.Fatalf("宣告數 = %d, 期望 1", len(got))
+				}
+			},
+		},
+		{
+			// **靜態宣告缺陷一律 fail fast**，即使當前 Profile 根本沒引用這個 server：
+			// 非 stdio 的宣告對任何 Agent 都不會work，與缺一個環境變數（環境問題、
+			// 只影響引用它的 Agent）不同質。靜默忽略會讓那個 server 無聲消失。
+			name:    "transport 是 sse：報錯指出核心階段只支援 stdio",
+			yaml:    "mcp_servers:\n  remote:\n    transport: sse\n    command: [x]\n",
+			wantErr: "stdio",
+		},
+		{
+			// 錯誤要指名是哪個 server，否則使用者得自己在一份長宣告檔裡找。
+			name:    "transport 是別的值：錯誤指名是哪個 server",
+			yaml:    "mcp_servers:\n  weird:\n    transport: websocket\n    command: [x]\n",
+			wantErr: "weird",
+		},
+		{
+			name:    "缺 command：報錯",
+			yaml:    "mcp_servers:\n  broken:\n    transport: stdio\n",
+			wantErr: "command",
+		},
+		{
+			name:    "command 是空清單：報錯",
+			yaml:    "mcp_servers:\n  broken:\n    transport: stdio\n    command: []\n",
+			wantErr: "command",
+		},
+		{
+			// 只看長度不夠：一個空字串的 argv0 長度是 1，會通過靜態校驗，然後在
+			// exec.Start 失敗、被降級成「環境問題」的警示。但它跟 command 整個沒寫
+			// 是同一種筆誤——換幾台機器都一樣壞，該在載入時就擋。
+			name:    "command 的第一個元素是空字串：報錯",
+			yaml:    "mcp_servers:\n  broken:\n    transport: stdio\n    command: [\"\"]\n",
+			wantErr: "command",
+		},
+		{
+			name:    "command 的第一個元素只有空白：報錯",
+			yaml:    "mcp_servers:\n  broken:\n    transport: stdio\n    command: [\"   \", --flag]\n",
+			wantErr: "command",
+		},
+		{
+			// 同名重複宣告由 YAML 的 map key 唯一性擋下，不會靜默覆蓋成最後一份。
+			// 這條性質是隱含的（來自 schema 形狀而不是我們寫的檢查），所以更需要測試
+			// 釘住：日後若把 mcp_servers 改成陣列，覆蓋就會靜默發生而沒有人發現。
+			name: "同名 server 重複宣告：報錯，不靜默覆蓋",
+			yaml: "mcp_servers:\n  github:\n    transport: stdio\n    command: [first]\n" +
+				"  github:\n    transport: stdio\n    command: [second]\n",
+			wantErr: "github",
+		},
+		{
 			name: "多個 server 各自獨立",
 			yaml: "mcp_servers:\n  github:\n    transport: stdio\n    command: [gh-mcp]\n" +
 				"  slack:\n    transport: stdio\n    command: [slack-mcp]\n",

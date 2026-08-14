@@ -71,6 +71,13 @@ const (
 	// 一次沒送出去的呼叫與一次送出去但結果被丟掉的呼叫，在 client 眼裡都是「失敗」，
 	// 而外部工具有沒有真的跑過，只有 server 知道。
 	mcpServerCallLogEnv = "ORYXOS_TEST_MCP_CALL_LOG"
+	// mcpServerToolErrorEnv 非空時，tools/call 一律以這段文字回**工具執行層的失敗**
+	// （result 帶 isError，不是 JSON-RPC 的 error）。
+	//
+	// 那是外部工具最常見的失敗形態：協議一切正常，是工具自己說「這件事我做不到」
+	// （參數不對、外部 API 回 4xx、權杖過期）。用來驗「錯誤回填給 LLM、turn 不中斷、
+	// LLM 據此換一條路」。
+	mcpServerToolErrorEnv = "ORYXOS_TEST_MCP_TOOL_ERROR"
 )
 
 // TestMain 讓測試二進制在子進程模式下改當 MCP server。
@@ -99,6 +106,7 @@ func serveTestMcpServer(in io.Reader, out io.Writer) {
 		protocolVersion: os.Getenv(mcpServerProtocolEnv),
 		noToolsCap:      os.Getenv(mcpServerNoToolsCapEnv) != "",
 		callLog:         os.Getenv(mcpServerCallLogEnv),
+		toolError:       os.Getenv(mcpServerToolErrorEnv),
 	}
 	if raw := os.Getenv(mcpServerStopReadingEnv); raw != "" {
 		secs, err := strconv.Atoi(raw)
@@ -145,6 +153,8 @@ type testMcpServer struct {
 	noToolsCap bool
 	// callLog 非空時，每次 tools/call 都往這個檔案追加一行。
 	callLog string
+	// toolError 非空時，tools/call 一律以這段文字回工具執行層的失敗（isError）。
+	toolError string
 	// stopReadingAfterList 非零時，回完 tools/list 就停止讀 stdin，撐這麼久之後才退出
 	// （見 mcpServerStopReadingEnv）。
 	stopReadingAfterList time.Duration
@@ -291,6 +301,14 @@ func (s *testMcpServer) handle(line []byte) {
 			// 執行層的失敗，不是協議層的。
 			s.writeResult(req.ID, map[string]any{
 				"content": []any{map[string]any{"type": "text", "text": "沒有名為 " + params.Name + " 的工具"}},
+				"isError": true,
+			})
+			return
+		}
+		if s.toolError != "" {
+			// 工具自己說失敗。同樣走 isError——協議層一切正常。
+			s.writeResult(req.ID, map[string]any{
+				"content": []any{map[string]any{"type": "text", "text": s.toolError}},
 				"isError": true,
 			})
 			return
