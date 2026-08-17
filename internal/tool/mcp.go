@@ -1227,7 +1227,9 @@ func ConnectMcpServers(ctx context.Context, registry *Registry, specs []core.Mcp
 				fatal = err
 				break
 			}
-			if err := registry.Register(adapter); err != nil {
+			// 帶著來源註冊：查詢途徑（Registry.All、`oryxos tools`）要據它分組，而
+			// 從註冊名反推會在 server 名含雙底線時猜錯（見 ToolInfo.Server）。
+			if err := registry.RegisterMcpTool(adapter, res.spec.Name); err != nil {
 				fatal = fmt.Errorf("註冊 MCP server %q 的工具 %q: %w", res.spec.Name, decl.Name, err)
 				break
 			}

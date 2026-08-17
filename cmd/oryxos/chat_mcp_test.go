@@ -105,6 +105,16 @@ func testMcpServerEntry(t *testing.T, name string, tools ...string) string {
 		"      " + mcpServerToolsEnv + ": " + strings.Join(tools, ",") + "\n"
 }
 
+// testMcpServerEntryWithExitMarker 同 testMcpServerEntry，另外要求 server 在收工時寫
+// 一個 marker 檔，供測試從外部驗證子進程真的被收掉了。
+//
+// 直接接在後面是合法的：env 是一個 YAML map，多一個同縮排的 key 就是多一個環境變數。
+func testMcpServerEntryWithExitMarker(t *testing.T, name, marker string, tools ...string) string {
+	t.Helper()
+	return testMcpServerEntry(t, name, tools...) +
+		"      " + mcpServerExitMarkerEnv + ": " + marker + "\n"
+}
+
 // TestChatMcpServerUnavailableDegradesWithWarning 是本票（#22）在組裝點的主場景：
 // **一個 MCP server 連不上，Agent 照樣起得來、其餘工具照樣可用，但使用者看得見**。
 //

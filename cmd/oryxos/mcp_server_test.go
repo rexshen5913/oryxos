@@ -25,6 +25,13 @@ const (
 	mcpServerModeEnv  = "ORYXOS_TEST_MCP_SERVER"
 	mcpServerNameEnv  = "ORYXOS_TEST_MCP_NAME"
 	mcpServerToolsEnv = "ORYXOS_TEST_MCP_TOOLS"
+	// mcpServerExitMarkerEnv 指向一個檔案，server 在 stdin 被關閉（MCP stdio 規範裡
+	// 「請你收工」的訊號）而退出前寫進去。
+	//
+	// 這是從 client 端唯一看得到「子進程真的被收掉了」的可移植方式：檢查 PID 還在不在
+	// 得動用訊號，那是 Unix 專屬的，會逼出一組 build tag 檔（見 internal/tool 那兩份）。
+	// marker 存在即代表整條收尾走完——關 stdin、server 收到 EOF、自己退出。
+	mcpServerExitMarkerEnv = "ORYXOS_TEST_MCP_EXIT_MARKER"
 )
 
 // TestMain 讓測試二進制在子進程模式下改當 MCP server。
@@ -51,6 +58,12 @@ func serveTestMcpServer(in io.Reader, out io.Writer) {
 			handleTestMcpMessage(out, name, tools, line)
 		}
 		if err != nil {
+			// stdin 關閉（或出錯）就收工。寫失敗只能忽略：這裡是子進程，沒有
+			// *testing.T 可以回報，而 marker 沒寫出來的後果是斷言「子進程被收掉了」
+			// 的測試轉紅——那正確地指向有東西壞了。
+			if marker := os.Getenv(mcpServerExitMarkerEnv); marker != "" {
+				_ = os.WriteFile(marker, []byte("exited\n"), 0o644)
+			}
 			return
 		}
 	}

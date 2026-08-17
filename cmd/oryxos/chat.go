@@ -127,30 +127,23 @@ func autoIncludedTools(skillRefs []string) []string {
 // 措辭與輸出目的地留在這一層：internal/tool 只負責把「這個 server 這次沒連上」交出來，
 // 怎麼講給使用者聽是組裝點的事。
 //
+// **措辭不提「啟動」與「對話」**：`oryxos tools` 也走這條警示（issue #27），而那個命令
+// 既不啟動 Agent 也不對話——說「這次啟動不會有它的工具」在那裡是錯的。一句對兩個命令
+// 都成立的話，勝過為此拆成兩份幾乎一樣的措辭。
+//
+// **它只講「哪一台連不上」，不講「哪些工具因此不可用」**。後者要等整個連線階段跑完才
+// 算得準——這個回呼發生在失敗的當下，那時其他 server 還在連，誰會提供什麼還不知道。
+// 由 degradeUnavailableMcpTools 在最後一次算清楚。
+//
 // 警示帶上原始錯誤而不是摘要成一句「連線失敗」：「命令找不到」與「交握逾時」要修的
 // 東西完全不同，那句原文是使用者唯一的線索。
-func warnMcpServerUnavailable(out io.Writer, prof *core.Profile, failure tool.McpConnectFailure) {
-	fmt.Fprintf(out, "警告：MCP server %s 連線失敗，這次啟動不會有它的工具"+
-		"（其餘 Tool 與對話照常）：%v\n", failure.Server, failure.Err)
-
-	// 判斷「這個名字屬於哪個 server」靠的是註冊名的前綴（<server>__<tool>）。這正是
-	// 那個命名契約帶前綴的原因之一：來源看得出來。
-	prefix := failure.Server + tool.McpToolSeparator
-	var dropped []string
-	for _, name := range prof.Tools {
-		if strings.HasPrefix(name, prefix) {
-			dropped = append(dropped, name)
-		}
-	}
-	if len(dropped) > 0 {
-		fmt.Fprintf(out, "      Profile %s 列出的 %s 本次略過。\n",
-			prof.Name, strings.Join(dropped, "、"))
-	}
+func warnMcpServerUnavailable(out io.Writer, failure tool.McpConnectFailure) {
+	fmt.Fprintf(out, "警告：MCP server %s 連線失敗，這次拿不到它的工具"+
+		"（其餘 Tool 不受影響）：%v\n", failure.Server, failure.Err)
 }
 
-// degradeUnavailableMcpTools 把連不上的 MCP server 的工具從 Profile 的 tools 清單裡
-// 拿掉，回傳要送進 Registry.Subset 的那一份。使用者看得見的那一半由
-// warnMcpServerUnavailable 在失敗當下負責。
+// degradeUnavailableMcpTools 把**這次確實拿不到**的工具從 Profile 的 tools 清單裡拿掉，
+// 印出提醒，並回傳要送進 Registry.Subset 的那一份。
 //
 // **為什麼要拿掉，而不是讓 Subset 照常報錯**：Subset 對未註冊的 Tool fail fast，那條
 // 語義是給**設定錯誤**（工具名打錯、server 改了名）用的——換幾台機器都一樣壞，早點
@@ -159,21 +152,65 @@ func warnMcpServerUnavailable(out io.Writer, prof *core.Profile, failure tool.Mc
 // 都會讓整個 Agent 起不來——正是「一個外部依賴掛掉不該讓整個 Agent 起不來」要防的事
 // （spec #3 使用者故事 28）。
 //
-// 範圍剛好是掛掉的那幾個 server，其餘的名字（含打錯字的）照舊由 Subset 擋下。
-func degradeUnavailableMcpTools(prof *core.Profile, failures []tool.McpConnectFailure) []string {
+// **判準是「這個名字有沒有被註冊」，不是「名字長得像誰的」。** 註冊了就代表真的有一台
+// 健康的 server 提供它，不管是哪一台——這一點非讓它精確不可：server 名可以含雙底線
+// （`foo` 與 `foo__bar` 能同時宣告），以前綴判斷歸屬的話，`foo` 連不上會讓健康的
+// `foo__bar` 的 `foo__bar__echo` 一起被刪掉。那不只是訊息難看，是 Agent 的能力真的少了
+// 一塊，而 `oryxos tools` 同時還把它列成可用——兩邊對不上，最難查的那種。
+//
+// 沒註冊的名字才需要判斷歸屬，判準是 specs（這個 Profile 引用到的全部 server）裡**最長**
+// 的那個前綴匹配：屬於連不上的 server 就拿掉，否則留著讓 Subset 照常擋下（打錯字、或
+// 引用了根本沒宣告的 server，那些是設定錯誤）。
+func degradeUnavailableMcpTools(out io.Writer, prof *core.Profile, specs []core.McpServerSpec,
+	failures []tool.McpConnectFailure, registry *tool.Registry) []string {
 	if len(failures) == 0 {
 		return prof.Tools
 	}
+	failed := make(map[string]bool, len(failures))
+	for _, failure := range failures {
+		failed[failure.Server] = true
+	}
+	registered := make(map[string]bool)
+	for _, info := range registry.All() {
+		registered[info.Name] = true
+	}
+
 	// Clone 一份再刪：prof.Tools 是 Profile 的欄位，就地刪除會讓後面任何人看到的
 	// Profile 與使用者寫的那份不一樣。
-	remaining := slices.Clone(prof.Tools)
-	for _, failure := range failures {
-		prefix := failure.Server + tool.McpToolSeparator
-		remaining = slices.DeleteFunc(remaining, func(name string) bool {
-			return strings.HasPrefix(name, prefix)
-		})
+	var dropped []string
+	remaining := slices.DeleteFunc(slices.Clone(prof.Tools), func(name string) bool {
+		if registered[name] {
+			return false // 有健康的來源真的提供它
+		}
+		if owner := longestServerPrefix(name, specs); owner == "" || !failed[owner] {
+			return false // 不屬於任何連不上的 server：設定錯誤，交給 Subset 擋
+		}
+		dropped = append(dropped, name)
+		return true
+	})
+	if len(dropped) > 0 {
+		fmt.Fprintf(out, "提醒：Profile %s 列出的 %s 這次不可用（提供它們的 MCP server 連線失敗）。\n",
+			prof.Name, strings.Join(dropped, "、"))
 	}
 	return remaining
+}
+
+// longestServerPrefix 回傳 specs 裡「name 以 `<server>__` 開頭」且**最長**的那個 server 名，
+// 沒有匹配時回空字串。
+//
+// 取最長而不是第一個：server 名沒有字元限制，`foo` 與 `foo__bar` 能同時宣告，
+// `foo__bar__echo` 對兩者都是前綴匹配。specs 是一個已知集合，拿它來比就沒有歧義。
+func longestServerPrefix(name string, specs []core.McpServerSpec) string {
+	var longest string
+	for _, spec := range specs {
+		if !strings.HasPrefix(name, spec.Name+tool.McpToolSeparator) {
+			continue
+		}
+		if len(spec.Name) > len(longest) {
+			longest = spec.Name
+		}
+	}
+	return longest
 }
 
 // runChat 載入 Workspace 設定檔與 Profile、校驗 Provider 可解析，組出
@@ -209,10 +246,17 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	}()
 	logger := slog.New(slog.NewJSONHandler(logFile, nil))
 
+	// 憑證的 ${ENV_VAR} 展開是**顯式的一步**（issue #27）：Load 不再代勞，因為與
+	// Provider 無關的命令（`oryxos tools`）不該被缺一個環境變數擋下。chat 要真的呼叫
+	// LLM，所以在這裡展開，缺 key 仍然啟動即報錯。
+	providers, err := config.ExpandProviderEnv(cfg.Providers)
+	if err != nil {
+		return fmt.Errorf("載入 Provider 憑證: %w", err)
+	}
 	// config（YAML 檔案形狀）與 provider（執行期配置）刻意不共用型別，
 	// 避免 internal/provider 依賴設定檔格式；同形搬運是這條解耦的成本。
-	providerConfigs := make(map[string]provider.Config, len(cfg.Providers))
-	for name, pc := range cfg.Providers {
+	providerConfigs := make(map[string]provider.Config, len(providers))
+	for name, pc := range providers {
 		providerConfigs[name] = provider.Config{APIKey: pc.APIKey, BaseURL: pc.BaseURL}
 	}
 
@@ -294,30 +338,9 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	//
 	// 順序上必須夾在 buildToolRegistry 與 Subset 之間：早於註冊的話 Registry 還不存在，
 	// 晚於 Subset 的話 Profile 引用 MCP 工具會被判成「未註冊」。
-	mcpDeclared, err := config.LoadMcpServers(filepath.Join(ws, core.McpServersFile))
-	if err != nil {
-		return fmt.Errorf("載入 MCP server 宣告: %w", err)
-	}
-	mcpRefs, err := prof.McpServerRefs()
-	if err != nil {
-		return fmt.Errorf("Profile %s 的 mcp_servers 校驗失敗: %w", prof.Name, err)
-	}
-	// 只解析出**這個 Profile 引用到的**那幾份，未被引用的宣告連子進程都不會 spawn。
-	mcpSpecs, err := core.ResolveMcpServers(mcpRefs, mcpDeclared)
-	if err != nil {
-		return fmt.Errorf("Profile %s 的 mcp_servers 校驗失敗: %w", prof.Name, err)
-	}
-	// 憑證的 ${ENV_VAR} 展開在過濾**之後**：一個沒被這個 Agent 引用的 server 缺環境變數
-	// 不該擋下啟動（只接 Slack 的 Agent 不該因為機器上沒有 GitHub token 而起不來）。
-	mcpSpecs, err = config.ExpandMcpServerEnv(mcpSpecs)
-	if err != nil {
-		return fmt.Errorf("載入 MCP server 憑證: %w", err)
-	}
-	// 警示在**每個 server 失敗的當下**就印（issue #26），不等整個連線階段跑完：連線是
-	// 並行的，總等待仍是最慢的那一個，而那可以是連線期限的完整 30 秒。
-	mcpClients, err := tool.ConnectMcpServers(ctx, registry, mcpSpecs,
-		func(failure tool.McpConnectFailure) { warnMcpServerUnavailable(out, prof, failure) },
-		logger)
+	// 這條鏈路與 `oryxos tools` 共用（見 connectProfileMcpServers）：那個命令列出來的
+	// 東西必須就是這裡會註冊的那一組，否則它查到的是假的。
+	mcpClients, mcpSpecs, err := connectProfileMcpServers(ctx, out, ws, prof, registry, logger)
 	// Close 無條件排進 defer，連線中途失敗時也要收掉**已經起來的**那些子進程：
 	// ConnectMcpServers 在回錯誤前已自行收過一次，這裡是第二道保險（Close 對空清單
 	// 是 no-op），漏掉的話會留下孤兒進程。
@@ -327,16 +350,21 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 		}
 	}()
 	if err != nil {
-		return fmt.Errorf("連線 MCP server: %w", err)
+		return err
 	}
-	// 連不上的 server 已經降級（它的工具沒有註冊、錯誤已落日誌、警示也在失敗當下印過
-	// 了），這裡是最後一步：把它的工具從送進 Subset 的清單裡拿掉，否則 Subset 會以
-	// 「Tool 未註冊」擋下整個啟動。
-	profileTools := degradeUnavailableMcpTools(prof, mcpClients.Failures())
+	// 連不上的 server 已經降級（它的工具沒有註冊、錯誤已落日誌、「哪一台連不上」也在
+	// 失敗當下喊過了），這裡是最後一步：連線與註冊都結束了，現在才算得準**哪些 Profile
+	// 工具真的缺**，把它們從送進 Subset 的清單裡拿掉，否則 Subset 會以「Tool 未註冊」
+	// 擋下整個啟動。
+	profileTools := degradeUnavailableMcpTools(out, prof, mcpSpecs, mcpClients.Failures(), registry)
 
 	executor, err := registry.Subset(profileTools, autoIncludedTools(skillRefs), logger)
 	if err != nil {
-		return fmt.Errorf("Profile %s 的 tools 校驗失敗: %w", prof.Name, err)
+		// 指向 `oryxos tools`（issue #27）：Subset 那一層已經把同一台 server 的可用名字
+		// 列出來了，但工具多時會截斷，而且使用者常是連前綴都記錯。查詢途徑的名字放在
+		// 這一層而不是 internal/tool——那個 package 不該知道 CLI 有哪些命令。
+		return fmt.Errorf("Profile %s 的 tools 校驗失敗（執行 oryxos tools 可看到完整清單）: %w",
+			prof.Name, err)
 	}
 	// 啟動即清晰告知（需求 5.12 基礎校驗）：空白名單是安全的預設（全拒），
 	// 但 Profile 列了 HTTP Tool 時，每次呼叫都會在執行期被攔截——先提醒，

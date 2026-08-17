@@ -177,6 +177,9 @@ var mcpServersTemplate = `# OryxOS 外部 MCP server 宣告檔（Plugin Tool 方
 # 工具會以 <server>__<tool>（雙底線）註冊，Profile 的 tools 欄位就用這個名字引用。
 # 例如下面的 github 宣告了 search_pr 工具，Profile 要寫 github__search_pr。
 #
+# 不知道某台 server 提供哪些 <tool>？宣告好之後執行 oryxos tools：它會連上 Profile
+# 引用的 server、把工具名與用途列出來，直接照抄進 tools 欄位即可。
+#
 # 敏感值一律以 ${ENV_VAR} 佔位，載入時從環境變數解析，不明文落檔。
 # 核心階段只支援 transport: stdio。
 #

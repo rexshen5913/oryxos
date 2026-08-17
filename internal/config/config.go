@@ -29,8 +29,13 @@ type HTTPConfig struct {
 // envPlaceholder 匹配 ${ENV_VAR} 佔位符。
 var envPlaceholder = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
-// Load 讀取並解析 Workspace 設定檔，將 Provider 憑證中的 ${ENV_VAR} 佔位符
-// 以環境變數展開；引用的環境變數未設定時報清晰錯誤。
+// Load 讀取並解析 Workspace 設定檔。**憑證裡的 ${ENV_VAR} 佔位符不在這裡展開**——
+// 需要用到 Provider 的呼叫端自行呼叫 ExpandProviderEnv。
+//
+// 展開之所以是獨立的一步，理由與 MCP 憑證那條（見 ExpandMcpServerEnv）完全相同：
+// 缺一個環境變數只代表「這台機器上還沒設定」，不該擋下與 Provider 無關的事情。
+// `oryxos tools` 只是列出可用的 Tool，卻在剛 `oryxos init`、API key 還沒設好的
+// Workspace 上失敗——而那正是最可能跑它的時刻（issue #27）。
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -41,17 +46,28 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("解析 Workspace 設定檔 %s: %w", path, err)
 	}
+	return &cfg, nil
+}
 
-	for name, pc := range cfg.Providers {
+// ExpandProviderEnv 把 Provider 憑證裡的 ${ENV_VAR} 佔位符以環境變數展開，回傳展開後的
+// 新 map；引用的環境變數未設定時報清晰錯誤。
+//
+// 回新 map 而不是就地改：傳進來的那份來自 Load，呼叫端可能還要拿它做別的事（例如校驗
+// Profile 引用的 Provider 有沒有配置），就地改會讓「檔案裡寫了什麼」與「展開後是什麼」
+// 分不開。形狀沿用 ExpandMcpServerEnv。
+func ExpandProviderEnv(providers map[string]ProviderConfig) (map[string]ProviderConfig, error) {
+	expanded := make(map[string]ProviderConfig, len(providers))
+	for name, pc := range providers {
+		var err error
 		if pc.APIKey, err = resolveEnv(pc.APIKey); err != nil {
 			return nil, fmt.Errorf("providers.%s.api_key: %w", name, err)
 		}
 		if pc.BaseURL, err = resolveEnv(pc.BaseURL); err != nil {
 			return nil, fmt.Errorf("providers.%s.base_url: %w", name, err)
 		}
-		cfg.Providers[name] = pc
+		expanded[name] = pc
 	}
-	return &cfg, nil
+	return expanded, nil
 }
 
 // resolveEnv 展開 s 中所有 ${ENV_VAR} 佔位符；引用的環境變數未設定時全部列出。
