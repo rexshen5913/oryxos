@@ -115,8 +115,42 @@ func autoIncludedTools(skillRefs []string) []string {
 	return []string{tool.LoadSkillToolName}
 }
 
-// degradeUnavailableMcpTools 對每個連不上的 MCP server 發一次 CLI 警示，並把它的工具
-// 從 Profile 的 tools 清單裡拿掉，回傳要送進 Registry.Subset 的那一份。
+// warnMcpServerUnavailable 對一個連不上的 MCP server 發 CLI 警示。
+//
+// **安靜地少了幾個工具比起不來更糟**：Agent 會表現成莫名其妙不會做某件事，而使用者
+// 不會想到去翻日誌（spec #3 使用者故事 29）。
+//
+// 它由 ConnectMcpServers 在**每個 server 失敗的當下**回呼（issue #26），不是等整個連線
+// 階段跑完才一次印。連線期限給到 30 秒，等最慢的那一個結束才開口，中間那段時間使用者
+// 只看得到游標在閃。
+//
+// 措辭與輸出目的地留在這一層：internal/tool 只負責把「這個 server 這次沒連上」交出來，
+// 怎麼講給使用者聽是組裝點的事。
+//
+// 警示帶上原始錯誤而不是摘要成一句「連線失敗」：「命令找不到」與「交握逾時」要修的
+// 東西完全不同，那句原文是使用者唯一的線索。
+func warnMcpServerUnavailable(out io.Writer, prof *core.Profile, failure tool.McpConnectFailure) {
+	fmt.Fprintf(out, "警告：MCP server %s 連線失敗，這次啟動不會有它的工具"+
+		"（其餘 Tool 與對話照常）：%v\n", failure.Server, failure.Err)
+
+	// 判斷「這個名字屬於哪個 server」靠的是註冊名的前綴（<server>__<tool>）。這正是
+	// 那個命名契約帶前綴的原因之一：來源看得出來。
+	prefix := failure.Server + tool.McpToolSeparator
+	var dropped []string
+	for _, name := range prof.Tools {
+		if strings.HasPrefix(name, prefix) {
+			dropped = append(dropped, name)
+		}
+	}
+	if len(dropped) > 0 {
+		fmt.Fprintf(out, "      Profile %s 列出的 %s 本次略過。\n",
+			prof.Name, strings.Join(dropped, "、"))
+	}
+}
+
+// degradeUnavailableMcpTools 把連不上的 MCP server 的工具從 Profile 的 tools 清單裡
+// 拿掉，回傳要送進 Registry.Subset 的那一份。使用者看得見的那一半由
+// warnMcpServerUnavailable 在失敗當下負責。
 //
 // **為什麼要拿掉，而不是讓 Subset 照常報錯**：Subset 對未註冊的 Tool fail fast，那條
 // 語義是給**設定錯誤**（工具名打錯、server 改了名）用的——換幾台機器都一樣壞，早點
@@ -125,13 +159,8 @@ func autoIncludedTools(skillRefs []string) []string {
 // 都會讓整個 Agent 起不來——正是「一個外部依賴掛掉不該讓整個 Agent 起不來」要防的事
 // （spec #3 使用者故事 28）。
 //
-// 判斷「這個名字屬於哪個 server」靠的是註冊名的前綴（<server>__<tool>）。這正是那個
-// 命名契約帶前綴的原因之一：來源看得出來。範圍剛好是掛掉的那個 server，其餘的名字
-// （含打錯字的）照舊由 Subset 擋下。
-//
-// 警示帶上原始錯誤而不是摘要成一句「連線失敗」：「命令找不到」與「交握逾時」要修的
-// 東西完全不同，那句原文是使用者唯一的線索。
-func degradeUnavailableMcpTools(out io.Writer, prof *core.Profile, failures []tool.McpConnectFailure) []string {
+// 範圍剛好是掛掉的那幾個 server，其餘的名字（含打錯字的）照舊由 Subset 擋下。
+func degradeUnavailableMcpTools(prof *core.Profile, failures []tool.McpConnectFailure) []string {
 	if len(failures) == 0 {
 		return prof.Tools
 	}
@@ -140,21 +169,9 @@ func degradeUnavailableMcpTools(out io.Writer, prof *core.Profile, failures []to
 	remaining := slices.Clone(prof.Tools)
 	for _, failure := range failures {
 		prefix := failure.Server + tool.McpToolSeparator
-		var dropped []string
 		remaining = slices.DeleteFunc(remaining, func(name string) bool {
-			if !strings.HasPrefix(name, prefix) {
-				return false
-			}
-			dropped = append(dropped, name)
-			return true
+			return strings.HasPrefix(name, prefix)
 		})
-
-		fmt.Fprintf(out, "警告：MCP server %s 連線失敗，這次啟動不會有它的工具"+
-			"（其餘 Tool 與對話照常）：%v\n", failure.Server, failure.Err)
-		if len(dropped) > 0 {
-			fmt.Fprintf(out, "      Profile %s 列出的 %s 本次略過。\n",
-				prof.Name, strings.Join(dropped, "、"))
-		}
 	}
 	return remaining
 }
@@ -296,7 +313,11 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	if err != nil {
 		return fmt.Errorf("載入 MCP server 憑證: %w", err)
 	}
-	mcpClients, err := tool.ConnectMcpServers(ctx, registry, mcpSpecs, logger)
+	// 警示在**每個 server 失敗的當下**就印（issue #26），不等整個連線階段跑完：連線是
+	// 並行的，總等待仍是最慢的那一個，而那可以是連線期限的完整 30 秒。
+	mcpClients, err := tool.ConnectMcpServers(ctx, registry, mcpSpecs,
+		func(failure tool.McpConnectFailure) { warnMcpServerUnavailable(out, prof, failure) },
+		logger)
 	// Close 無條件排進 defer，連線中途失敗時也要收掉**已經起來的**那些子進程：
 	// ConnectMcpServers 在回錯誤前已自行收過一次，這裡是第二道保險（Close 對空清單
 	// 是 no-op），漏掉的話會留下孤兒進程。
@@ -308,10 +329,10 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	if err != nil {
 		return fmt.Errorf("連線 MCP server: %w", err)
 	}
-	// 連不上的 server 已經降級（它的工具沒有註冊，錯誤也已落日誌），這裡補上**使用者
-	// 看得見**的那一半：安靜地少了幾個工具比起不來更糟——Agent 會表現成莫名其妙不會
-	// 做某件事，而沒有人會想到去翻日誌。
-	profileTools := degradeUnavailableMcpTools(out, prof, mcpClients.Failures())
+	// 連不上的 server 已經降級（它的工具沒有註冊、錯誤已落日誌、警示也在失敗當下印過
+	// 了），這裡是最後一步：把它的工具從送進 Subset 的清單裡拿掉，否則 Subset 會以
+	// 「Tool 未註冊」擋下整個啟動。
+	profileTools := degradeUnavailableMcpTools(prof, mcpClients.Failures())
 
 	executor, err := registry.Subset(profileTools, autoIncludedTools(skillRefs), logger)
 	if err != nil {

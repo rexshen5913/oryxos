@@ -167,6 +167,59 @@ func TestChatMcpServerUnavailableDegradesWithWarning(t *testing.T) {
 	}
 }
 
+// TestChatEveryUnavailableMcpServerIsNamedSeparately 釘住**多個 server 同時連不上時，
+// 每一個仍各自可見**（issue #26）。
+//
+// 這是並行連線最容易掉的一塊：一次拿到好幾個錯誤，很自然會想併成一句「有 2 個 MCP
+// server 連線失敗」。但「命令找不到」與「交握逾時」要修的東西完全不同——合併之後
+// 使用者手上只剩一個數字，一條線索都沒有。
+//
+// 上一條測試只有一個壞掉的 server，那種形狀下「各自可見」與「合併成一句」長得一模
+// 一樣，抓不到這個回歸。
+func TestChatEveryUnavailableMcpServerIsNamedSeparately(t *testing.T) {
+	var reqs [][]byte
+	srv := newRecordingReplayServer(t, &reqs,
+		readFixture(t, "chat_reply_mcp_tool_call.json"),
+		readFixture(t, "chat_reply_after_mcp_tool.json"))
+	dir := setupChatWorkspace(t, srv.URL)
+
+	// 兩個壞的指向**不同**的不存在路徑：那個路徑就是各自的原始錯誤裡唯一能分辨彼此
+	// 的東西，下面據它斷言「原因沒有被摘要掉」。
+	writeMcpServers(t, dir, "mcp_servers:\n"+
+		testMcpServerEntry(t, "demo", "echo")+
+		"  broken_a:\n    transport: stdio\n    command: [/nonexistent/oryxos-mcp-a]\n"+
+		"  broken_b:\n    transport: stdio\n    command: [/nonexistent/oryxos-mcp-b]\n")
+	writeProfile(t, dir, "provider:\n  name: openrouter\n  model: m\n"+
+		"mcp_servers:\n  - demo\n  - broken_a\n  - broken_b\n"+
+		"tools:\n  - demo__echo\n  - broken_a__echo\n  - broken_b__echo\n")
+
+	var out bytes.Buffer
+	if err := runChat(context.Background(), strings.NewReader(""), &out, dir,
+		chatOptions{profileName: "default", message: "幫我呼叫外部工具"}); err != nil {
+		t.Fatalf("兩個 server 連不上不該讓啟動失敗: %v", err)
+	}
+
+	got := out.String()
+	if n := strings.Count(got, "警告：MCP server"); n != 2 {
+		t.Errorf("警示出現 %d 次，期望 2 次（連不上的 server 各一次，不合併）:\n%s", n, got)
+	}
+	for name, path := range map[string]string{
+		"broken_a": "/nonexistent/oryxos-mcp-a",
+		"broken_b": "/nonexistent/oryxos-mcp-b",
+	} {
+		if !strings.Contains(got, name) {
+			t.Errorf("輸出沒有指名 %s:\n%s", name, got)
+		}
+		if !strings.Contains(got, path) {
+			t.Errorf("輸出沒有帶上 %s 的原始錯誤（%s）——原因被摘要掉了:\n%s", name, path, got)
+		}
+	}
+	// 降級的範圍剛好是連不上的那兩個：活著的 server 照常。
+	if names := llmToolNames(t, reqs, 0); !slices.Contains(names, "demo__echo") {
+		t.Errorf("連得上的 server 的工具不見了: %v", names)
+	}
+}
+
 // TestChatUnreferencedServerMissingCredentialDoesNotBlockStartup 釘住憑證展開的範圍：
 // **沒被這個 Profile 引用的 server，缺環境變數也不該擋下啟動**。
 //

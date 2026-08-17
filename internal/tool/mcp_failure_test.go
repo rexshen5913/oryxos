@@ -120,7 +120,7 @@ func TestMcpConnectStopsWhenCallerCancels(t *testing.T) {
 	svc, err := ConnectMcpServers(ctx, registry, []core.McpServerSpec{
 		toolMcpSpecWithEnv(t, "first", "", map[string]string{toolMcpSpawnMarkerEnv: markers[0]}, "echo"),
 		toolMcpSpecWithEnv(t, "second", "", map[string]string{toolMcpSpawnMarkerEnv: markers[1]}, "echo"),
-	}, discardLogger())
+	}, nil, discardLogger())
 	t.Cleanup(func() { _ = svc.Close() })
 
 	if err == nil {

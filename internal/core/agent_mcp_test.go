@@ -38,7 +38,7 @@ func mcpProfile(servers, tools []string) *core.Profile {
 // 時關閉，不留孤兒子進程。
 func connectMcp(t *testing.T, registry *tool.Registry, specs []core.McpServerSpec) {
 	t.Helper()
-	clients, err := tool.ConnectMcpServers(t.Context(), registry, specs, discardLogger())
+	clients, err := tool.ConnectMcpServers(t.Context(), registry, specs, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("連線 MCP server: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestMcpHandshakeNegotiation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			registry := tool.NewRegistry()
 			clients, err := tool.ConnectMcpServers(t.Context(), registry,
-				[]core.McpServerSpec{mcpSpecWithEnv(t, "demo", tt.env, "echo")}, discardLogger())
+				[]core.McpServerSpec{mcpSpecWithEnv(t, "demo", tt.env, "echo")}, nil, discardLogger())
 			t.Cleanup(func() {
 				if cerr := clients.Close(); cerr != nil {
 					t.Errorf("關閉 MCP server: %v", cerr)
@@ -432,7 +432,7 @@ func TestMcpToolNameMustBeUsableAtLLMBoundary(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			registry := tool.NewRegistry()
 			clients, err := tool.ConnectMcpServers(t.Context(), registry,
-				[]core.McpServerSpec{mcpSpec(t, tt.server, tt.tool)}, discardLogger())
+				[]core.McpServerSpec{mcpSpec(t, tt.server, tt.tool)}, nil, discardLogger())
 			// 不論成敗都要收子進程：連線失敗時 ConnectMcpServers 已自行收過，這裡是
 			// 第二道（Close 冪等），漏掉會留下孤兒。
 			t.Cleanup(func() {
@@ -515,7 +515,7 @@ func TestMcpToolCallHonoursContextWhileWriteIsBlocked(t *testing.T) {
 	registry := tool.NewRegistry()
 	spec := mcpSpecWithEnv(t, "demo", map[string]string{mcpServerStopReadingEnv: "6"}, "echo")
 	clients, err := tool.ConnectMcpServers(t.Context(), registry,
-		[]core.McpServerSpec{spec}, discardLogger())
+		[]core.McpServerSpec{spec}, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("連線 MCP server: %v", err)
 	}
@@ -580,7 +580,7 @@ func TestMcpCancelledCallNeverReachesServer(t *testing.T) {
 	registry := tool.NewRegistry()
 	spec := mcpSpecWithEnv(t, "demo", map[string]string{mcpServerCallLogEnv: callLog}, "echo")
 	clients, err := tool.ConnectMcpServers(t.Context(), registry,
-		[]core.McpServerSpec{spec}, discardLogger())
+		[]core.McpServerSpec{spec}, nil, discardLogger())
 	if err != nil {
 		t.Fatalf("連線 MCP server: %v", err)
 	}

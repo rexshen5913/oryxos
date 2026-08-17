@@ -1090,67 +1090,165 @@ func (s *McpClientService) Failures() []McpConnectFailure {
 // 到那個工具的純對話也一起死）。那種東西要在啟動時擋，不能等到對話中途。宣告本身的
 // 靜態缺陷（transport 不支援、沒有 command）更早，在載入宣告檔那一步就擋掉了（見
 // config.validateMcpServerEntry）。
+// **連線是並行的**（issue #26）：序列之下每個 server 各吃一份自己的連線期限，總等待是
+// 全部加起來——三個「起得來但交握不完成」的 server 會讓啟動靜默等上一分半，使用者看不
+// 出它在等什麼。並行之後總等待是最慢的那一個。
+//
+// 併發只存在於本函式內部：dial 各走各的 goroutine，**收集、註冊、記錄一律回到單一執行
+// 緒**。Registry 因此不必變成併發安全的資料結構，它「啟動時單執行緒註冊」的既有契約
+// 原封不動。
+//
+// onFailure 在**每個 server 連不上的當下**被呼叫一次，讓組裝點即時對使用者發警示——
+// 並行之後總等待仍是最慢的那一個（連線期限給到 30 秒），已經確定連不上的 server 沒有
+// 理由陪著一起等。它一律從上述那個單一執行緒呼叫，因此實作不必自己加鎖；傳 nil 代表
+// 不需要即時回饋，連線結束後仍可從 Failures() 拿到同一批失敗。
+//
+// 型別是 callback 而不是 io.Writer：本 package 不該知道警示要印去哪、更不該決定措辭，
+// 那是組裝點的關切（見 cmd/oryxos 的 warnMcpServerUnavailable）。
 func ConnectMcpServers(ctx context.Context, registry *Registry, specs []core.McpServerSpec,
-	logger *slog.Logger) (*McpClientService, error) {
+	onFailure func(McpConnectFailure), logger *slog.Logger) (*McpClientService, error) {
 	svc := &McpClientService{logger: logger}
-	for _, spec := range specs {
-		// **呼叫端取消不是「這個 server 掛了」**，是「不要再啟動了」。少了這道檢查，
-		// 使用者在啟動途中按 Ctrl-C 會變成：剩下的每個 server 各自以 context.Canceled
-		// 失敗、各自被記成「連不上」、各自再花一次清理時間，最後 ConnectMcpServers
-		// 還回 nil——於是 Agent 帶著一組空的 MCP 工具照常起來，取消等於沒按。
-		if err := ctx.Err(); err != nil {
-			return svc, errors.Join(
-				fmt.Errorf("連線 MCP server 中止（還有 %d 個未連）: %w", len(specs)-len(svc.conns)-len(svc.failures), err),
-				svc.Close())
-		}
+	if len(specs) == 0 {
+		return svc, nil
+	}
+	// **呼叫端取消不是「這個 server 掛了」**，是「不要再啟動了」。使用者在啟動途中按
+	// Ctrl-C 若被當成連線失敗，後果是：每個 server 各自以 context.Canceled 被記成
+	// 「連不上」，最後 ConnectMcpServers 還回 nil——於是 Agent 帶著一組空的 MCP 工具
+	// 照常起來，取消等於沒按。
+	//
+	// 這道檢查放在**任何 spawn 之前**：並行之下所有 spawn 幾乎同時發生，沒有「下一個
+	// server」可以攔，這裡是唯一能保證「取消之後一個子進程都不起」的位置。
+	if err := ctx.Err(); err != nil {
+		return svc, fmt.Errorf("連線 MCP server 中止（%d 個都還沒開始連）: %w", len(specs), err)
+	}
 
-		conn, decls, err := connectMcpServer(ctx, spec, mcpConnectTimeout, logger)
-		if err != nil {
-			// 分辨「這個 server 的問題」與「呼叫端取消了」：兩者在這裡都表現成一個
-			// 錯誤，但只有前者該降級。判準是**外層** ctx——每個 server 自己的期限走的是
-			// 衍生 ctx，它逾時不會讓外層 ctx.Err() 有值。
-			if cerr := ctx.Err(); cerr != nil {
-				return svc, errors.Join(
-					fmt.Errorf("連線 MCP server %q 時中止: %w", spec.Name, cerr),
-					svc.Close())
+	// 緩衝開滿 len(specs)：每個 dial goroutine 送完就走，不會因為收集端還在忙而卡住，
+	// 也就不會有 goroutine 洩漏（憲法 5.3）。
+	results := make(chan mcpConnectResult, len(specs))
+	var wg sync.WaitGroup
+	for i, spec := range specs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			conn, decls, err := connectMcpServer(ctx, spec, mcpConnectTimeout, logger)
+			results <- mcpConnectResult{index: i, spec: spec, conn: conn, decls: decls, err: err}
+		}()
+	}
+	// 「全部送完了」這個訊號交給一個獨立的 goroutine 發，收集端因此可以單純地 range，
+	// 不必自己數還剩幾個。
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// ── 第一段：邊到邊處理「發生了什麼」──────────────────────────────
+	//
+	// 日誌與即時警示走**完成順序**，因為它們記的是事件：誰先確定連不上誰先喊。喊在
+	// 這裡而不是等全部連完，是為了讓使用者在還等著其他 server 的那段時間裡就看得到
+	// 已知的壞消息（issue #26 方向三）。
+	//
+	// 結果本身按 spec 的位置收進 byIndex，留給第二段。**為什麼要繞這一手**：並行之下
+	// 到達順序是誰先連完誰先到，就地 append 會讓 Failures() 與工具註冊的順序變成一次
+	// 擲骰子。並行唯一該影響的是「花多久」，不是「看到什麼」。
+	//
+	// 這一整段跑在單一執行緒上，第二段也是——Registry 因此不必變成併發安全的資料結構。
+	byIndex := make([]mcpConnectResult, len(specs))
+	var cancelled error
+	for res := range results {
+		byIndex[res.index] = res
+		if res.err == nil {
+			// 成功側也要有訊號：使用者要能判斷 Agent 現在的能力範圍，不能只在失敗時
+			// 才有訊息。
+			logger.InfoContext(ctx, "mcp_server_connected",
+				"server", res.spec.Name, "transport", mcpTransportStdio,
+				"protocol", res.conn.protocolVersion,
+				"server_name", res.conn.serverName, "server_version", res.conn.serverVersion,
+				"tools", len(res.decls))
+			if len(res.decls) == 0 {
+				// **回空不是錯誤**：一個沒有工具的 server 是合法的（工具還沒設定好、或它
+				// 主要提供別的能力）。但它與「連上了、工具也拿到了」在使用者眼裡沒有差別，
+				// 所以單獨記一筆——否則「為什麼這個 server 沒給我工具」只能靠猜。
+				logger.InfoContext(ctx, "mcp_server_no_tools", "server", res.spec.Name)
 			}
-			// 降級：記下來、喊出去、繼續下一個 server。
-			svc.failures = append(svc.failures, McpConnectFailure{Server: spec.Name, Err: err})
-			logger.ErrorContext(ctx, "mcp_server_unavailable",
-				"server", spec.Name, "transport", mcpTransportStdio, "error", err.Error())
+			continue
+		}
+		// 分辨「這個 server 的問題」與「呼叫端取消了」：兩者在這裡都表現成一個錯誤，
+		// 但只有前者該降級。判準是**外層** ctx——每個 server 自己的期限走的是衍生 ctx，
+		// 它逾時不會讓外層 ctx.Err() 有值。
+		if cerr := ctx.Err(); cerr != nil {
+			if cancelled == nil {
+				cancelled = fmt.Errorf("連線 MCP server 中止: %w", cerr)
+			}
+			continue
+		}
+		// 降級：喊出去、記日誌、其餘 server 照常。
+		logger.ErrorContext(ctx, "mcp_server_unavailable",
+			"server", res.spec.Name, "transport", mcpTransportStdio, "error", res.err.Error())
+		if onFailure != nil {
+			onFailure(McpConnectFailure{Server: res.spec.Name, Err: res.err})
+		}
+	}
+
+	// **取消一筆連線失敗都不記**：取消是「不要再啟動了」，不是「這些 server 掛了」。
+	// 但已經起來的子進程仍要收掉，否則留下孤兒。
+	//
+	// 取消之前若已經有 server 確定連不上，那聲警示已經喊出去了，不會也不該收回——
+	// 它記的是真的發生過的事。使用者因此可能同時看到「某個 server 連線失敗」與「連線
+	// 階段中止」，那兩句都是實話。
+	if cancelled != nil {
+		for _, res := range byIndex {
+			if res.conn != nil {
+				svc.conns = append(svc.conns, res.conn)
+			}
+		}
+		return svc, errors.Join(cancelled, svc.Close())
+	}
+
+	// ── 第二段：按**宣告順序**產出結果 ────────────────────────────────
+	//
+	// fatal 是該擋下整個啟動的錯誤（工具名送不進 Function Calling、工具撞名）。記下來
+	// 但**不立刻返回**：剩下的連線還是要收進 svc.conns，否則沒有人關得掉它們。
+	var fatal error
+	for _, res := range byIndex {
+		if res.err != nil {
+			svc.failures = append(svc.failures, McpConnectFailure{Server: res.spec.Name, Err: res.err})
 			continue
 		}
 		// 先收下連線再註冊工具：後面任何一步失敗，Close 都要能把這個子進程收掉。
-		svc.conns = append(svc.conns, conn)
-
-		for _, decl := range decls {
-			adapter := newMcpToolAdapter(conn, spec.Name, decl, mcpToolCallTimeout)
+		svc.conns = append(svc.conns, res.conn)
+		if fatal != nil {
+			continue
+		}
+		for _, decl := range res.decls {
+			adapter := newMcpToolAdapter(res.conn, res.spec.Name, decl, mcpToolCallTimeout)
 			// 名字送不進 Function Calling 的話，啟動就擋——否則每一輪 LLM 請求都會被
 			// 端點以 400 打回，連沒用到這個工具的純對話也一起死。
-			if err := validateToolFunctionName(spec.Name, decl.Name, adapter.Name()); err != nil {
-				return svc, errors.Join(err, svc.Close())
+			if err := validateToolFunctionName(res.spec.Name, decl.Name, adapter.Name()); err != nil {
+				fatal = err
+				break
 			}
 			if err := registry.Register(adapter); err != nil {
-				return svc, errors.Join(
-					fmt.Errorf("註冊 MCP server %q 的工具 %q: %w", spec.Name, decl.Name, err),
-					svc.Close())
+				fatal = fmt.Errorf("註冊 MCP server %q 的工具 %q: %w", res.spec.Name, decl.Name, err)
+				break
 			}
 		}
-		// 成功側也要有訊號：使用者要能判斷 Agent 現在的能力範圍，不能只在失敗時才有
-		// 訊息。
-		logger.InfoContext(ctx, "mcp_server_connected",
-			"server", spec.Name, "transport", mcpTransportStdio,
-			"protocol", conn.protocolVersion,
-			"server_name", conn.serverName, "server_version", conn.serverVersion,
-			"tools", len(decls))
-		if len(decls) == 0 {
-			// **回空不是錯誤**：一個沒有工具的 server 是合法的（工具還沒設定好、或它
-			// 主要提供別的能力）。但它與「連上了、工具也拿到了」在使用者眼裡沒有差別，
-			// 所以單獨記一筆——否則「為什麼這個 server 沒給我工具」只能靠猜。
-			logger.InfoContext(ctx, "mcp_server_no_tools", "server", spec.Name)
-		}
+	}
+	if fatal != nil {
+		return svc, errors.Join(fatal, svc.Close())
 	}
 	return svc, nil
+}
+
+// mcpConnectResult 是一個 server 的連線結果，由它自己的 dial goroutine 送回收集端。
+//
+// spec 與 index 都要跟著結果一起走：並行之下到達順序與 specs 的順序無關，收集端只能
+// 靠這兩個欄位才知道手上這一筆是誰的、又該排回第幾位。
+type mcpConnectResult struct {
+	index int
+	spec  core.McpServerSpec
+	conn  *mcpConn
+	decls []mcpToolDecl
+	err   error
 }
 
 // connectMcpServer 連上單一 server 並取回它的工具清單，整段受 timeout 約束。

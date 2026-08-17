@@ -70,7 +70,27 @@ const (
 	// 用來逼出 close 的第二道防線：殺不到就自己把讀取端關掉，讀取 goroutine 才收得了
 	// 工。沒有這一格的話那道防線是死碼——而它同時也是非 Unix 平台唯一的保障。
 	modeLeakPipeToDetachedGrandchild = "leak_pipe_to_detached_grandchild"
+	// modeSlowInitialize：交握**會成功，只是慢**——回應 initialize 之前先睡
+	// slowInitializeDelay。屬 issue #26 而不是 ticket #22 的失敗矩陣。
+	//
+	// 與 modeHangInitialize 的分工是刻意的：hang 那個用來驗「連線這一層自己有期限」，
+	// 這個用來驗**多個 server 之間有沒有並行**。並行與否的差別是總耗時等於「最慢的那
+	// 一個」還是「全部加起來」，而量這件事需要一個**會如期完成**的延遲——拿逾時來量
+	// 不可行：逾時場景要壓到毫秒級才跑得動，而連線期限是給冷啟動用的 30 秒常數。
+	modeSlowInitialize = "slow_initialize"
+	// modeSlowInitializeThenDie：睡 slowInitializeDelay 之後直接退出，不回應
+	// initialize——連線因此「慢，而且失敗」。
+	//
+	// 用來製造**完成時間不同的兩個失敗**：並行之下誰先連完誰先到，要驗 Failures() 有
+	// 沒有被拉回宣告順序，就需要一個註定比另一個晚到的失敗。
+	modeSlowInitializeThenDie = "slow_initialize_then_die"
 )
+
+// slowInitializeDelay 是 modeSlowInitialize 回應 initialize 之前刻意拖的時間。
+//
+// 取值要同時滿足兩邊：大到足以蓋過子進程 spawn 的抖動（那是幾十毫秒級，並行測試的
+// 訊號不能被它淹掉），小到整條測試仍在一秒級。
+const slowInitializeDelay = 400 * time.Millisecond
 
 // ignoreStdinCloseLifetime 是 modeIgnoreStdinClose 撐著不退出的時間。
 //
@@ -135,6 +155,15 @@ func (s *toolTestMcpServer) handle(line []byte) {
 		if s.mode == modeHangInitialize {
 			// 收下但不回應：client 的交握會一直等，直到它自己的期限到期。
 			return
+		}
+		if s.mode == modeSlowInitializeThenDie {
+			// 慢，而且失敗：交握等到一半，對面就沒了。
+			time.Sleep(slowInitializeDelay)
+			os.Exit(1)
+		}
+		if s.mode == modeSlowInitialize {
+			// 慢，但會回：連線最終成功，只是佔掉一段可量測的時間。
+			time.Sleep(slowInitializeDelay)
 		}
 		var params struct {
 			ProtocolVersion string `json:"protocolVersion"`

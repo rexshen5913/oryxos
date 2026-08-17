@@ -70,7 +70,7 @@ func TestMcpStartupFailureMatrix(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			registry := tool.NewRegistry()
 			clients, err := tool.ConnectMcpServers(t.Context(), registry,
-				[]core.McpServerSpec{tt.spec(t)}, discardLogger())
+				[]core.McpServerSpec{tt.spec(t)}, nil, discardLogger())
 			t.Cleanup(func() {
 				if cerr := clients.Close(); cerr != nil {
 					t.Errorf("關閉 MCP server: %v", cerr)
@@ -102,7 +102,7 @@ func TestMcpConnectFailureKeepsOtherServersUsable(t *testing.T) {
 	clients, err := tool.ConnectMcpServers(t.Context(), registry, []core.McpServerSpec{
 		unstartableMcpSpec(t, "broken"),
 		mcpSpec(t, "alive", "echo"),
-	}, discardLogger())
+	}, nil, discardLogger())
 	t.Cleanup(func() {
 		if cerr := clients.Close(); cerr != nil {
 			t.Errorf("關閉 MCP server: %v", cerr)
