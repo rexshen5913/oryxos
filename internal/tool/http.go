@@ -16,9 +16,10 @@ import (
 
 const (
 	// httpRequestTimeout 是單次 HTTP Tool 請求的超時上限；呼叫端仍可用 ctx 更早取消。
+	//
+	// 回應內文的大小上限不在這裡：那是 maxResponseBytes，與其他 Tool 的回填上限
+	// 一起住在 limits.go 的共用常數區塊。
 	httpRequestTimeout = 30 * time.Second
-	// maxResponseBytes 限制回填給 LLM 的回應內文大小（資源佔用限制，需求 5.6）。
-	maxResponseBytes = 1 << 20 // 1 MiB
 )
 
 // httpTool 是內建 HTTP Tool（http_get、http_post）的共用實作：

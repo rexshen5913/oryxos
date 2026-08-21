@@ -13,11 +13,13 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
 }
 
-// newHTTPRegistry 建一個已顯式註冊全部內建 Tool（http_get、http_post）的 Registry。
+// newHTTPRegistry 建一個已顯式註冊全部內建 Tool（http_get、http_post、read_file）
+// 的 Registry。Workspace 是一個空的 t.TempDir()：這裡驗的是註冊與過濾，不碰檔案。
 func newHTTPRegistry(t *testing.T) *tool.Registry {
 	t.Helper()
+	root, _ := newWorkspace(t)
 	r := tool.NewRegistry()
-	if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(nil)); err != nil {
+	if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(tool.SandboxConfig{}), root); err != nil {
 		t.Fatalf("RegisterBuiltins: %v", err)
 	}
 	return r
@@ -25,7 +27,7 @@ func newHTTPRegistry(t *testing.T) *tool.Registry {
 
 func TestRegistryRegisterDuplicate(t *testing.T) {
 	r := newHTTPRegistry(t)
-	err := r.Register(tool.NewHTTPGet(tool.NewSandboxChecker(nil)))
+	err := r.Register(tool.NewHTTPGet(tool.NewSandboxChecker(tool.SandboxConfig{})))
 	if err == nil || !strings.Contains(err.Error(), "http_get") {
 		t.Errorf("重複註冊 http_get 應報名稱衝突錯誤, 實際 %v", err)
 	}
@@ -129,5 +131,22 @@ func TestRegistrySubset(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRegisterBuiltinsRejectsNilWorkspaceRoot 把「組裝點漏傳 Workspace root」從一次
+// **對話中途的 panic** 變成一次啟動錯誤。
+//
+// File Tool 一律經 *os.Root 開檔，而 RegisterBuiltins 新收的這個參數很容易漏傳。
+// nil 的話註冊會照樣成功，然後第一次 read_file 呼叫在 root.Lstat 裡解參考 nil
+// ——repo 裡沒有任何 recover()，那會直接殺掉 CLI。訊息指向組裝點，理由同 Subset
+// 對「自動加入的 Tool 未註冊」的既有措辭：那不是使用者的設定錯誤。
+func TestRegisterBuiltinsRejectsNilWorkspaceRoot(t *testing.T) {
+	err := tool.RegisterBuiltins(tool.NewRegistry(), tool.NewSandboxChecker(tool.SandboxConfig{}), nil)
+	if err == nil {
+		t.Fatal("wsRoot 為 nil 時應報錯，實際成功註冊——第一次 read_file 呼叫才會 panic")
+	}
+	if !strings.Contains(err.Error(), "組裝點") {
+		t.Errorf("錯誤訊息 %q 未指向組裝點", err.Error())
 	}
 }

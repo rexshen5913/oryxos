@@ -67,14 +67,35 @@ func newChatCmd() *cobra.Command {
 	return cmd
 }
 
+// sandboxConfig 把 config.yaml 的三段 Sandbox 設定搬成 internal/tool 的執行期形狀。
+//
+// 搬運集中在這一個函式，是因為 buildToolRegistry 有**兩個呼叫點**（chat 與 tools）：
+// 各自展開欄位的話，日後多一段設定就會有一邊漏掉，而兩個命令看到的可用 Tool 不一致
+// 正是 `oryxos tools` 最不該有的性質。
+//
+// 三段白名單都**不經 resolveEnv 展開**：那條路徑目前只用於 Provider 憑證與 MCP env，
+// 白名單不是憑證，不擴大它。
+func sandboxConfig(cfg *config.Config) tool.SandboxConfig {
+	return tool.SandboxConfig{
+		AllowedDomains:  cfg.HTTP.AllowedDomains,
+		AllowedPaths:    cfg.File.AllowedPaths,
+		AllowedCommands: cfg.Shell.AllowedCommands,
+		ShellTimeout:    cfg.Shell.EffectiveTimeout(),
+	}
+}
+
 // buildToolRegistry 顯式註冊這個 Workspace 的全部內建 Tool（憲法 2.3）：
-// internal/tool 自帶的 HTTP Tool，加上住在 internal/memory、需要 Workspace 路徑的
-// Memory Tool。每個組裝點都該經此函式取得 Registry——`oryxos init` 的預設 Profile
-// 已列出 save_memory，漏註冊會讓 stock Workspace 在 Subset 時直接啟動失敗。
-func buildToolRegistry(allowedDomains []string, longTerm *memory.LongTermMemory,
+// internal/tool 自帶的 HTTP Tool 與 File Tool，加上住在 internal/memory、需要
+// Workspace 路徑的 Memory Tool。每個組裝點都該經此函式取得 Registry——`oryxos init`
+// 的預設 Profile 已列出 save_memory，漏註冊會讓 stock Workspace 在 Subset 時直接
+// 啟動失敗。
+//
+// wsRoot 是 Workspace 的根：File Tool 一律經它開檔，能力因此界定在 Workspace 之內。
+// 它與長期記憶、Bootstrap 用的是**同一個** root，不另開一份。
+func buildToolRegistry(sandbox tool.SandboxConfig, wsRoot *os.Root, longTerm *memory.LongTermMemory,
 	skills core.ContextLoader, skillRefs []string) (*tool.Registry, error) {
 	registry := tool.NewRegistry()
-	if err := tool.RegisterBuiltins(registry, tool.NewSandboxChecker(allowedDomains)); err != nil {
+	if err := tool.RegisterBuiltins(registry, tool.NewSandboxChecker(sandbox), wsRoot); err != nil {
 		return nil, fmt.Errorf("組裝 Tool registry: %w", err)
 	}
 	for _, memTool := range []tool.OryxTool{memory.NewSaveMemoryTool(longTerm), memory.NewRecallMemoryTool(longTerm)} {
@@ -260,15 +281,17 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 		providerConfigs[name] = provider.Config{APIKey: pc.APIKey, BaseURL: pc.BaseURL}
 	}
 
-	// 長期記憶與 Bootstrap 的檔案操作都經此 root：越界（含經符號連結指到
-	// Workspace 之外）由 os.Root 擋下。這幾份 .md 隨 Workspace 進 git，一個惡意
-	// repo 若把它們做成指向使用者敏感檔案的符號連結，讀取端會把該檔內容注入
-	// system prompt 送往 Provider（MEMORY.md 的寫入端則會覆寫它）。
+	// 長期記憶、Bootstrap 與 File Tool 的檔案操作都經**同一個** root：越界（含經
+	// 符號連結指到 Workspace 之外）由 os.Root 擋下。這幾份 .md 隨 Workspace 進 git，
+	// 一個惡意 repo 若把它們做成指向使用者敏感檔案的符號連結，讀取端會把該檔內容
+	// 注入 system prompt 送往 Provider（MEMORY.md 的寫入端則會覆寫它）。
 	//
-	// 範圍僅止於這些 .md：上面的 logs/oryxos.log 與下面的 SQLite 仍各自開檔
-	// （SQLite 由驅動自己開，接不進 os.Root）。Workspace 級的路徑防護屬 Sandbox
-	// 職責（CONTEXT.md：核心階段做應用層的路徑／命令／域名白名單校驗），隨
-	// File Tool 那張統一處理。
+	// File Tool 在 os.Root 之上還有一道**應用層白名單**（file.allowed_paths，見
+	// internal/tool 的 SandboxChecker.CheckFilePath）：os.Root 界定的是「不出
+	// Workspace」，白名單界定的是「Workspace 之內能碰哪幾棵子樹」，兩者不互相取代。
+	//
+	// 範圍僅止於上述路徑：上面的 logs/oryxos.log 與下面的 SQLite 仍各自開檔
+	// （SQLite 由驅動自己開，接不進 os.Root）。
 	wsRoot, err := os.OpenRoot(ws)
 	if err != nil {
 		return fmt.Errorf("開啟 Workspace %s: %w", workspaceDir, err)
@@ -327,7 +350,7 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	longTerm := memory.NewLongTermMemory(wsRoot, filepath.Join("memory", memoryFile))
 
 	// Profile 的 tools 欄位過濾可用子集，引用未註冊的 Tool 在啟動即報清晰錯誤。
-	registry, err := buildToolRegistry(cfg.HTTP.AllowedDomains, longTerm, contextLoader, skillRefs)
+	registry, err := buildToolRegistry(sandboxConfig(cfg), wsRoot, longTerm, contextLoader, skillRefs)
 	if err != nil {
 		return err
 	}
@@ -371,6 +394,18 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	// 不硬報錯（純對話不受影響）。
 	if len(cfg.HTTP.AllowedDomains) == 0 && (slices.Contains(prof.Tools, "http_get") || slices.Contains(prof.Tools, "http_post")) {
 		fmt.Fprintf(out, "提醒：%s/config.yaml 的 http.allowed_domains 為空，HTTP Tool 呼叫將全部被攔截；請把允許的域名加入白名單。\n", workspaceDir)
+	}
+	// 路徑白名單同一條，理由也同一條：兩段白名單的預設值都是 []，少了這行使用者會
+	// 遇到「Tool 有了、每次呼叫都被攔」而不知道原因。
+	//
+	// **判斷「空」用的是校驗器自己的那一份，不是 slice 長度**：`allowed_paths: [""]`
+	// 或寫成絕對路徑的條目在校驗器眼中都不存在（見 tool.EffectiveAllowedPaths），
+	// 只數長度會把它們當成「已配置」而閉嘴——而那正是最需要這行提醒的情形：使用者
+	// 覺得自己照著錯誤訊息把目錄加進去了，卻還是每次被攔。
+	//
+	// write_file 與 list_dir 落地後（ticket #31、#32）把它們的名字一起列進這個判斷。
+	if len(tool.EffectiveAllowedPaths(cfg.File.AllowedPaths)) == 0 && slices.Contains(prof.Tools, tool.ReadFileToolName) {
+		fmt.Fprintf(out, "提醒：%s/config.yaml 的 file.allowed_paths 為空，File Tool 呼叫將全部被攔截；請把允許的路徑加入白名單。\n", workspaceDir)
 	}
 
 	// 對話與審計落 Workspace 內單一 SQLite 檔：備份或搬遷 Workspace 就是搬檔案。

@@ -9,6 +9,9 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/rexshen5913/oryxos/internal/config"
+	"github.com/rexshen5913/oryxos/internal/tool"
 )
 
 // runInit 在 dir 下執行 `oryxos init`，回傳合併的輸出與錯誤。
@@ -283,4 +286,47 @@ func providerNameOf(t *testing.T, profile string) string {
 	}
 	t.Fatalf("Profile 模板找不到 provider.name，實際內容：\n%s", profile)
 	return ""
+}
+
+// TestInitFileSectionTemplate 釘住 init 產出的 file 段：既有註解引導使用者，又要能
+// 被**自己的載入器**讀出來，而且解出來的語義與註解描述的一致。
+//
+// prior art 是 TestInitMcpServersTemplate。「只斷言檔案裡有那幾行字」不算通過——
+// 一份縮排寫錯的模板照樣含有那幾個字串，卻會讓每個新 Workspace 一啟動就報錯，而那
+// 是 init 自己造出來的。所以這裡把產物真的餵回 config.Load，再把解出來的白名單餵給
+// 真正在用它的 SandboxChecker，驗「預設全部拒絕」那句註解是真的。
+func TestInitFileSectionTemplate(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := runInit(t, dir); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	path := filepath.Join(dir, ".oryxos", "config.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("讀取 config.yaml: %v", err)
+	}
+	// 註解要說清楚兩件使用者一定會踩到的事：基準是 Workspace 根、預設全部拒絕。
+	for _, want := range []string{"file:", "allowed_paths: []", "Workspace", "拒絕"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("config.yaml 的 file 段缺少 %q，實際內容：\n%s", want, data)
+		}
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("init 產出的 config.yaml 讀不進來: %v", err)
+	}
+	if len(cfg.File.AllowedPaths) != 0 {
+		t.Fatalf("模板的 allowed_paths = %v, 期望空清單（預設全部拒絕）", cfg.File.AllowedPaths)
+	}
+
+	// 「預設全部拒絕」不是模板註解的一句話而已：把解出來的白名單交給真正在用它的
+	// 校驗器，任何路徑都必須被擋下。
+	checker := tool.NewSandboxChecker(sandboxConfig(cfg))
+	for _, p := range []string{"notes/todo.md", "config.yaml", "."} {
+		if _, err := checker.CheckFilePath(p); !errors.Is(err, tool.ErrSandboxViolation) {
+			t.Errorf("stock Workspace 對 %q 的校驗 = %v, 期望 SandboxViolation（空白名單全拒）", p, err)
+		}
+	}
 }

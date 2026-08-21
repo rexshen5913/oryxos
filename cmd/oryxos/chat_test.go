@@ -277,6 +277,158 @@ func TestChatEmptyWhitelistWarning(t *testing.T) {
 	}
 }
 
+// TestChatEmptyFilePathWhitelistWarning 是同一條提醒的第二種（路徑白名單），形狀比照
+// 上面那條 http.allowed_domains 的。
+//
+// 沒有這一行，使用者會遇到「Tool 有了、每次呼叫都被攔」而完全不知道原因——而兩段
+// 白名單出廠就是空的，所以這是 out-of-box 一定會走到的路徑。
+//
+// **警告而非 fail fast**：空白名單是安全的預設，純對話（沒列 File Tool 的 Profile）
+// 完全不受影響，不該因此起不來。三格分別驗：該警告時警告、配置好了就閉嘴、Profile
+// 沒列 File Tool 時也閉嘴。
+// 這三段用 raw string 而不是塞滿跳脫字元的單行：它們的重點就是 YAML 裡那個
+// 「看起來有寫、其實等於沒寫」的條目，寫成 \"\" 反而看不出在測什麼。
+const fileSectionEmptyStringEntry = `file:
+  allowed_paths:
+    - ""
+`
+
+const fileSectionBlankEntry = `file:
+  allowed_paths:
+    - "   "
+`
+
+const fileSectionBlankAndValidEntry = `file:
+  allowed_paths:
+    - ""
+    - notes
+`
+
+const fileSectionAbsoluteEntry = `file:
+  allowed_paths:
+    - /Users/someone/notes
+`
+
+const fileSectionEscapingEntry = `file:
+  allowed_paths:
+    - ../shared
+`
+
+func TestChatEmptyFilePathWhitelistWarning(t *testing.T) {
+	const profileWithReadFile = `identity:
+  agent_name: Oryx
+  prompt: 你是 Oryx。
+provider:
+  name: openrouter
+  model: deepseek/deepseek-v4-flash
+tools:
+  - read_file
+`
+	const profileWithoutFileTool = `identity:
+  agent_name: Oryx
+  prompt: 你是 Oryx。
+provider:
+  name: openrouter
+  model: deepseek/deepseek-v4-flash
+tools: []
+`
+	tests := []struct {
+		name string
+		// fileSection 是 config.yaml 的整段 file 設定；空字串代表這份 config.yaml
+		// **根本沒有這一段**（既有 Workspace 的形態）。
+		fileSection string
+		profile     string
+		wantWarn    bool
+	}{
+		{
+			name:        "空白名單且 Profile 列了 File Tool 時警示",
+			fileSection: "file:\n  allowed_paths: []\n",
+			profile:     profileWithReadFile,
+			wantWarn:    true,
+		},
+		{
+			// 免遷移的錨點：既有 Workspace 的 config.yaml 沒有 file 段，啟動照常成功、
+			// 視為空白名單（於是同樣印那行提醒），不需要任何遷移動作。
+			name:        "缺 file 段時視為空白名單、照常啟動",
+			fileSection: "",
+			profile:     profileWithReadFile,
+			wantWarn:    true,
+		},
+		{
+			// 「有效條目」與「切片長度」是兩件事：只寫了一條空字串的白名單，校驗器
+			// 眼中仍然是空的（那條條目放行不了任何路徑），所以提醒照樣要出現。
+			// 只看長度的話使用者會遇到「Tool 有了、每次呼叫都被攔」而毫無線索——
+			// 正是這行提醒存在的理由。
+			name:        "白名單只有一條空字串時仍要警示",
+			fileSection: fileSectionEmptyStringEntry,
+			profile:     profileWithReadFile,
+			wantWarn:    true,
+		},
+		{
+			name:        "白名單只有純空白條目時仍要警示",
+			fileSection: fileSectionBlankEntry,
+			profile:     profileWithReadFile,
+			wantWarn:    true,
+		},
+		{
+			// 同一類的第二種形態：條目寫成絕對路徑。白名單的基準是 Workspace 根，
+			// 絕對條目永遠比不中任何請求路徑——使用者「照著錯誤訊息把目錄加進去了」
+			// 卻還是每次被攔，是最難自己查出來的一種。
+			name:        "白名單條目是絕對路徑時仍要警示",
+			fileSection: fileSectionAbsoluteEntry,
+			profile:     profileWithReadFile,
+			wantWarn:    true,
+		},
+		{
+			name:        "白名單條目穿越出 Workspace 時仍要警示",
+			fileSection: fileSectionEscapingEntry,
+			profile:     profileWithReadFile,
+			wantWarn:    true,
+		},
+		{
+			name:        "已配置白名單不警示",
+			fileSection: "file:\n  allowed_paths: [notes]\n",
+			profile:     profileWithReadFile,
+			wantWarn:    false,
+		},
+		{
+			// 對照：混了一條空白條目，但有一條真的路徑，就不該再喊。
+			name:        "白名單含空白條目但也有有效條目時不警示",
+			fileSection: fileSectionBlankAndValidEntry,
+			profile:     profileWithReadFile,
+			wantWarn:    false,
+		},
+		{
+			name:        "Profile 沒列 File Tool 時不警示（純對話不受影響）",
+			fileSection: "file:\n  allowed_paths: []\n",
+			profile:     profileWithoutFileTool,
+			wantWarn:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newReplayServer(t, readFixture(t, "chat_reply_1.json"))
+			dir := setupChatWorkspace(t, srv.URL)
+			writeProfile(t, dir, tt.profile)
+			cfg := "providers:\n  openrouter:\n    api_key: ${OPENROUTER_API_KEY}\n    base_url: " + srv.URL +
+				"\nhttp:\n  allowed_domains: []\n" + tt.fileSection
+			if err := os.WriteFile(filepath.Join(dir, workspaceDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := runChat(context.Background(), strings.NewReader(""), &out, dir, chatOptions{profileName: "default", message: "你好"}); err != nil {
+				t.Fatalf("runChat: %v", err)
+			}
+			warned := strings.Contains(out.String(), "allowed_paths")
+			if warned != tt.wantWarn {
+				t.Errorf("警示出現 = %v, 期望 %v; 輸出: %q", warned, tt.wantWarn, out.String())
+			}
+		})
+	}
+}
+
 // TestChatStartupValidationFailsBeforeAnyTurn 釘住「**啟動**即報錯」這件事本身：
 // 不送任何訊息（stdin 直接 EOF）時仍要報錯。
 //

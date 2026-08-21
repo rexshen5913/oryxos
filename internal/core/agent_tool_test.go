@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -38,8 +39,21 @@ func newToolAgent(t *testing.T, baseURL string, profile *core.Profile, subset, a
 func newToolAgentOn(t *testing.T, baseURL string, profile *core.Profile, subset, allowed []string,
 	logger *slog.Logger, st *testStore, extra ...tool.OryxTool) *core.AgentService {
 	t.Helper()
+	// 不關心檔案的測試拿到一個空的 Workspace：File Tool 照樣註冊（它是內建 Tool，
+	// 這條鏈路不因為某個測試不用它就少一段），只是白名單為空、全部拒絕。
+	root, _ := newTestWorkspace(t)
+	return newToolAgentIn(t, baseURL, profile, subset,
+		tool.SandboxConfig{AllowedDomains: allowed}, root, logger, st, extra...)
+}
+
+// newToolAgentIn 是 newToolAgentOn 的完整形式：Sandbox 三段設定與 Workspace 根都由
+// 呼叫端給。File Tool 的測試走這條——它要一個**真的**放了檔案的 Workspace。
+func newToolAgentIn(t *testing.T, baseURL string, profile *core.Profile, subset []string,
+	sandbox tool.SandboxConfig, root *os.Root, logger *slog.Logger, st *testStore,
+	extra ...tool.OryxTool) *core.AgentService {
+	t.Helper()
 	r := tool.NewRegistry()
-	if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(allowed)); err != nil {
+	if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(sandbox), root); err != nil {
 		t.Fatalf("RegisterBuiltins: %v", err)
 	}
 	for _, et := range extra {

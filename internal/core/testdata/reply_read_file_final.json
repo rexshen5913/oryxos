@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-read-file-2",
+  "object": "chat.completion",
+  "created": 1722926101,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "notes/todo.md 裡寫著一件事：把 read_file 接進 ReAct 循環。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 205,
+    "completion_tokens": 26,
+    "total_tokens": 231
+  }
+}

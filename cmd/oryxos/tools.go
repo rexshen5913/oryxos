@@ -99,7 +99,7 @@ func runTools(ctx context.Context, out io.Writer, baseDir string, opts toolsOpti
 		return fmt.Errorf("Profile %s 的 skills 校驗失敗: %w", prof.Name, err)
 	}
 	longTerm := memory.NewLongTermMemory(wsRoot, filepath.Join("memory", memoryFile))
-	registry, err := buildToolRegistry(cfg.HTTP.AllowedDomains, longTerm,
+	registry, err := buildToolRegistry(sandboxConfig(cfg), wsRoot, longTerm,
 		config.NewContextLoader(wsRoot), skillRefs)
 	if err != nil {
 		return err

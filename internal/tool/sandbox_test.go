@@ -2,6 +2,7 @@ package tool_test
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -94,7 +95,7 @@ func TestSandboxCheckerCheckHTTPURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tool.NewSandboxChecker(tt.allowed).CheckHTTPURL(tt.url)
+			err := tool.NewSandboxChecker(tool.SandboxConfig{AllowedDomains: tt.allowed}).CheckHTTPURL(tt.url)
 			if tt.wantViolation {
 				if !errors.Is(err, tool.ErrSandboxViolation) {
 					t.Errorf("CheckHTTPURL(%q) = %v, 期望 SandboxViolation", tt.url, err)
@@ -115,7 +116,7 @@ func TestSandboxViolationErrorOmitsQuery(t *testing.T) {
 		"ftp://example.com/x?api_key=" + secret, // scheme 拒絕
 		"://bad?api_key=" + secret,              // 無法解析
 	}
-	checker := tool.NewSandboxChecker([]string{"trusted.example.com"})
+	checker := tool.NewSandboxChecker(tool.SandboxConfig{AllowedDomains: []string{"trusted.example.com"}})
 	for _, u := range urls {
 		err := checker.CheckHTTPURL(u)
 		if !errors.Is(err, tool.ErrSandboxViolation) {
@@ -124,5 +125,234 @@ func TestSandboxViolationErrorOmitsQuery(t *testing.T) {
 		if strings.Contains(err.Error(), secret) {
 			t.Errorf("CheckHTTPURL(%q) 錯誤訊息洩漏 query: %q", u, err.Error())
 		}
+	}
+}
+
+// TestSandboxCheckerCheckFilePath 是路徑白名單的拒絕矩陣：解析基準固定為 Workspace
+// 根，先標準化再比對，比對是**子樹包含**而不是字串前綴，空白名單全部拒絕。
+//
+// 這裡只涵蓋**應用層白名單**這一道防線——它是純字串判斷，不碰檔案系統。符號連結、
+// 檔案型別那幾格屬開檔層的把關，由 file_test.go 以真實檔案覆蓋（兩道防線分工明確、
+// 不互相取代）。
+//
+// 放行的格子一併斷言回傳的標準化路徑：那份結果會被拿去 os.Root 開檔，回一個沒清乾淨
+// 的字串等於把 `../` 留到下一站才處理。
+func TestSandboxCheckerCheckFilePath(t *testing.T) {
+	tests := []struct {
+		name          string
+		allowed       []string
+		path          string
+		wantRel       string // 期望放行時回傳的標準化路徑
+		wantViolation bool
+	}{
+		{
+			name:    "白名單內的相對路徑放行",
+			allowed: []string{"notes"},
+			path:    "notes/todo.md",
+			wantRel: filepath.Join("notes", "todo.md"),
+		},
+		{
+			name:    "白名單條目本身就是目標時放行",
+			allowed: []string{"notes/todo.md"},
+			path:    "notes/todo.md",
+			wantRel: filepath.Join("notes", "todo.md"),
+		},
+		{
+			name:    "多層子目錄仍在子樹內",
+			allowed: []string{"docs"},
+			path:    "docs/a/b/c.md",
+			wantRel: filepath.Join("docs", "a", "b", "c.md"),
+		},
+		{
+			name:    "無害的 ./ 與重複斜線標準化後放行",
+			allowed: []string{"notes"},
+			path:    "./notes//todo.md",
+			wantRel: filepath.Join("notes", "todo.md"),
+		},
+		{
+			name:    "白名單條目為 . 時整個 Workspace 都在子樹內",
+			allowed: []string{"."},
+			path:    "anything/x.md",
+			wantRel: filepath.Join("anything", "x.md"),
+		},
+		{
+			name:          "白名單外的路徑拒絕",
+			allowed:       []string{"notes"},
+			path:          "secrets/api.txt",
+			wantViolation: true,
+		},
+		{
+			// 這是這個檢查存在的理由，不是邊角案例：`../` 必須在比對**之前**解掉，
+			// 否則 notes/../secrets 會因為開頭是 notes 而被放行。
+			name:          "../ 穿越出白名單後拒絕",
+			allowed:       []string{"notes"},
+			path:          "notes/../secrets/api.txt",
+			wantViolation: true,
+		},
+		{
+			name:          "../ 穿越出 Workspace 拒絕",
+			allowed:       []string{"notes"},
+			path:          "notes/../../etc/passwd",
+			wantViolation: true,
+		},
+		{
+			name:          "純 .. 拒絕",
+			allowed:       []string{"."},
+			path:          "..",
+			wantViolation: true,
+		},
+		{
+			name:          "絕對路徑拒絕",
+			allowed:       []string{"notes"},
+			path:          "/etc/passwd",
+			wantViolation: true,
+		},
+		{
+			// 比對是子樹包含不是字串前綴：work 不得放行 workspace-secrets/x。
+			name:          "子樹前綴的假匹配不放行（work vs workspace-secrets）",
+			allowed:       []string{"work"},
+			path:          "workspace-secrets/x",
+			wantViolation: true,
+		},
+		{
+			// 同一個假匹配的多層形態。白名單的基準是 Workspace 根，所以 spec 舉的
+			// /tmp/foo 對 /tmp/foobar 在這裡的對應形態是 tmp/foo 對 tmp/foobar
+			// ——絕對路徑本身另有一格擋下。
+			name:          "子樹前綴的假匹配不放行（tmp/foo vs tmp/foobar）",
+			allowed:       []string{"tmp/foo"},
+			path:          "tmp/foobar/x",
+			wantViolation: true,
+		},
+		{
+			name:          "空白名單全部拒絕",
+			allowed:       nil,
+			path:          "notes/todo.md",
+			wantViolation: true,
+		},
+		{
+			// 白名單裡的空字串條目標準化後會變成 `.`（＝整個 Workspace）。那是使用者
+			// 寫了一條沒有意義的設定，不該被解讀成「全部放行」。
+			name:          "白名單裡的空字串條目不放行任何路徑",
+			allowed:       []string{""},
+			path:          "secrets/api.txt",
+			wantViolation: true,
+		},
+		{
+			name:          "白名單裡的純空白條目不放行任何路徑",
+			allowed:       []string{"   "},
+			path:          "notes/todo.md",
+			wantViolation: true,
+		},
+		{
+			// 條目寫成絕對路徑：基準是 Workspace 根，兩邊永遠對不上。
+			name:          "白名單條目是絕對路徑時不放行",
+			allowed:       []string{"/Users/someone/notes"},
+			path:          "notes/todo.md",
+			wantViolation: true,
+		},
+		{
+			name:          "白名單條目穿越出 Workspace 時不放行",
+			allowed:       []string{"../shared"},
+			path:          "shared/x.md",
+			wantViolation: true,
+		},
+		{
+			// 對照：混了無效條目，但有一條有效的，那一條照樣生效。
+			name:    "無效條目不影響同一份白名單裡有效的那條",
+			allowed: []string{"", "/abs/notes", "notes"},
+			path:    "notes/todo.md",
+			wantRel: filepath.Join("notes", "todo.md"),
+		},
+		{
+			name:          "空路徑拒絕",
+			allowed:       []string{"."},
+			path:          "",
+			wantViolation: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checker := tool.NewSandboxChecker(tool.SandboxConfig{AllowedPaths: tt.allowed})
+			rel, err := checker.CheckFilePath(tt.path)
+			if tt.wantViolation {
+				if !errors.Is(err, tool.ErrSandboxViolation) {
+					t.Fatalf("CheckFilePath(%q) = %q, %v, 期望 SandboxViolation", tt.path, rel, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CheckFilePath(%q) = %v, 期望放行", tt.path, err)
+			}
+			if rel != tt.wantRel {
+				t.Errorf("CheckFilePath(%q) 回傳 %q, 期望標準化為 %q", tt.path, rel, tt.wantRel)
+			}
+		})
+	}
+}
+
+// TestSandboxFilePathErrorIsActionableAndNarrow 驗證拒絕訊息**可行動**又**不多話**：
+// 它要指出使用者該改哪一段設定（沒有這句，使用者只會看到「被拒絕」卻不知往哪加），
+// 但不得把白名單其餘條目一起倒出來——訊息會落日誌、也會回填給 LLM，那等於把這個
+// Workspace 允許的其他路徑一併交出去。形狀沿用 TestSandboxViolationErrorOmitsQuery。
+func TestSandboxFilePathErrorIsActionableAndNarrow(t *testing.T) {
+	const otherEntry = "internal/private-notes"
+	checker := tool.NewSandboxChecker(tool.SandboxConfig{AllowedPaths: []string{"notes", otherEntry}})
+
+	_, err := checker.CheckFilePath("secrets/api.txt")
+	if !errors.Is(err, tool.ErrSandboxViolation) {
+		t.Fatalf("CheckFilePath = %v, 期望 SandboxViolation", err)
+	}
+	if !strings.Contains(err.Error(), "file.allowed_paths") {
+		t.Errorf("錯誤訊息沒告訴使用者要改哪段設定: %q", err.Error())
+	}
+	if strings.Contains(err.Error(), otherEntry) {
+		t.Errorf("錯誤訊息洩漏了白名單的其他條目: %q", err.Error())
+	}
+}
+
+// TestEffectiveAllowedPaths 釘住「白名單是不是空的」那個**單一定義點**。
+//
+// 這個函式有兩個消費者：SandboxChecker 拿它決定要比對哪些子樹，組裝點拿它決定要不要
+// 印空白名單的啟動提醒。兩邊必須得到同一個答案——否則會出現最難查的那種失敗：
+// 系統一句話都不說，而每一次 read_file 呼叫都被攔。
+func TestEffectiveAllowedPaths(t *testing.T) {
+	tests := []struct {
+		name    string
+		entries []string
+		want    []string
+	}{
+		{name: "nil 白名單", entries: nil, want: nil},
+		{name: "空切片", entries: []string{}, want: nil},
+		{name: "空字串條目等於沒寫", entries: []string{""}, want: nil},
+		{name: "純空白條目等於沒寫", entries: []string{" ", "\t"}, want: nil},
+		{name: "絕對路徑條目永遠比不中", entries: []string{"/Users/someone/notes"}, want: nil},
+		{name: "穿越出 Workspace 的條目永遠比不中", entries: []string{"../shared", ".."}, want: nil},
+		{name: "一般條目標準化後保留", entries: []string{"./notes/", "docs//public"},
+			want: []string{"notes", filepath.Join("docs", "public")}},
+		{name: "Workspace 根本身是合法條目", entries: []string{"."}, want: []string{"."}},
+		{name: "無效與有效條目混在一起時只留有效的",
+			entries: []string{"", "/abs", "../x", "notes"}, want: []string{"notes"}},
+		{
+			// 只有「trim 後為空」才算沒寫：條目前後真的帶空白時原樣保留，因為檔名
+			// 前後本來就可以有空白，替使用者猜會讓那種路徑永遠碰不到。
+			name:    "前後帶空白的條目原樣保留，不替使用者 trim",
+			entries: []string{"  notes  "},
+			want:    []string{"  notes  "},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tool.EffectiveAllowedPaths(tt.entries)
+			if len(got) != len(tt.want) {
+				t.Fatalf("EffectiveAllowedPaths(%q) = %q, 期望 %q", tt.entries, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("EffectiveAllowedPaths(%q)[%d] = %q, 期望 %q", tt.entries, i, got[i], tt.want[i])
+				}
+			}
+		})
 	}
 }

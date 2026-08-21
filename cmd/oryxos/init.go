@@ -128,7 +128,17 @@ settings:
   max_history_turns: 20   # 對話歷史保留的近期輪數
 `
 
-// workspaceConfigTemplate 是 Workspace 設定檔：Provider 憑證與 HTTP Tool 域名白名單。
+// workspaceConfigTemplate 是 Workspace 設定檔：Provider 憑證，加上 Sandbox 的域名與
+// 路徑白名單。
+//
+// **兩段白名單都預填 `[]`**（全部拒絕），與既有的 http.allowed_domains 完全同構：
+// 模板給範例註解，程式碼沒有隱含放行。
+//
+// 考慮過把 file.allowed_paths 預填成整個 Workspace 取「開箱可用」，**不採納**：那之下
+// Agent 讀得到 config.yaml（含 base_url 與 ${ENV_VAR} 佔位）、profiles/*.yaml（自己的
+// 配置）與 memory/MEMORY.md，而後續的 write_file 更能改寫它們——**Agent 能改自己的
+// Profile** 是一個不該預設開啟的性質。收益則近乎零：預設 Profile 根本不列 File Tool，
+// 預填的白名單在使用者主動加 Tool 之前完全用不到。
 const workspaceConfigTemplate = `# OryxOS Workspace 設定檔。
 # 敏感值一律以 ${ENV_VAR} 佔位，載入時從環境變數解析，不明文落檔。
 providers:
@@ -143,6 +153,19 @@ http:
   # HTTP Tool（http_get、http_post）只能存取白名單內的域名，預設全部拒絕。
   # 範例： - api.example.com
   allowed_domains: []
+
+file:
+  # File Tool（read_file）只能存取白名單內的路徑，預設全部拒絕。
+  #
+  # 每條都是**相對這個 Workspace（.oryxos/）根**的路徑，不是相對你執行 oryxos 的目錄
+  # ——同一份設定在哪裡跑，允許範圍都一樣。標準化後必須落在其中一條的子樹之內：
+  # 白名單寫 work 不會放行 workspace-secrets。
+  #
+  # 一律拒絕的三種：絕對路徑、用 ../ 穿越出白名單或 Workspace、路徑上任何一段是
+  # 符號連結（不跟隨，也不解析後比對）。能力界定在 Workspace 之內。
+  #
+  # 範例： - notes
+  allowed_paths: []
 `
 
 // mcpServersExample 是宣告檔模板裡那段範例的**原始 YAML**。

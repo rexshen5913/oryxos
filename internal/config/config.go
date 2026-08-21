@@ -5,14 +5,18 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-// Config 是 Workspace 設定檔的內容：Provider 憑證與 HTTP Tool 域名白名單。
+// Config 是 Workspace 設定檔的內容：Provider 憑證，加上 Sandbox 三組白名單
+// （HTTP 域名、File 路徑、Shell 命令）。
 type Config struct {
 	Providers map[string]ProviderConfig `yaml:"providers"`
 	HTTP      HTTPConfig                `yaml:"http"`
+	File      FileConfig                `yaml:"file"`
+	Shell     ShellConfig               `yaml:"shell"`
 }
 
 // ProviderConfig 是單一 Provider 的連線配置；BaseURL 為空時用 OpenAI 官方端點。
@@ -24,6 +28,43 @@ type ProviderConfig struct {
 // HTTPConfig 是 HTTP Tool 的域名白名單，SandboxChecker 據此做執行前校驗。
 type HTTPConfig struct {
 	AllowedDomains []string `yaml:"allowed_domains"`
+}
+
+// FileConfig 是 File Tool 的路徑白名單，SandboxChecker 據此做執行前校驗。
+//
+// 每條都是**相對 Workspace 根**的路徑：標準化後必須落在其中一條的子樹內。基準固定
+// 在 Workspace 根而不是進程當下的工作目錄——否則同一份 config.yaml 在不同目錄下跑
+// 會有不同的允許範圍，那是白名單最不該有的性質。
+//
+// 空清單（含整段省略）即**全部拒絕**，既有 Workspace 因此免遷移。
+type FileConfig struct {
+	AllowedPaths []string `yaml:"allowed_paths"`
+}
+
+// ShellConfig 是 Shell Tool 的命令白名單與超時上限。
+//
+// 白名單比對的是程式名的**字面完全匹配**，不做萬用字元、不做 basename 正規化；
+// 空清單即全部拒絕，語義與上面兩段一致。
+//
+// 多出來的 timeout_seconds 與 HTTPConfig 不對稱是**刻意的**：命令執行時間的離散度
+// 遠大於 HTTP 請求（`go test` 對 `curl`），使用者不該為了跑一個慢命令去改程式碼重編。
+type ShellConfig struct {
+	AllowedCommands []string `yaml:"allowed_commands"`
+	TimeoutSeconds  int      `yaml:"timeout_seconds"`
+}
+
+// defaultShellTimeout 是 shell.timeout_seconds 省略時的超時上限，與 HTTP Tool 的
+// 請求超時（internal/tool 的 httpRequestTimeout）對齊。
+const defaultShellTimeout = 30 * time.Second
+
+// EffectiveTimeout 回傳單次命令的超時上限，零值（含負值）回退預設。形狀沿用
+// core.Settings.effectiveMaxIterations：既有 Workspace 的 config.yaml 根本沒有這一欄，
+// 要免遷移就不能讓「沒寫」變成啟動失敗。
+func (c ShellConfig) EffectiveTimeout() time.Duration {
+	if c.TimeoutSeconds <= 0 {
+		return defaultShellTimeout
+	}
+	return time.Duration(c.TimeoutSeconds) * time.Second
 }
 
 // envPlaceholder 匹配 ${ENV_VAR} 佔位符。

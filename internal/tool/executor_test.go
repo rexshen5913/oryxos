@@ -22,7 +22,7 @@ func TestExecutorInvocationLog(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	checker := tool.NewSandboxChecker([]string{hostOf(t, srv.URL)})
+	checker := tool.NewSandboxChecker(tool.SandboxConfig{AllowedDomains: []string{hostOf(t, srv.URL)}})
 	r := tool.NewRegistry()
 	if err := r.Register(tool.NewHTTPGet(checker)); err != nil {
 		t.Fatal(err)
@@ -126,7 +126,8 @@ func TestExecutorArgsSummaryRedacted(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// 未指定白名單的案例全拒：執行必失敗，但日誌照落。
 			r := tool.NewRegistry()
-			if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(tt.allowed)); err != nil {
+			root, _ := newWorkspace(t)
+			if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(tool.SandboxConfig{AllowedDomains: tt.allowed}), root); err != nil {
 				t.Fatal(err)
 			}
 			var buf bytes.Buffer

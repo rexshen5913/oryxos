@@ -9,6 +9,7 @@ package tool
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -26,7 +27,16 @@ import (
 // server 名打錯或記錯，需要看到的正是「有哪些 server」。
 func TestSubsetErrorListsAvailableTools(t *testing.T) {
 	registry := NewRegistry()
-	if err := RegisterBuiltins(registry, NewSandboxChecker(nil)); err != nil {
+	wsRoot, rootErr := os.OpenRoot(t.TempDir())
+	if rootErr != nil {
+		t.Fatalf("OpenRoot: %v", rootErr)
+	}
+	t.Cleanup(func() {
+		if cerr := wsRoot.Close(); cerr != nil {
+			t.Errorf("關閉 Workspace root: %v", cerr)
+		}
+	})
+	if err := RegisterBuiltins(registry, NewSandboxChecker(SandboxConfig{}), wsRoot); err != nil {
 		t.Fatalf("RegisterBuiltins: %v", err)
 	}
 	svc, err := ConnectMcpServers(context.Background(), registry, []core.McpServerSpec{

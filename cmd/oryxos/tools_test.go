@@ -48,7 +48,9 @@ func TestToolsListsEverythingWritableIntoProfile(t *testing.T) {
 	}
 	// 內建 Tool、Memory Tool、原生 Go Tool 示例都在同一個 Registry，一起列才回答得了
 	// 「tools 可以寫什麼」。
-	for _, want := range []string{"http_get", "save_memory", "recall_memory", "text_stats", "load_skill"} {
+	// read_file 在這裡不需要任何額外接線：它經 RegisterBuiltins 進同一個 Registry，
+	// 於是自動被列出來——「新的內建 Tool 不另闢鏈路」這句話的斷言就是這一格。
+	for _, want := range []string{"http_get", "read_file", "save_memory", "recall_memory", "text_stats", "load_skill"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("輸出沒有內建 Tool %s:\n%s", want, got)
 		}

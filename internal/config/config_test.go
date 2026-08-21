@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rexshen5913/oryxos/internal/config"
 )
@@ -54,6 +55,52 @@ func TestLoad(t *testing.T) {
 					t.Errorf("allowed_domains = %v", cfg.HTTP.AllowedDomains)
 				}
 			},
+		},
+		{
+			name: "file 與 shell 兩段原樣載入",
+			yaml: "file:\n  allowed_paths:\n    - notes\n    - docs/public\nshell:\n  allowed_commands:\n    - echo\n  timeout_seconds: 5\n",
+			check: func(t *testing.T, cfg *config.Config) {
+				if len(cfg.File.AllowedPaths) != 2 || cfg.File.AllowedPaths[0] != "notes" || cfg.File.AllowedPaths[1] != "docs/public" {
+					t.Errorf("allowed_paths = %v", cfg.File.AllowedPaths)
+				}
+				if len(cfg.Shell.AllowedCommands) != 1 || cfg.Shell.AllowedCommands[0] != "echo" {
+					t.Errorf("allowed_commands = %v", cfg.Shell.AllowedCommands)
+				}
+				if cfg.Shell.TimeoutSeconds != 5 {
+					t.Errorf("timeout_seconds = %d, 期望 5", cfg.Shell.TimeoutSeconds)
+				}
+			},
+		},
+		{
+			// 免遷移的錨點：既有 Workspace 的 config.yaml 沒有這兩段，載入照常成功，
+			// 兩組白名單都是空的 nil 切片——空白名單即全部拒絕（deny by default）。
+			name: "缺 file／shell 段照常載入，白名單為空",
+			yaml: "providers:\n  openai:\n    api_key: k\n",
+			check: func(t *testing.T, cfg *config.Config) {
+				if len(cfg.File.AllowedPaths) != 0 {
+					t.Errorf("allowed_paths = %v, 期望空", cfg.File.AllowedPaths)
+				}
+				if len(cfg.Shell.AllowedCommands) != 0 {
+					t.Errorf("allowed_commands = %v, 期望空", cfg.Shell.AllowedCommands)
+				}
+			},
+		},
+		{
+			// 白名單不是憑證，不走 ${ENV_VAR} 展開那條路徑（那條目前只用於 Provider
+			// 憑證與 MCP env）。寫了佔位符就是那串字面值，不會變成環境變數的值。
+			name: "白名單裡的 ${ENV_VAR} 不展開",
+			yaml: "file:\n  allowed_paths:\n    - ${TEST_ORYX_HOME}/notes\n",
+			env:  map[string]string{"TEST_ORYX_HOME": "/home/u"},
+			check: func(t *testing.T, cfg *config.Config) {
+				if got := cfg.File.AllowedPaths[0]; got != "${TEST_ORYX_HOME}/notes" {
+					t.Errorf("allowed_paths[0] = %q, 期望佔位符原樣留著（白名單不是憑證）", got)
+				}
+			},
+		},
+		{
+			name:    "allowed_paths 寫成字串而非清單時啟動即報錯",
+			yaml:    "file:\n  allowed_paths: notes\n",
+			wantErr: "解析 Workspace 設定檔",
 		},
 		{
 			name:    "非法 YAML",
@@ -174,4 +221,30 @@ func TestExpandProviderEnv(t *testing.T) {
 			t.Errorf("傳進去的那份被改成了 %q——「檔案裡寫了什麼」與「展開後是什麼」該分得開", got)
 		}
 	})
+}
+
+// TestShellConfigEffectiveTimeout 是 shell.timeout_seconds 的三態回退矩陣，形狀沿用
+// core.Settings.effectiveMaxIterations：填了正值就用它，零值與負值一律回退預設。
+//
+// 回退而不是報錯：既有 Workspace 的 config.yaml 根本沒有這一欄（零值），要免遷移就
+// 不能讓「沒寫」變成啟動失敗。
+func TestShellConfigEffectiveTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		seconds int
+		want    time.Duration
+	}{
+		{name: "正值照用", seconds: 5, want: 5 * time.Second},
+		{name: "零值回退預設", seconds: 0, want: 30 * time.Second},
+		{name: "負值回退預設", seconds: -1, want: 30 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := config.ShellConfig{TimeoutSeconds: tt.seconds}.EffectiveTimeout()
+			if got != tt.want {
+				t.Errorf("EffectiveTimeout() = %v, 期望 %v", got, tt.want)
+			}
+		})
+	}
 }

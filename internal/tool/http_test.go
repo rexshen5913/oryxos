@@ -35,7 +35,7 @@ func TestHTTPGet(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	get := tool.NewHTTPGet(tool.NewSandboxChecker([]string{hostOf(t, srv.URL)}))
+	get := tool.NewHTTPGet(tool.NewSandboxChecker(tool.SandboxConfig{AllowedDomains: []string{hostOf(t, srv.URL)}}))
 	result := get.Execute(context.Background(), `{"url":"`+srv.URL+`/weather?city=beijing"}`)
 
 	if !result.OK {
@@ -57,7 +57,7 @@ func TestHTTPGetNon2xx(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	get := tool.NewHTTPGet(tool.NewSandboxChecker([]string{hostOf(t, srv.URL)}))
+	get := tool.NewHTTPGet(tool.NewSandboxChecker(tool.SandboxConfig{AllowedDomains: []string{hostOf(t, srv.URL)}}))
 	result := get.Execute(context.Background(), `{"url":"`+srv.URL+`/nope"}`)
 
 	if !result.OK {
@@ -78,7 +78,7 @@ func TestHTTPPost(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	post := tool.NewHTTPPost(tool.NewSandboxChecker([]string{hostOf(t, srv.URL)}))
+	post := tool.NewHTTPPost(tool.NewSandboxChecker(tool.SandboxConfig{AllowedDomains: []string{hostOf(t, srv.URL)}}))
 	result := post.Execute(context.Background(), `{"url":"`+srv.URL+`/submit","body":"{\"a\":1}"}`)
 
 	if !result.OK {
@@ -144,7 +144,7 @@ func TestHTTPToolFailures(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			get := tool.NewHTTPGet(tool.NewSandboxChecker(tt.allowed))
+			get := tool.NewHTTPGet(tool.NewSandboxChecker(tool.SandboxConfig{AllowedDomains: tt.allowed}))
 			result := get.Execute(context.Background(), tt.input)
 
 			if result.OK {
@@ -173,7 +173,7 @@ func TestHTTPToolRedirectBlocked(t *testing.T) {
 	}))
 	t.Cleanup(redirector.Close)
 
-	get := tool.NewHTTPGet(tool.NewSandboxChecker([]string{hostOf(t, redirector.URL)}))
+	get := tool.NewHTTPGet(tool.NewSandboxChecker(tool.SandboxConfig{AllowedDomains: []string{hostOf(t, redirector.URL)}}))
 	result := get.Execute(context.Background(), `{"url":"`+redirector.URL+`/jump"}`)
 
 	if result.OK {
