@@ -209,3 +209,196 @@ func trimPartialRune(b []byte) []byte {
 	}
 	return b
 }
+
+// WriteFileToolName 是內建 Tool write_file 的註冊名，也是 Profile 的 tools 欄位要
+// 引用的那個字串。
+const WriteFileToolName = "write_file"
+
+// writeFileTool 是內建 Tool write_file：把 LLM 給的內容寫進 Workspace 內、白名單
+// 路徑下的檔案。兩道防線的分工與 readFileTool 完全相同，見該型別的說明。
+type writeFileTool struct {
+	checker *SandboxChecker
+	root    *os.Root
+}
+
+// NewWriteFile 建立內建 Tool write_file。依賴顯式注入（憲法 5.2），形狀同 NewReadFile。
+func NewWriteFile(checker *SandboxChecker, root *os.Root) OryxTool {
+	return &writeFileTool{checker: checker, root: root}
+}
+
+func (t *writeFileTool) Name() string { return WriteFileToolName }
+
+func (t *writeFileTool) Description() string {
+	return "把內容寫進 Workspace 內、路徑白名單允許範圍中的檔案，回傳寫入的位元組數。" +
+		"路徑相對 Workspace 根，不接受絕對路徑；覆寫該檔案原有的全部內容（不是追加），" +
+		"父目錄不存在時報錯而不自動建立。"
+}
+
+func (t *writeFileTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"path": {"type": "string", "description": "要寫入的檔案路徑（相對 Workspace 根，須在 file.allowed_paths 白名單內；父目錄必須已存在）"},
+			"content": {"type": "string", "description": "要寫入的完整內容，會覆寫該檔案原有的全部內容"}
+		},
+		"required": ["path", "content"]
+	}`)
+}
+
+// writeFileInput 是 write_file 的輸入參數。
+//
+// Content 是指標，為的是把「LLM 沒給這個參數」與「LLM 要寫一個空檔」分開。用裸
+// string 兩者都是 ""，於是一次漏填參數會安靜地把既有檔案清空——那正是這條路徑最該
+// 避免的失敗形態（覆寫的語義讓它不可逆）。
+type writeFileInput struct {
+	Path    string  `json:"path"`
+	Content *string `json:"content"`
+}
+
+// writeFileOutput 是回填給 LLM 的結果內容：實際寫入的位元組數。
+type writeFileOutput struct {
+	BytesWritten int `json:"bytes_written"`
+}
+
+// Execute 校驗路徑、經 Workspace 的 os.Root 開檔並覆寫內容。
+func (t *writeFileTool) Execute(ctx context.Context, input string) core.ToolResult {
+	var in writeFileInput
+	if err := json.Unmarshal([]byte(input), &in); err != nil {
+		return core.ToolResult{Error: fmt.Sprintf("解析 %s 輸入參數: %v", WriteFileToolName, err)}
+	}
+	if in.Path == "" {
+		return core.ToolResult{Error: fmt.Sprintf("%s 缺必填參數 path", WriteFileToolName)}
+	}
+	if in.Content == nil {
+		return core.ToolResult{Error: fmt.Sprintf("%s 缺必填參數 content（要寫空檔請明確給空字串）", WriteFileToolName)}
+	}
+	if err := ctx.Err(); err != nil {
+		return core.ToolResult{Error: fmt.Sprintf("%s 被取消: %v", WriteFileToolName, err)}
+	}
+
+	rel, err := t.checker.CheckFilePath(in.Path)
+	if err != nil {
+		return core.ToolResult{Error: err.Error()}
+	}
+	// **超過上限一律明確拒絕，不截斷。** 寫入與讀取在這裡不對稱：讀截斷是安全的
+	// （少看到一段內容，而且有 truncated 標記），寫截斷會在磁碟上留下一個內容不完整
+	// 卻回報成功的檔案——覆寫的語義讓原內容同時也沒了。
+	if len(*in.Content) > maxResponseBytes {
+		return core.ToolResult{Error: fmt.Sprintf(
+			"%s 的 content 有 %d bytes，超過單次寫入上限 %d bytes；請分段改寫或縮短內容（不會為你截斷，那會寫出一個不完整的檔案）",
+			WriteFileToolName, len(*in.Content), maxResponseBytes)}
+	}
+	if result, ok := t.checkWriteTarget(rel); !ok {
+		return result
+	}
+
+	// O_TRUNC 在**開檔當下**就把原內容清掉，所以上面那些檢查非得在這一行之前跑完
+	// 不可：任何「先開檔再檢查」的順序，錯誤訊息回填得再漂亮，檔案都已經沒了。
+	f, err := t.root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, newFilePerm)
+	if err != nil {
+		return writeIOFailure("開啟", rel, err)
+	}
+	n, err := f.Write([]byte(*in.Content))
+	// Close 的錯誤不能吞：有些檔案系統要到 close 才把延遲的寫入錯誤（磁碟滿、配額
+	// 用盡）回報出來，吞掉它等於回報一次假的成功。先發生的錯誤優先。
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return writeIOFailure("寫入", rel, err)
+	}
+
+	content, err := json.Marshal(writeFileOutput{BytesWritten: n})
+	if err != nil {
+		return core.ToolResult{Error: fmt.Sprintf("編碼 %s 結果: %v", WriteFileToolName, err)}
+	}
+	return core.ToolResult{OK: true, Content: string(content)}
+}
+
+// checkWriteTarget 是寫入前的開檔層把關，回傳 (拒絕時要回填的結果, 是否放行)。
+//
+// 與 read_file 的差別只有一處，但那一處是本票的重點：**最終元件允許不存在**（那就是
+// 新建檔案），父目錄則必須已經在那裡。分成兩段跑因此是必要的，不是風格選擇——
+// statNoSymlink 對整條路徑要求存在，直接拿來用會讓「新建檔案」永遠失敗。
+//
+// 父目錄那一段沿用 #30 的 statNoSymlink（每一段元件都不是符號連結），最終元件則單獨
+// 檢查。兩者都在 OpenFile **之前**：O_TRUNC 一開檔就清空內容，而 os.Root 會跟隨
+// Workspace 之內的符號連結——不在這裡擋下，一條指向 config.yaml 的連結就能讓
+// write_file 覆寫掉它。
+func (t *writeFileTool) checkWriteTarget(rel string) (core.ToolResult, bool) {
+	if parent := filepath.Dir(rel); parent != "." {
+		info, err := statNoSymlink(t.root, parent)
+		switch {
+		case errors.Is(err, ErrSandboxViolation):
+			return core.ToolResult{Error: err.Error()}, false
+		case errors.Is(err, os.ErrNotExist):
+			// **不自動建目錄**：路徑打錯不該在工作區裡長出一串空資料夾，而 MkdirAll
+			// 會讓一次筆誤留下永久痕跡。訊息要講清楚下一步是什麼。
+			return core.ToolResult{Error: fmt.Sprintf(
+				"%s 寫不了 %s：父目錄 %s 不存在，write_file 不會自動建目錄；請先確認路徑，或改寫到一個已存在的目錄",
+				WriteFileToolName, rel, parent)}, false
+		case errors.Is(err, os.ErrPermission):
+			return core.ToolResult{Error: fmt.Sprintf("%s 寫不了 %s：父目錄 %s 權限不足", WriteFileToolName, rel, parent)}, false
+		case err != nil:
+			return core.ToolResult{Error: fmt.Sprintf("%s 檢查 %s 的父目錄: %v", WriteFileToolName, rel, err)}, false
+		}
+		if !info.IsDir() {
+			return core.ToolResult{Error: fmt.Sprintf(
+				"%s 寫不了 %s：父路徑 %s 不是目錄", WriteFileToolName, rel, parent)}, false
+		}
+	}
+
+	info, err := t.root.Lstat(rel)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return core.ToolResult{}, true // 新建檔案，這是正常情況
+	case errors.Is(err, os.ErrPermission):
+		return core.ToolResult{Error: fmt.Sprintf("%s 寫不了 %s：權限不足", WriteFileToolName, rel)}, false
+	case err != nil:
+		return core.ToolResult{Error: fmt.Sprintf("%s 檢查 %s: %v", WriteFileToolName, rel, err)}, false
+	}
+
+	if info.Mode()&os.ModeSymlink != 0 {
+		violation := fmt.Errorf("%w: 路徑 %s 是符號連結，一律拒絕不跟隨（只接受 Workspace 內的實體檔案）",
+			ErrSandboxViolation, rel)
+		return core.ToolResult{Error: violation.Error()}, false
+	}
+	if info.IsDir() {
+		return core.ToolResult{Error: fmt.Sprintf("%s 的目標 %s 是目錄，不是檔案", WriteFileToolName, rel)}, false
+	}
+	if !info.Mode().IsRegular() {
+		// 具名管道這一格不只是形式要求：O_WRONLY 開一個沒有讀取端的 FIFO 會**阻塞到
+		// 有人來讀為止**，而 os.Root.OpenFile 不吃 context——不在開檔前擋下，憲法 5.3
+		// 在這條路上直接失效。
+		violation := fmt.Errorf("%w: %s 的目標 %s 不是普通檔（實際為 %s）；裝置檔、具名管道與 socket 一律拒絕",
+			ErrSandboxViolation, WriteFileToolName, rel, info.Mode().Type())
+		return core.ToolResult{Error: violation.Error()}, false
+	}
+	return core.ToolResult{}, true
+}
+
+// writeIOFailure 把開檔／寫入／關檔階段的失敗轉成回填結果，**並在這裡定案 Retryable
+// 的判準**（ticket #31；spec #4 的 Further Notes 把這條明確留給本票）。
+//
+// 形狀沿用 HTTP Tool 對讀取失敗的做法（http.go 把 io.ReadAll 的失敗標成可重試）：
+// I/O 階段的失敗預設可重試，因為它們多半是**外部狀態**——磁碟滿、配額用盡、底層
+// I/O 錯誤、資源暫時不足——換個時間點再寫一次可能就成功了，正是退避重試存在的理由。
+//
+// 例外是那些**重跑幾次結果都一樣**的確定性原因，一律不標：
+//
+//   - **權限不足**：檔案的權限位不會因為多等三秒而改變。這是本票要求與「磁碟滿」
+//     分得出來的那一條——標了它只是讓 ReAct 循環白白多燒兩輪，然後回同一個錯誤。
+//   - **路徑不存在／已存在**：上面的檢查剛通過卻在開檔時變了，代表有人同時在動這個
+//     路徑；重試會撞上同一個競爭，該讓 LLM 換一條路。
+func writeIOFailure(stage, rel string, err error) core.ToolResult {
+	if errors.Is(err, os.ErrPermission) {
+		return core.ToolResult{Error: fmt.Sprintf("%s %s %s：權限不足", WriteFileToolName, stage, rel)}
+	}
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrExist) {
+		return core.ToolResult{Error: fmt.Sprintf("%s %s %s: %v", WriteFileToolName, stage, rel, err)}
+	}
+	return core.ToolResult{
+		Error:     fmt.Sprintf("%s %s %s: %v（暫時性的 I/O 失敗，例如磁碟已滿或配額用盡）", WriteFileToolName, stage, rel, err),
+		Retryable: true,
+	}
+}

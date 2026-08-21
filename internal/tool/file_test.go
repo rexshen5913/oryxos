@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -382,5 +383,385 @@ func executeWithin(t *testing.T, d time.Duration, tl tool.OryxTool, input string
 	case <-time.After(d):
 		t.Fatalf("Execute 在 %v 內未返回——它阻塞住了", d)
 		return ""
+	}
+}
+
+// writeFileOutput 是 write_file 回填給 LLM 的結果形狀，測試據此解回來斷言。
+type writeFileOutput struct {
+	BytesWritten int `json:"bytes_written"`
+}
+
+// newWriteFile 以指定白名單組出 write_file Tool，Workspace 是傳進來的那個 root。
+func newWriteFile(root *os.Root, allowedPaths []string) tool.OryxTool {
+	return tool.NewWriteFile(tool.NewSandboxChecker(tool.SandboxConfig{AllowedPaths: allowedPaths}), root)
+}
+
+// TestWriteFileWritesRealFile 是 happy path：白名單內的相對路徑真的把內容寫上磁碟。
+//
+// **寫完真的讀回來比對**——只斷言 result.OK 的話，一個什麼都沒做卻回成功的實作照樣
+// 全綠，而這條 Tool 存在的理由就是「關掉 chat 之後那個檔案還在」。
+func TestWriteFileWritesRealFile(t *testing.T) {
+	const content = "第一版摘要\n"
+	root, dir := newWorkspace(t)
+	if err := os.MkdirAll(filepath.Join(dir, "notes"), 0o755); err != nil {
+		t.Fatalf("建立 notes/: %v", err)
+	}
+
+	result := newWriteFile(root, []string{"notes"}).Execute(context.Background(),
+		`{"path":"notes/summary.md","content":"第一版摘要\n"}`)
+	if !result.OK {
+		t.Fatalf("期望成功，實際錯誤: %s", result.Error)
+	}
+
+	var out writeFileOutput
+	if err := json.Unmarshal([]byte(result.Content), &out); err != nil {
+		t.Fatalf("回填結果不是合法 JSON（%q）: %v", result.Content, err)
+	}
+	if out.BytesWritten != len(content) {
+		t.Errorf("bytes_written = %d, 期望 %d", out.BytesWritten, len(content))
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, "notes", "summary.md"))
+	if err != nil {
+		t.Fatalf("讀回寫入的檔案: %v", err)
+	}
+	if string(got) != content {
+		t.Errorf("磁碟上的內容 = %q, 期望 %q", got, content)
+	}
+}
+
+// TestWriteFileOverwritesInsteadOfAppending 釘住**覆寫**的語義。
+//
+// 追加與覆寫從 result.OK 看起來一模一樣，差別只在磁碟上——所以斷言必須落在讀回來的
+// 完整內容上，而且新內容要**比舊的短**：用等長或更長的內容，一個 O_APPEND 的實作也
+// 可能矇混過去。追加的需求由 save_memory 那條專用鏈路承擔，不是這裡。
+func TestWriteFileOverwritesInsteadOfAppending(t *testing.T) {
+	root, dir := newWorkspace(t)
+	path := writeWorkspaceFile(t, dir, filepath.Join("notes", "summary.md"), "很長的第一版內容，應該整段被蓋掉\n")
+
+	result := newWriteFile(root, []string{"notes"}).Execute(context.Background(),
+		`{"path":"notes/summary.md","content":"第二版\n"}`)
+	if !result.OK {
+		t.Fatalf("期望成功，實際錯誤: %s", result.Error)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("讀回被覆寫的檔案: %v", err)
+	}
+	if string(got) != "第二版\n" {
+		t.Errorf("磁碟上的內容 = %q, 期望只剩新內容（覆寫不是追加）", got)
+	}
+}
+
+// TestWriteFileWritesEmptyContent 驗證 content 給空字串是合法的「寫一個空檔」，
+// 與下面矩陣裡「漏給 content」那格分得出來——後者是 LLM 漏填參數，不能靜靜地把
+// 既有檔案清空。
+func TestWriteFileWritesEmptyContent(t *testing.T) {
+	root, dir := newWorkspace(t)
+	path := writeWorkspaceFile(t, dir, filepath.Join("notes", "draft.md"), "舊內容")
+
+	result := newWriteFile(root, []string{"notes"}).Execute(context.Background(),
+		`{"path":"notes/draft.md","content":""}`)
+	if !result.OK {
+		t.Fatalf("期望成功，實際錯誤: %s", result.Error)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("讀回檔案: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("磁碟上的內容 = %q, 期望空檔", got)
+	}
+}
+
+// treeSnapshot 列出 dir 底下所有目錄的相對路徑（排序後），供「不自動建目錄」那格
+// 比對前後差異。只收目錄：那一格要證明的是**沒有長出資料夾**。
+func treeSnapshot(t *testing.T, dir string) []string {
+	t.Helper()
+	var dirs []string
+	if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			rel, rerr := filepath.Rel(dir, path)
+			if rerr != nil {
+				return rerr
+			}
+			dirs = append(dirs, rel)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("走訪 %s: %v", dir, err)
+	}
+	slices.Sort(dirs)
+	return dirs
+}
+
+// TestWriteFileDoesNotCreateMissingParentDirs 是「父目錄不存在」那格的實質斷言。
+//
+// **只斷言「回了錯誤」不夠**：一個先 MkdirAll 再因為別的原因失敗的實作也會回錯誤，
+// 卻已經在工作區裡長出一整串空資料夾——而使用者要的正是「路徑打錯不會長出一堆空
+// 資料夾」。所以這裡比對呼叫前後磁碟上的目錄清單完全相同。
+func TestWriteFileDoesNotCreateMissingParentDirs(t *testing.T) {
+	root, dir := newWorkspace(t)
+	if err := os.MkdirAll(filepath.Join(dir, "notes"), 0o755); err != nil {
+		t.Fatalf("建立 notes/: %v", err)
+	}
+	before := treeSnapshot(t, dir)
+
+	result := newWriteFile(root, []string{"notes"}).Execute(context.Background(),
+		`{"path":"notes/2026/q3/report.md","content":"x"}`)
+	if result.OK {
+		t.Fatalf("父目錄不存在不該成功: %s", result.Content)
+	}
+	if !strings.Contains(result.Error, "不存在") {
+		t.Errorf("錯誤 %q 未說明父目錄不存在", result.Error)
+	}
+	if result.Retryable {
+		t.Errorf("Retryable = true, 期望 false（父目錄不會因為重跑而出現）: %q", result.Error)
+	}
+
+	after := treeSnapshot(t, dir)
+	if !slices.Equal(before, after) {
+		t.Errorf("磁碟上多出了目錄：呼叫前 %v，呼叫後 %v——write_file 不得自動建目錄", before, after)
+	}
+}
+
+// TestWriteFileSymlinkDoesNotClobberTarget 是符號連結那格的實質斷言：拒絕不只要
+// 「回錯誤」，還要**真的沒把連結目標寫壞**。
+//
+// 連結刻意用**相對**寫法。os.Root 對絕對連結一律拒絕（「Symbolic links must not be
+// absolute」），拿絕對連結來測，過的是 os.Root 那一關，驗不到我們自己的檢查有沒有
+// 接上寫入路徑；相對連結它**會跟隨**，此時擋下來的只可能是應用層那道。而 O_TRUNC
+// 在開檔當下就把目標清空，錯誤訊息回填得再漂亮，檔案都已經沒了。
+func TestWriteFileSymlinkDoesNotClobberTarget(t *testing.T) {
+	const original = "白名單外、不該被動到的內容"
+	root, dir := newWorkspace(t)
+	target := writeWorkspaceFile(t, dir, filepath.Join("secrets", "api.txt"), original)
+	if err := os.MkdirAll(filepath.Join(dir, "notes"), 0o755); err != nil {
+		t.Fatalf("建立 notes/: %v", err)
+	}
+	symlink(t, filepath.Join("..", "secrets", "api.txt"), filepath.Join(dir, "notes", "link.md"))
+
+	result := newWriteFile(root, []string{"notes"}).Execute(context.Background(),
+		`{"path":"notes/link.md","content":"被覆寫了"}`)
+	if result.OK {
+		t.Fatalf("符號連結不該被跟隨，實際回填: %s", result.Content)
+	}
+
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("讀回連結目標: %v", err)
+	}
+	if string(got) != original {
+		t.Errorf("連結目標被寫壞了：內容 = %q, 期望維持 %q", got, original)
+	}
+}
+
+// TestWriteFileRejectionMatrix 是寫入路徑的拒絕矩陣。
+//
+// 前四格是 #30 的 CheckFilePath **被套用在寫入路徑上**的斷言——校驗邏輯本票不重寫，
+// 但「它有沒有被接上去」是本票的事：一個漏呼叫校驗器的 write_file 會讓 read_file 的
+// 矩陣照樣全綠。符號連結與非普通檔同理。
+//
+// 每一格都斷言三件事：呼叫失敗、錯誤訊息可辨識、**Retryable 一律 false**——這些失敗
+// 重跑一次結果都一樣。
+func TestWriteFileRejectionMatrix(t *testing.T) {
+	root, dir := newWorkspace(t)
+	outsideFile := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("Workspace 之外"), 0o644); err != nil {
+		t.Fatalf("建立 Workspace 外的檔案: %v", err)
+	}
+
+	writeWorkspaceFile(t, dir, filepath.Join("notes", "todo.md"), "ok")
+	writeWorkspaceFile(t, dir, filepath.Join("secrets", "api.txt"), "白名單外的機密")
+	writeWorkspaceFile(t, dir, filepath.Join("notes", "real", "b.txt"), "中間元件測試的目標")
+	symlink(t, filepath.Join(dir, "secrets", "api.txt"), filepath.Join(dir, "notes", "inside-link.md"))
+	symlink(t, outsideFile, filepath.Join(dir, "notes", "outside-link.md"))
+	symlink(t, filepath.Join(dir, "notes", "real"), filepath.Join(dir, "notes", "link-dir"))
+	// 相對連結是 os.Root **會跟隨**的那一種，因此也是只有應用層檢查擋得住的那一種。
+	symlink(t, filepath.Join("..", "secrets", "api.txt"), filepath.Join(dir, "notes", "rel-link.md"))
+
+	tests := []struct {
+		name       string
+		allowed    []string
+		input      string
+		wantErrSub string
+	}{
+		{
+			name:       "白名單外的路徑回 SandboxViolation",
+			allowed:    []string{"notes"},
+			input:      `{"path":"secrets/api.txt","content":"x"}`,
+			wantErrSub: "SandboxViolation",
+		},
+		{
+			name:       "../ 穿越出白名單回 SandboxViolation",
+			allowed:    []string{"notes"},
+			input:      `{"path":"notes/../secrets/api.txt","content":"x"}`,
+			wantErrSub: "SandboxViolation",
+		},
+		{
+			name:       "絕對路徑回 SandboxViolation",
+			allowed:    []string{"notes"},
+			input:      `{"path":"/tmp/anywhere.txt","content":"x"}`,
+			wantErrSub: "SandboxViolation",
+		},
+		{
+			name:       "空白名單全部拒絕",
+			allowed:    nil,
+			input:      `{"path":"notes/todo.md","content":"x"}`,
+			wantErrSub: "SandboxViolation",
+		},
+		{
+			name:       "符號連結指向 Workspace 內也拒絕",
+			allowed:    []string{"notes"},
+			input:      `{"path":"notes/inside-link.md","content":"x"}`,
+			wantErrSub: "符號連結",
+		},
+		{
+			name:       "符號連結指向 Workspace 外拒絕",
+			allowed:    []string{"notes"},
+			input:      `{"path":"notes/outside-link.md","content":"x"}`,
+			wantErrSub: "符號連結",
+		},
+		{
+			name:       "符號連結在中間路徑元件一樣拒絕",
+			allowed:    []string{"notes"},
+			input:      `{"path":"notes/link-dir/b.txt","content":"x"}`,
+			wantErrSub: "符號連結",
+		},
+		{
+			name:       "相對符號連結（os.Root 會跟隨的那一種）同樣拒絕",
+			allowed:    []string{"notes"},
+			input:      `{"path":"notes/rel-link.md","content":"x"}`,
+			wantErrSub: "符號連結",
+		},
+		{
+			name:       "目標是目錄回明確錯誤",
+			allowed:    []string{"notes"},
+			input:      `{"path":"notes/real","content":"x"}`,
+			wantErrSub: "目錄",
+		},
+		{
+			name:       "父目錄不存在回明確錯誤",
+			allowed:    []string{"notes"},
+			input:      `{"path":"notes/missing/f.md","content":"x"}`,
+			wantErrSub: "不存在",
+		},
+		{
+			name:       "父路徑上是一個檔案而不是目錄",
+			allowed:    []string{"notes"},
+			input:      `{"path":"notes/todo.md/child.md","content":"x"}`,
+			wantErrSub: "目錄",
+		},
+		{
+			name:       "輸入非 JSON",
+			allowed:    []string{"notes"},
+			input:      `not-json`,
+			wantErrSub: "解析",
+		},
+		{
+			name:       "缺 path 參數",
+			allowed:    []string{"notes"},
+			input:      `{"content":"x"}`,
+			wantErrSub: "path",
+		},
+		{
+			name:       "缺 content 參數不得靜靜把既有檔案清空",
+			allowed:    []string{"notes"},
+			input:      `{"path":"notes/todo.md"}`,
+			wantErrSub: "content",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := newWriteFile(root, tt.allowed).Execute(context.Background(), tt.input)
+			if result.OK {
+				t.Fatalf("期望失敗，實際成功: %s", result.Content)
+			}
+			if !strings.Contains(result.Error, tt.wantErrSub) {
+				t.Errorf("錯誤 %q 未含 %q", result.Error, tt.wantErrSub)
+			}
+			// Sandbox 拒絕與其他確定性失敗都不可重試。
+			if result.Retryable {
+				t.Errorf("Retryable = true, 期望 false（重跑不會改變結果）: %q", result.Error)
+			}
+		})
+	}
+
+	// 矩陣跑完，白名單外那份檔案的內容必須一個位元組都沒變。
+	got, err := os.ReadFile(filepath.Join(dir, "secrets", "api.txt"))
+	if err != nil {
+		t.Fatalf("讀回白名單外的檔案: %v", err)
+	}
+	if string(got) != "白名單外的機密" {
+		t.Errorf("白名單外的檔案被寫壞了: %q", got)
+	}
+}
+
+// TestWriteFileRejectsOversizeContent 驗證超過上限時**明確拒絕而不是靜默截斷**。
+//
+// 這條與 read_file 的截斷刻意不對稱，理由寫在斷言裡：讀截斷是安全的（少看到一段，
+// 而且有 truncated 標記），寫截斷會在磁碟上留下一個**內容不完整卻回報成功**的檔案，
+// 而覆寫的語義讓原內容同時也沒了。所以除了「回錯誤」，還要斷言**既有檔案一個位元組
+// 都沒被動到**。
+func TestWriteFileRejectsOversizeContent(t *testing.T) {
+	const limit = 1 << 20
+	const original = "原本的內容，不該被動到"
+	root, dir := newWorkspace(t)
+	path := writeWorkspaceFile(t, dir, filepath.Join("notes", "big.md"), original)
+
+	oversize, err := json.Marshal(map[string]string{
+		"path":    "notes/big.md",
+		"content": strings.Repeat("a", limit+1),
+	})
+	if err != nil {
+		t.Fatalf("組輸入參數: %v", err)
+	}
+
+	result := newWriteFile(root, []string{"notes"}).Execute(context.Background(), string(oversize))
+	if result.OK {
+		t.Fatalf("超過上限不該成功: %s", result.Content)
+	}
+	if !strings.Contains(result.Error, "上限") {
+		t.Errorf("錯誤 %q 未說明是超過上限", result.Error)
+	}
+	if result.Retryable {
+		t.Errorf("Retryable = true, 期望 false（內容不會因為重跑而變短）: %q", result.Error)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("讀回既有檔案: %v", err)
+	}
+	if string(got) != original {
+		t.Errorf("既有檔案被動到了：內容 = %q, 期望維持 %q（不得靜默截斷）", got, original)
+	}
+}
+
+// TestWriteFileContextCancelled 驗證取消當下就中止（憲法 5.3）。os.Root 的開檔與寫入
+// 都不吃 context，所以取消要在進到那些呼叫**之前**收下來——而且要斷言**檔案沒被建
+// 出來**，否則一個「先寫再檢查取消」的實作照樣通過。
+func TestWriteFileContextCancelled(t *testing.T) {
+	root, dir := newWorkspace(t)
+	if err := os.MkdirAll(filepath.Join(dir, "notes"), 0o755); err != nil {
+		t.Fatalf("建立 notes/: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result := newWriteFile(root, []string{"notes"}).Execute(ctx, `{"path":"notes/x.md","content":"x"}`)
+	if result.OK {
+		t.Fatalf("context 已取消，不該成功: %s", result.Content)
+	}
+	if !strings.Contains(result.Error, "取消") {
+		t.Errorf("錯誤 %q 未說明是取消", result.Error)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "notes", "x.md")); !os.IsNotExist(err) {
+		t.Errorf("取消之後檔案仍被建了出來（stat err = %v）", err)
 	}
 }

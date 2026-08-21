@@ -242,6 +242,20 @@ func TestProcessReadFileVisibleOnlyWhenListed(t *testing.T) {
 	}
 }
 
+// toolContentNumber 同 toolContentField，取的是數值欄位（write_file 的 bytes_written）。
+func toolContentNumber(t *testing.T, content, field string) int {
+	t.Helper()
+	var out map[string]any
+	if err := json.Unmarshal([]byte(content), &out); err != nil {
+		t.Fatalf("tool 結果不是合法 JSON（%q）: %v", content, err)
+	}
+	n, ok := out[field].(float64) // encoding/json 把數字解成 float64
+	if !ok {
+		t.Fatalf("tool 結果缺數值欄位 %q: %v", field, out)
+	}
+	return int(n)
+}
+
 // toolContentField 從回填給 LLM 的 JSON 結果裡取一個欄位，讓斷言落在**內容**上而不是
 // 整串 JSON 的字面形狀（欄位順序或多一個 omitempty 欄位不該讓測試變紅）。
 func toolContentField(t *testing.T, content, field string) string {

@@ -403,8 +403,9 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	// 只數長度會把它們當成「已配置」而閉嘴——而那正是最需要這行提醒的情形：使用者
 	// 覺得自己照著錯誤訊息把目錄加進去了，卻還是每次被攔。
 	//
-	// write_file 與 list_dir 落地後（ticket #31、#32）把它們的名字一起列進這個判斷。
-	if len(tool.EffectiveAllowedPaths(cfg.File.AllowedPaths)) == 0 && slices.Contains(prof.Tools, tool.ReadFileToolName) {
+	// list_dir 落地後（ticket #32）把它的名字一起列進這個判斷。
+	if len(tool.EffectiveAllowedPaths(cfg.File.AllowedPaths)) == 0 &&
+		(slices.Contains(prof.Tools, tool.ReadFileToolName) || slices.Contains(prof.Tools, tool.WriteFileToolName)) {
 		fmt.Fprintf(out, "提醒：%s/config.yaml 的 file.allowed_paths 為空，File Tool 呼叫將全部被攔截；請把允許的路徑加入白名單。\n", workspaceDir)
 	}
 

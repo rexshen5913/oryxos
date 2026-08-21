@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-fixture-write-file-denied-1",
+  "object": "chat.completion",
+  "created": 1722926400,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_write_file_denied",
+            "type": "function",
+            "function": {
+              "name": "write_file",
+              "arguments": "{\"path\": \"secrets/leak.txt\", \"content\": \"AGENT-WROTE-THIS-OUTSIDE-THE-WHITELIST\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 180,
+    "completion_tokens": 33,
+    "total_tokens": 213
+  }
+}

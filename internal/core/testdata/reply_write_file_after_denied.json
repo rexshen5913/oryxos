@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-fixture-write-file-denied-2",
+  "object": "chat.completion",
+  "created": 1722926401,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_write_file_recovered",
+            "type": "function",
+            "function": {
+              "name": "write_file",
+              "arguments": "{\"path\": \"notes/summary.md\", \"content\": \"# 本週摘要\\n\\n- write_file 接上 ReAct 循環\\n\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 240,
+    "completion_tokens": 34,
+    "total_tokens": 274
+  }
+}

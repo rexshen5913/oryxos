@@ -188,7 +188,7 @@ func (r *Registry) suggest(missing string) string {
 }
 
 // RegisterBuiltins 顯式註冊本 package 自帶的內建 Tool：HttpTools（http_get、
-// http_post）與 FileTools（read_file；write_file 與 list_dir 隨其 ticket 加入），
+// http_post）與 FileTools（read_file、write_file；list_dir 隨其 ticket 加入），
 // Shell Tool 隨其模組於後續 ticket 加入。
 //
 // wsRoot 是 Workspace 的根，File Tool 一律經它開檔——**由組裝點傳進來**而不是這裡
@@ -199,14 +199,17 @@ func (r *Registry) suggest(missing string) string {
 // Workspace 的 MEMORY.md 路徑，而 internal/tool 不該知道 Workspace 的檔案佈局。
 // 由組裝點顯式 Register 進同一個 Registry（憲法 2.3 要的是顯式，不是單一函式）。
 func RegisterBuiltins(r *Registry, checker *SandboxChecker, wsRoot *os.Root) error {
-	// 漏傳的話註冊會照樣成功，然後第一次 read_file 呼叫在 root.Lstat 裡解參考 nil
+	// 漏傳的話註冊會照樣成功，然後第一次 File Tool 呼叫在 root.Lstat 裡解參考 nil
 	// ——repo 裡沒有任何 recover()，那會在對話中途直接殺掉 CLI。在這裡擋下來，
 	// 讓一次接線失誤變成一次啟動錯誤。措辭指向組裝點，理由同下面 Subset 對
 	// 「自動加入的 Tool 未註冊」的既有訊息：那不是使用者的設定錯誤。
 	if wsRoot == nil {
 		return fmt.Errorf("註冊內建 Tool: 缺 Workspace root，File Tool 沒有可開檔的位置（組裝點漏傳了）")
 	}
-	for _, t := range []OryxTool{NewHTTPGet(checker), NewHTTPPost(checker), NewReadFile(checker, wsRoot)} {
+	for _, t := range []OryxTool{
+		NewHTTPGet(checker), NewHTTPPost(checker),
+		NewReadFile(checker, wsRoot), NewWriteFile(checker, wsRoot),
+	} {
 		if err := r.Register(t); err != nil {
 			return fmt.Errorf("註冊內建 Tool: %w", err)
 		}

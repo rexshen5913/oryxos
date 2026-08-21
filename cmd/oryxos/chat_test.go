@@ -324,6 +324,17 @@ provider:
 tools:
   - read_file
 `
+	// Profile 只列 write_file（不列 read_file）：提醒的判斷要涵蓋每一個 File Tool，
+	// 只認 read_file 的實作會讓「開了 write_file、每次呼叫都被攔」這種配置毫無線索。
+	const profileWithWriteFile = `identity:
+  agent_name: Oryx
+  prompt: 你是 Oryx。
+provider:
+  name: openrouter
+  model: deepseek/deepseek-v4-flash
+tools:
+  - write_file
+`
 	const profileWithoutFileTool = `identity:
   agent_name: Oryx
   prompt: 你是 Oryx。
@@ -397,6 +408,12 @@ tools: []
 			fileSection: fileSectionBlankAndValidEntry,
 			profile:     profileWithReadFile,
 			wantWarn:    false,
+		},
+		{
+			name:        "Profile 只列 write_file 時同樣警示",
+			fileSection: "file:\n  allowed_paths: []\n",
+			profile:     profileWithWriteFile,
+			wantWarn:    true,
 		},
 		{
 			name:        "Profile 沒列 File Tool 時不警示（純對話不受影響）",

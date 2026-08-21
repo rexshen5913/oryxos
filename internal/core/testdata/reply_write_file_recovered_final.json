@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-write-file-denied-3",
+  "object": "chat.completion",
+  "created": 1722926402,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "secrets/ 不在允許寫入的範圍內，我改把內容寫到 notes/summary.md 了。要讓我寫進 secrets/，請把它加進 config.yaml 的 file.allowed_paths。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 268,
+    "completion_tokens": 40,
+    "total_tokens": 308
+  }
+}

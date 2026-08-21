@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-write-file-2",
+  "object": "chat.completion",
+  "created": 1722926301,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "已經把摘要寫進 notes/summary.md，共 49 bytes；關掉這次對話之後檔案還在。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 214,
+    "completion_tokens": 28,
+    "total_tokens": 242
+  }
+}
