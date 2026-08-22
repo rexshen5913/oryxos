@@ -188,8 +188,8 @@ func (r *Registry) suggest(missing string) string {
 }
 
 // RegisterBuiltins 顯式註冊本 package 自帶的內建 Tool：HttpTools（http_get、
-// http_post）與 FileTools（read_file、write_file；list_dir 隨其 ticket 加入），
-// Shell Tool 隨其模組於後續 ticket 加入。
+// http_post）與 FileTools（read_file、write_file、list_dir），Shell Tool 隨其模組
+// 於後續 ticket 加入。
 //
 // wsRoot 是 Workspace 的根，File Tool 一律經它開檔——**由組裝點傳進來**而不是這裡
 // 自己開（憲法 5.2）：這個 package 不知道 Workspace 在磁碟哪裡，而呼叫端本來就已經
@@ -208,7 +208,7 @@ func RegisterBuiltins(r *Registry, checker *SandboxChecker, wsRoot *os.Root) err
 	}
 	for _, t := range []OryxTool{
 		NewHTTPGet(checker), NewHTTPPost(checker),
-		NewReadFile(checker, wsRoot), NewWriteFile(checker, wsRoot),
+		NewReadFile(checker, wsRoot), NewWriteFile(checker, wsRoot), NewListDir(checker, wsRoot),
 	} {
 		if err := r.Register(t); err != nil {
 			return fmt.Errorf("註冊內建 Tool: %w", err)

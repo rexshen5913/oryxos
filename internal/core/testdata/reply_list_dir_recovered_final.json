@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-list-dir-denied-3",
+  "object": "chat.completion",
+  "created": 1722926402,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "secrets/ 不在允許的路徑白名單內，我沒有列它的內容。改列 notes/ 之後看到的是 drafts/ 與 todo.md。若確實需要 secrets/，請把它加進 config.yaml 的 file.allowed_paths。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 302,
+    "completion_tokens": 56,
+    "total_tokens": 358
+  }
+}

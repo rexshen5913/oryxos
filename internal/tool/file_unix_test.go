@@ -243,3 +243,27 @@ func TestWriteFileRejectsFifoBeforeOpening(t *testing.T) {
 		t.Errorf("錯誤 %q 未說明只支援普通檔", errText)
 	}
 }
+
+// TestListDirRejectsFifoBeforeOpening 是 read_file 那一格在列目錄路徑上的鏡像。
+//
+// 理由完全相同：open(2) 一個沒有寫入端的 FIFO 會阻塞到有人來寫為止，而 os.Root.Open
+// 不吃 context。型別檢查要求「目標是目錄」，因此這裡的 FIFO 在**開檔之前**就被擋下，
+// 而斷言同樣是兩件事：回錯誤，**而且準時返回**。
+func TestListDirRejectsFifoBeforeOpening(t *testing.T) {
+	root, dir := newWorkspace(t)
+	if err := os.MkdirAll(dir+"/pipes", 0o755); err != nil {
+		t.Fatalf("建立 pipes/: %v", err)
+	}
+	fifo := dir + "/pipes/stream"
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Skipf("此環境無法建立具名管道: %v", err)
+	}
+
+	errText := executeWithin(t, 5*time.Second, newListDir(root, []string{"pipes"}), `{"path":"pipes/stream"}`)
+	if errText == "" {
+		t.Fatal("具名管道不該被當成目錄列出來")
+	}
+	if !strings.Contains(errText, "SandboxViolation") || !strings.Contains(errText, "目錄") {
+		t.Errorf("錯誤 %q 未說明只支援目錄", errText)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -116,10 +117,11 @@ func (t *readFileTool) Execute(ctx context.Context, input string) core.ToolResul
 	// 目錄與「非普通檔」刻意分成兩種回報。目錄是使用者給錯了對象，是可以換一個做法
 	// 的正常情況；裝置檔／具名管道／socket 則是 Sandbox 層面的拒絕。
 	//
-	// 措辭這裡不提「改用 list_dir」：那個 Tool 還沒落地（ticket #32），叫 LLM 去用
-	// 一個它的工具清單裡沒有的名字只會讓它多繞一圈。等 list_dir 進來再補這句。
+	// 訊息與 list_dir 指向普通檔時的那條**互為鏡像**：兩邊都說得出目標的實際型別，
+	// 也都指向該改用的另一個 Tool。LLM 拿錯對象是常見的一步，它的下一步全靠這句話。
 	if info.IsDir() {
-		return core.ToolResult{Error: fmt.Sprintf("%s 的目標 %s 是目錄，不是檔案", ReadFileToolName, rel)}
+		return core.ToolResult{Error: fmt.Sprintf("%s 的目標 %s 是目錄，不是普通檔；要看它底下有什麼請改用 %s",
+			ReadFileToolName, rel, ListDirToolName)}
 	}
 	if !info.Mode().IsRegular() {
 		// 以 %w 包裝而不是把哨兵字串插進去：這條與 sandbox.go 那幾條是同一類拒絕，
@@ -401,4 +403,188 @@ func writeIOFailure(stage, rel string, err error) core.ToolResult {
 		Error:     fmt.Sprintf("%s %s %s: %v（暫時性的 I/O 失敗，例如磁碟已滿或配額用盡）", WriteFileToolName, stage, rel, err),
 		Retryable: true,
 	}
+}
+
+// ListDirToolName 是內建 Tool list_dir 的註冊名，也是 Profile 的 tools 欄位要
+// 引用的那個字串。
+const ListDirToolName = "list_dir"
+
+// listDirTool 是內建 Tool list_dir：列出 Workspace 內、白名單路徑下某個目錄的內容。
+// 兩道防線的分工與 readFileTool 完全相同，見該型別的說明；差別只在 Lstat 型別檢查
+// 要求的是**目錄**而不是普通檔。
+//
+// 它交付的價值不在單獨列一份清單，而在**下一步**：Agent 先列目錄、再據回填的清單挑
+// 一個檔去 read_file，兩次呼叫落在同一個 turn 內。回填的三個欄位（名稱、是否為目錄、
+// 大小）就是那個決定的全部依據。
+type listDirTool struct {
+	checker *SandboxChecker
+	root    *os.Root
+}
+
+// NewListDir 建立內建 Tool list_dir。依賴顯式注入（憲法 5.2），形狀同 NewReadFile。
+func NewListDir(checker *SandboxChecker, root *os.Root) OryxTool {
+	return &listDirTool{checker: checker, root: root}
+}
+
+func (t *listDirTool) Name() string { return ListDirToolName }
+
+func (t *listDirTool) Description() string {
+	return "列出 Workspace 內、路徑白名單允許範圍中某個目錄的內容，每個項目回傳名稱、是否為目錄與大小。" +
+		"路徑相對 Workspace 根，不接受絕對路徑；只列出直接子項目（不遞迴），" +
+		"條目過多時會截斷並標示。可先用它找出要讀哪個檔案，再用 read_file 讀。"
+}
+
+func (t *listDirTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"path": {"type": "string", "description": "要列出的目錄路徑（相對 Workspace 根，須在 file.allowed_paths 白名單內；Workspace 根本身寫 \".\"）"}
+		},
+		"required": ["path"]
+	}`)
+}
+
+// listDirInput 是 list_dir 的輸入參數。
+type listDirInput struct {
+	Path string `json:"path"`
+}
+
+// listDirEntry 是清單裡的一個項目。三個欄位就是 Agent 決定「下一步讀哪一個」的全部
+// 依據：名稱要拿去組下一次呼叫的路徑，IsDir 決定該用 read_file 還是再列一層，Size
+// 讓它挑得掉那份 800 MB 的 log。
+//
+// **IsDir 與 Size 取自 Lstat，不跟隨符號連結**：指向目錄的連結在這裡的 IsDir 是
+// false。跟隨它等於幫 LLM 把一條它不該跨過的界線跨過去——而路徑校驗那一關（見
+// statNoSymlink）本來就會拒絕任何含連結的路徑，回填時卻宣稱它是目錄，只會讓 LLM
+// 拿它去列下一層然後撞牆。
+type listDirEntry struct {
+	Name  string `json:"name"`
+	IsDir bool   `json:"is_dir"`
+	Size  int64  `json:"size"`
+}
+
+// listDirOutput 是回填給 LLM 的結果內容：項目陣列與是否被截斷（形狀沿用 readFileOutput）。
+type listDirOutput struct {
+	Entries   []listDirEntry `json:"entries"`
+	Truncated bool           `json:"truncated,omitempty"`
+}
+
+// Execute 校驗路徑、經 Workspace 的 os.Root 開目錄並列出其直接子項目。
+//
+// 任何失敗都以錯誤 ToolResult 回填給 LLM，不 panic、不中斷 turn。**沒有一條路徑標
+// Retryable**：這裡的失敗（白名單拒絕、連結、型別、不存在、沒權限）重跑一次結果都
+// 一樣，讓 ReAct 循環退避重試只是白白多燒兩輪。
+func (t *listDirTool) Execute(ctx context.Context, input string) core.ToolResult {
+	var in listDirInput
+	if err := json.Unmarshal([]byte(input), &in); err != nil {
+		return core.ToolResult{Error: fmt.Sprintf("解析 %s 輸入參數: %v", ListDirToolName, err)}
+	}
+	if in.Path == "" {
+		return core.ToolResult{Error: fmt.Sprintf("%s 缺必填參數 path", ListDirToolName)}
+	}
+	// 取消在這裡收，理由同 read_file：底下的 os.Root 開檔與 ReadDir 都**不吃 context**
+	// （憲法 5.3）。會無限期阻塞的那一種（具名管道）由下面的型別檢查在開檔前擋掉。
+	if err := ctx.Err(); err != nil {
+		return core.ToolResult{Error: fmt.Sprintf("%s 被取消: %v", ListDirToolName, err)}
+	}
+
+	rel, err := t.checker.CheckFilePath(in.Path)
+	if err != nil {
+		return core.ToolResult{Error: err.Error()}
+	}
+
+	info, err := statNoSymlink(t.root, rel)
+	switch {
+	case errors.Is(err, ErrSandboxViolation):
+		return core.ToolResult{Error: err.Error()}
+	case errors.Is(err, os.ErrNotExist):
+		return core.ToolResult{Error: fmt.Sprintf("%s 找不到 %s：這個目錄在 Workspace 內不存在", ListDirToolName, rel)}
+	case errors.Is(err, os.ErrPermission):
+		return core.ToolResult{Error: fmt.Sprintf("%s 讀不到 %s：權限不足", ListDirToolName, rel)}
+	case err != nil:
+		return core.ToolResult{Error: fmt.Sprintf("%s 檢查 %s: %v", ListDirToolName, rel, err)}
+	}
+
+	// 型別檢查與 read_file **互為鏡像**：那邊要普通檔、這邊要目錄，兩邊的訊息都說得出
+	// 目標的實際型別，也都指向該改用的另一個 Tool。LLM 拿錯對象是常見的一步，它的下
+	// 一步全靠這句話——只說「不是目錄」等於要它自己猜。
+	if !info.IsDir() {
+		if info.Mode().IsRegular() {
+			return core.ToolResult{Error: fmt.Sprintf("%s 的目標 %s 是普通檔，不是目錄；要讀它的內容請改用 %s",
+				ListDirToolName, rel, ReadFileToolName)}
+		}
+		// 裝置檔／具名管道／socket 是 Sandbox 層面的拒絕，與「拿錯對象」不同類。
+		// 這一格不只是形式要求：open(2) 一個沒有寫入端的 FIFO 會阻塞到有人來寫為止，
+		// 而 os.Root.Open 不吃 context——不在開檔前擋下，憲法 5.3 在這條路上失效。
+		violation := fmt.Errorf("%w: %s 的目標 %s 不是目錄（實際為 %s）；裝置檔、具名管道與 socket 一律拒絕",
+			ErrSandboxViolation, ListDirToolName, rel, info.Mode().Type())
+		return core.ToolResult{Error: violation.Error()}
+	}
+
+	// 權限不足在這裡才浮出來：Lstat 讀的是 metadata，一個 0o000 的目錄 stat 得到、
+	// 開不起來。訊息要與上面那兩條同樣分得出來。
+	d, err := t.root.Open(rel)
+	if errors.Is(err, os.ErrPermission) {
+		return core.ToolResult{Error: fmt.Sprintf("%s 讀不到 %s：權限不足", ListDirToolName, rel)}
+	}
+	if err != nil {
+		return core.ToolResult{Error: fmt.Sprintf("%s 開啟 %s: %v", ListDirToolName, rel, err)}
+	}
+	defer func() { _ = d.Close() }()
+
+	// **多讀一個條目才分得出「剛好等於上限」與「超過上限」**（形狀同 read_file 的
+	// LimitReader+1）。只讀 limit+1 個而不是全部讀回來再切，是為了讓一個上萬檔的目錄
+	// 在記憶體上也有界，不只是回填內容有界。
+	//
+	// 代價要說清楚：ReadDir(n) 給的是**目錄本身的順序**，所以被截掉的是哪一批由檔案
+	// 系統決定，不是「字典序在後面的那些」。截斷時 truncated 會標起來，LLM 知道自己
+	// 看到的是一部分——這是刻意的取捨，不是遺漏。
+	dirents, err := d.ReadDir(maxListDirEntries + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		if errors.Is(err, os.ErrPermission) {
+			return core.ToolResult{Error: fmt.Sprintf("%s 讀不到 %s：權限不足", ListDirToolName, rel)}
+		}
+		return core.ToolResult{Error: fmt.Sprintf("%s 列出 %s: %v", ListDirToolName, rel, err)}
+	}
+
+	out := listDirOutput{Entries: make([]listDirEntry, 0, len(dirents))}
+	if len(dirents) > maxListDirEntries {
+		dirents = dirents[:maxListDirEntries]
+		out.Truncated = true
+	}
+	for _, entry := range dirents {
+		entryInfo, err := entry.Info()
+		if errors.Is(err, os.ErrNotExist) {
+			// 讀目錄與取 metadata 之間那個檔案被刪掉了。回報一個已經不存在的項目會讓
+			// LLM 拿它去 read_file 然後撞牆，略過才是誠實的做法。
+			continue
+		}
+		if errors.Is(err, os.ErrPermission) {
+			// 目錄可讀（r）但不可搜尋（x）：ReadDir 拿得到全部檔名，每個項目的 Lstat
+			// 卻都回 EACCES。**這時不回一份 size 全是 0 的假清單**——這個目錄底下的
+			// 檔案一個都讀不到（開檔同樣要搜尋權限），列出來只會讓 LLM 拿去 read_file
+			// 然後撞同一道牆。訊息與上面幾條權限錯誤同形，也同樣只提相對路徑。
+			return core.ToolResult{Error: fmt.Sprintf(
+				"%s 讀不到 %s：權限不足（目錄列得出名字但沒有搜尋權限，底下的項目一個都取不到資訊）",
+				ListDirToolName, rel)}
+		}
+		if err != nil {
+			return core.ToolResult{Error: fmt.Sprintf("%s 讀取 %s 之下 %s 的資訊: %v",
+				ListDirToolName, rel, entry.Name(), err)}
+		}
+		out.Entries = append(out.Entries, listDirEntry{
+			Name:  entry.Name(),
+			IsDir: entryInfo.IsDir(),
+			Size:  entryInfo.Size(),
+		})
+	}
+	// 按名稱排序，讓同一個目錄每次列出來都一樣：順序飄動會讓同一句話得到不同的下一步，
+	// 而 ReadDir 不保證順序。
+	slices.SortFunc(out.Entries, func(a, b listDirEntry) int { return strings.Compare(a.Name, b.Name) })
+
+	content, err := json.Marshal(out)
+	if err != nil {
+		return core.ToolResult{Error: fmt.Sprintf("編碼 %s 結果: %v", ListDirToolName, err)}
+	}
+	return core.ToolResult{OK: true, Content: string(content)}
 }

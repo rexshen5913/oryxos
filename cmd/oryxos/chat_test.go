@@ -335,6 +335,17 @@ provider:
 tools:
   - write_file
 `
+	// Profile 只列 list_dir：這一格與上面那格同因——判斷漏掉任何一個 File Tool，
+	// 那個 Tool 的使用者就得自己查為什麼每次呼叫都被攔。
+	const profileWithListDir = `identity:
+  agent_name: Oryx
+  prompt: 你是 Oryx。
+provider:
+  name: openrouter
+  model: deepseek/deepseek-v4-flash
+tools:
+  - list_dir
+`
 	const profileWithoutFileTool = `identity:
   agent_name: Oryx
   prompt: 你是 Oryx。
@@ -413,6 +424,12 @@ tools: []
 			name:        "Profile 只列 write_file 時同樣警示",
 			fileSection: "file:\n  allowed_paths: []\n",
 			profile:     profileWithWriteFile,
+			wantWarn:    true,
+		},
+		{
+			name:        "Profile 只列 list_dir 時同樣警示",
+			fileSection: "file:\n  allowed_paths: []\n",
+			profile:     profileWithListDir,
 			wantWarn:    true,
 		},
 		{

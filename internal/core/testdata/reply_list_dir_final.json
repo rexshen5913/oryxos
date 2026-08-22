@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-list-dir-3",
+  "object": "chat.completion",
+  "created": 1722926302,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "notes/ 底下有 drafts/ 這個子目錄與 todo.md 這份檔案。我讀了 todo.md，裡面寫著：把 read_file 接進 ReAct 循環。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 289,
+    "completion_tokens": 44,
+    "total_tokens": 333
+  }
+}

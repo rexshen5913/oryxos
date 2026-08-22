@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-fixture-list-dir-denied-2",
+  "object": "chat.completion",
+  "created": 1722926401,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_list_dir_recovered",
+            "type": "function",
+            "function": {
+              "name": "list_dir",
+              "arguments": "{\"path\":\"notes\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 241,
+    "completion_tokens": 21,
+    "total_tokens": 262
+  }
+}

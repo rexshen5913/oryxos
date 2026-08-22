@@ -155,7 +155,7 @@ http:
   allowed_domains: []
 
 file:
-  # File Tool（read_file、write_file）只能存取白名單內的路徑，預設全部拒絕。
+  # File Tool（read_file、write_file、list_dir）只能存取白名單內的路徑，預設全部拒絕。
   #
   # 每條都是**相對這個 Workspace（.oryxos/）根**的路徑，不是相對你執行 oryxos 的目錄
   # ——同一份設定在哪裡跑，允許範圍都一樣。標準化後必須落在其中一條的子樹之內：
@@ -166,6 +166,8 @@ file:
   #
   # write_file 會**覆寫**目標檔案的全部內容（不是追加），父目錄不存在時報錯而不自動
   # 建立；新建的檔案一律不含執行位，覆寫既有檔案則不改變它原有的權限。
+  #
+  # list_dir 只列出一層（不遞迴），每個項目給名稱、是否為目錄與大小；條目過多時截斷。
   #
   # 範例： - notes
   allowed_paths: []
