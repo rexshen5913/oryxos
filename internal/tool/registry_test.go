@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rexshen5913/oryxos/internal/tool"
 )
@@ -19,7 +20,7 @@ func newHTTPRegistry(t *testing.T) *tool.Registry {
 	t.Helper()
 	root, _ := newWorkspace(t)
 	r := tool.NewRegistry()
-	if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(tool.SandboxConfig{}), root); err != nil {
+	if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(tool.SandboxConfig{}), root, testShellRuntime(t)); err != nil {
 		t.Fatalf("RegisterBuiltins: %v", err)
 	}
 	return r
@@ -141,8 +142,43 @@ func TestRegistrySubset(t *testing.T) {
 // nil 的話註冊會照樣成功，然後第一次 read_file 呼叫在 root.Lstat 裡解參考 nil
 // ——repo 裡沒有任何 recover()，那會直接殺掉 CLI。訊息指向組裝點，理由同 Subset
 // 對「自動加入的 Tool 未註冊」的既有措辭：那不是使用者的設定錯誤。
+// TestRegisterBuiltinsRejectsIncompleteShellRuntime 把兩種 shell 接線失誤從
+// 「安靜跑錯」變成一次啟動錯誤，形狀同下面那格的 nil wsRoot。
+//
+// 兩者的失敗形態不同，而 **Dir 那個更安靜**：
+//
+//   - Timeout 為零 → 每一次呼叫在啟動的瞬間就逾時，錯誤訊息長得像「命令跑太久」，
+//     使用者去調 config.yaml 的 timeout_seconds，那裡卻早已回退好預設值。
+//   - Dir 為空 → exec.Cmd 的文件寫明那代表「在呼叫進程的工作目錄執行」，於是命令
+//     **照跑、什麼錯都不報**，只是 shell 落在 Workspace 的父目錄動作，而 File Tool
+//     仍在 Workspace 之內。「Dir 固定為 Workspace 根」是 shell.go 寫明的載重不變式。
+func TestRegisterBuiltinsRejectsIncompleteShellRuntime(t *testing.T) {
+	root, dir := newWorkspace(t)
+	tests := []struct {
+		name    string
+		shell   tool.ShellRuntime
+		wantSub string
+	}{
+		{name: "缺工作目錄", shell: tool.ShellRuntime{Timeout: time.Minute}, wantSub: "工作目錄"},
+		{name: "超時為零", shell: tool.ShellRuntime{Dir: dir}, wantSub: "超時"},
+		{name: "超時為負", shell: tool.ShellRuntime{Dir: dir, Timeout: -time.Second}, wantSub: "超時"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tool.RegisterBuiltins(tool.NewRegistry(), tool.NewSandboxChecker(tool.SandboxConfig{}), root, tt.shell)
+			if err == nil {
+				t.Fatal("接線不完整時應報錯，實際註冊成功——那會變成執行期才發現的安靜錯誤")
+			}
+			if !strings.Contains(err.Error(), tt.wantSub) {
+				t.Errorf("錯誤 %q 未含 %q", err, tt.wantSub)
+			}
+		})
+	}
+}
+
 func TestRegisterBuiltinsRejectsNilWorkspaceRoot(t *testing.T) {
-	err := tool.RegisterBuiltins(tool.NewRegistry(), tool.NewSandboxChecker(tool.SandboxConfig{}), nil)
+	err := tool.RegisterBuiltins(tool.NewRegistry(), tool.NewSandboxChecker(tool.SandboxConfig{}), nil, testShellRuntime(t))
 	if err == nil {
 		t.Fatal("wsRoot 為 nil 時應報錯，實際成功註冊——第一次 read_file 呼叫才會 panic")
 	}

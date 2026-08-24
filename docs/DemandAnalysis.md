@@ -250,7 +250,7 @@ Agent 跨對話保留狀態的能力。三層記憶是完整設計，核心階�
 
 Tool 是 Agent 可以呼叫的外部能力。Agent 通過 LLM Function Calling 決定何時調哪個 Tool，OryxOS 負責 Tool 的註冊、查找、呼叫、結果回傳。Tool 分兩類，這兩類的區分是 OryxOS 讓業務方擴展的核心機制。
 
-內建 Tool（OryxOS 自帶）。核心階段提供三類基礎內建 Tool：檔案操作 Tool（`read_file`、`write_file`、`list_dir`，在沙箱裡執行，有路徑白名單限制）、Shell Tool（執行 bash 命令，有超時和命令白名單限制）、HTTP Tool（發起 HTTP 請求 GET、POST，有域名白名單限制）。加上 Memory 用到的兩個內建 Tool：`save_memory`（把內容追加到 MEMORY.md）、`recall_memory`（按關鍵詞檢索 MEMORY.md）。這五個內建 Tool 是「讓 Agent 能讀寫檔案、跑命令、調外部 API、記事」的最短鏈路，足以演示運行時內核的核心價值。
+內建 Tool（OryxOS 自帶）。核心階段提供三類基礎內建 Tool：檔案操作 Tool（`read_file`、`write_file`、`list_dir`，在沙箱裡執行，有路徑白名單限制）、Shell Tool（執行**單一程式加參數**，有超時和命令白名單限制；**不經 shell 直譯器**，因此沒有管線與重導向——理由見 `docs/adr/0005-shell-tool-structured-exec.md`）、HTTP Tool（發起 HTTP 請求 GET、POST，有域名白名單限制）。加上 Memory 用到的兩個內建 Tool：`save_memory`（把內容追加到 MEMORY.md）、`recall_memory`（按關鍵詞檢索 MEMORY.md）。這五個內建 Tool 是「讓 Agent 能讀寫檔案、跑命令、調外部 API、記事」的最短鏈路，足以演示運行時內核的核心價值。
 
 Plugin Tool（業務方自己擴展）。業務方擴展 OryxOS 的能力，按門檻從低到高有三種方式。OryxOS 主推方式一，因為這是 LLM 時代最優雅的寫法：業務方只描述意圖，讓 LLM 自己組合現成能力。
 
@@ -542,7 +542,7 @@ OryxOS 核心功能的實施按 4 週節奏組織。
 實施內容：
 
 - Memory 長期記憶極簡版（MEMORY.md 檔案、save_memory 和 recall_memory 兩個內建 Tool、啟動時整個檔案注入 system prompt）
-- 檔案操作 Tool（read_file、write_file、list_dir）、Shell Tool（帶白名單校驗）
+- 檔案操作 Tool（read_file、write_file、list_dir）、Shell Tool（單一程式加參數，帶命令白名單校驗；見 ADR-0005）
 - MCP Client 集成（連接外部 MCP server）
 
 驗收：Agent 能記住使用者偏好（“我用 Go”）並在後續對話用到，Agent 能調本地檔案讀寫、調外部 MCP server 的工具，完成一個跨工具的任務。

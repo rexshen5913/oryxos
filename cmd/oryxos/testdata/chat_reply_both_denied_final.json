@@ -1,0 +1,17 @@
+{
+  "id": "chatcmpl-chat-nomigration-3",
+  "object": "chat.completion",
+  "created": 1722926602,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "這個 Workspace 的 config.yaml 還沒開 file.allowed_paths 與 shell.allowed_commands，兩組 Tool 的呼叫都被攔下來了。要用的話請先在設定裡把允許的路徑與程式名列出來。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {"prompt_tokens": 240, "completion_tokens": 52, "total_tokens": 292}
+}

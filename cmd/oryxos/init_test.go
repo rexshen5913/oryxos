@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rexshen5913/oryxos/internal/config"
 	"github.com/rexshen5913/oryxos/internal/tool"
@@ -328,5 +329,89 @@ func TestInitFileSectionTemplate(t *testing.T) {
 		if _, err := checker.CheckFilePath(p); !errors.Is(err, tool.ErrSandboxViolation) {
 			t.Errorf("stock Workspace 對 %q 的校驗 = %v, 期望 SandboxViolation（空白名單全拒）", p, err)
 		}
+	}
+}
+
+// TestInitShellSectionTemplate 與上面那格同形：把 init 的產物**真的餵回載入器**，
+// 再把解出來的白名單交給真正在用它的校驗器（prior art：TestInitMcpServersTemplate）。
+//
+// 額外釘住的是**五句揭露一句都不能少**（ticket #33 的 AC）。這五句不是文案，是這層
+// 防護的實際邊界；缺任何一句，使用者就會做出一個錯的反推。
+func TestInitShellSectionTemplate(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := runInit(t, dir); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	path := filepath.Join(dir, ".oryxos", "config.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("讀取 config.yaml: %v", err)
+	}
+	template := string(data)
+
+	// 五句揭露的關鍵語意，逐句對。比對關鍵字而不是整句——措辭留給實作決定，
+	// 但這五件事本身不可省。
+	for _, want := range []struct{ sentence, keyword string }{
+		{sentence: "(1) 擋的是 LLM 選錯程式，不是惡意使用者", keyword: "選錯程式"},
+		{sentence: "(1) 不要拿它跑不受信任的內容", keyword: "不受信任"},
+		{sentence: "(2) 不決定被列入的程式接下來做什麼", keyword: "接下來做什麼"},
+		{sentence: "(2) 舉例：find -exec、git -c 這類非直譯器也做得到", keyword: "find -exec"},
+		{sentence: "(2) 明說它們不是直譯器（擋掉「不列直譯器就安全」的反推）", keyword: "不是直譯器"},
+		{sentence: "(3) 白名單不管那個程式能碰什麼（擋掉「只列 cat 就安全」的反推）", keyword: "cat 讀得到任何路徑"},
+		{sentence: "(4) file.allowed_paths 不約束 shell", keyword: "file.allowed_paths 不約束 shell"},
+		{sentence: "(4) 要真隔離請用容器", keyword: "容器"},
+		{sentence: "(5) PATH 不要與 file.allowed_paths 重疊", keyword: "不要與 file.allowed_paths 重疊"},
+	} {
+		if !strings.Contains(template, want.keyword) {
+			t.Errorf("shell 段缺少揭露：%s（找不到 %q）\n實際內容：\n%s", want.sentence, want.keyword, template)
+		}
+	}
+	// 揭露以**性質**表述，不得寫成一份危險命令清單——列清單的副作用是讓使用者
+	// 反推「不在清單上就安全」，而那份清單在定義上窮舉不完。
+	if strings.Contains(template, "危險命令") {
+		t.Errorf("shell 段出現了「危險命令」清單式的表述，揭露應以性質表述：\n%s", template)
+	}
+	for _, want := range []string{"shell:", "allowed_commands: []", "timeout_seconds"} {
+		if !strings.Contains(template, want) {
+			t.Errorf("config.yaml 的 shell 段缺少 %q，實際內容：\n%s", want, template)
+		}
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("init 產出的 config.yaml 讀不進來: %v", err)
+	}
+	if len(cfg.Shell.AllowedCommands) != 0 {
+		t.Fatalf("模板的 allowed_commands = %v, 期望空清單（預設全部拒絕）", cfg.Shell.AllowedCommands)
+	}
+	if got := cfg.Shell.EffectiveTimeout(); got != 30*time.Second {
+		t.Errorf("模板的超時 = %v, 期望與註解說的 30 秒一致", got)
+	}
+
+	// 「預設全部拒絕」不是註解裡的一句話而已：把解出來的白名單交給真正在用它的
+	// 校驗器，任何命令都必須被擋下。
+	checker := tool.NewSandboxChecker(sandboxConfig(cfg))
+	for _, name := range []string{"echo", "git", "ls"} {
+		if err := checker.CheckShellCommand(name); !errors.Is(err, tool.ErrSandboxViolation) {
+			t.Errorf("stock Workspace 對命令 %q 的校驗 = %v, 期望 SandboxViolation（空白名單全拒）", name, err)
+		}
+	}
+}
+
+// TestInitDefaultProfileOmitsShell 釘住「**shell 不進預設 Profile**」（US 39）：
+// 使用者沒主動要求時，Agent 不該有執行命令的能力。
+func TestInitDefaultProfileOmitsShell(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := runInit(t, dir); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".oryxos", "profiles", "default.yaml"))
+	if err != nil {
+		t.Fatalf("讀取 default.yaml: %v", err)
+	}
+	if strings.Contains(string(data), tool.ShellToolName) {
+		t.Errorf("預設 Profile 列了 %s，期望不列（要用的人自己加）：\n%s", tool.ShellToolName, data)
 	}
 }

@@ -1,0 +1,14 @@
+{
+  "id": "chatcmpl-fixture-shell-denied-2",
+  "object": "chat.completion",
+  "created": 1722926500,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {"role": "assistant", "content": "rm 不在允許的命令白名單內，我沒有執行它，notes 目錄原封不動。若確實需要，請把 rm 加進 config.yaml 的 shell.allowed_commands——不過刪檔這件事建議你自己來。"},
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {"prompt_tokens": 180, "completion_tokens": 24, "total_tokens": 204}
+}

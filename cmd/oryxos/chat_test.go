@@ -18,6 +18,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite" // 測試直接查 sessions 表，用同一個純 Go 驅動
+
+	"github.com/rexshen5913/oryxos/internal/config"
 )
 
 // newReplayServer 起一個回放錄製回應的 httptest.Server（ADR-0002）：按請求順序
@@ -1397,5 +1399,302 @@ func TestUpgradedLegacyWorkspaceInjectsNoPlaceholder(t *testing.T) {
 				t.Errorf("system prompt 應恰好是 identity.prompt（本例 %q），實際:\n%s", tt.identityPrompt, system)
 			}
 		})
+	}
+}
+
+// profileWithShell 是列了 shell 的 Profile，供啟動提醒那幾格使用。
+const profileWithShell = `identity:
+  agent_name: Oryx
+  prompt: 你是 Oryx。
+provider:
+  name: openrouter
+  model: deepseek/deepseek-v4-flash
+tools:
+  - shell
+`
+
+// TestChatEmptyShellWhitelistWarning 是啟動提醒的第三種（命令白名單），形狀比照
+// 上面兩條。少了這一行，使用者會遇到「Tool 有了、每次呼叫都被攔」而毫無線索——
+// 而三段白名單出廠就是空的，所以這是 out-of-box 一定會走到的路徑。
+func TestChatEmptyShellWhitelistWarning(t *testing.T) {
+	const profileWithoutShell = `identity:
+  agent_name: Oryx
+  prompt: 你是 Oryx。
+provider:
+  name: openrouter
+  model: deepseek/deepseek-v4-flash
+tools: []
+`
+	tests := []struct {
+		name string
+		// shellSection 是 config.yaml 的整段 shell 設定；空字串代表這份 config.yaml
+		// **根本沒有這一段**（既有 Workspace 的形態）。
+		shellSection string
+		profile      string
+		wantWarn     bool
+	}{
+		{
+			name:         "空白名單且 Profile 列了 shell 時警示",
+			shellSection: "shell:\n  allowed_commands: []\n",
+			profile:      profileWithShell,
+			wantWarn:     true,
+		},
+		{
+			// 免遷移：既有 Workspace 的 config.yaml 沒有 shell 段，啟動照常成功、
+			// 視為空白名單（於是同樣印那行提醒）。
+			name:         "缺 shell 段時視為空白名單、照常啟動",
+			shellSection: "",
+			profile:      profileWithShell,
+			wantWarn:     true,
+		},
+		{
+			// 「有效條目」與「切片長度」是兩件事：寫成路徑的條目永遠比不中任何請求
+			// （合法的 command 不含路徑分隔符），只看長度會把它當成「已配置」而閉嘴。
+			name:         "白名單條目寫成路徑時仍要警示",
+			shellSection: "shell:\n  allowed_commands:\n    - /usr/bin/git\n",
+			profile:      profileWithShell,
+			wantWarn:     true,
+		},
+		{
+			name:         "白名單只有空字串條目時仍要警示",
+			shellSection: "shell:\n  allowed_commands:\n    - \"\"\n",
+			profile:      profileWithShell,
+			wantWarn:     true,
+		},
+		{
+			name:         "已配置白名單不警示",
+			shellSection: "shell:\n  allowed_commands: [git]\n",
+			profile:      profileWithShell,
+			wantWarn:     false,
+		},
+		{
+			name:         "Profile 沒列 shell 時不警示（純對話不受影響）",
+			shellSection: "shell:\n  allowed_commands: []\n",
+			profile:      profileWithoutShell,
+			wantWarn:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newReplayServer(t, readFixture(t, "chat_reply_1.json"))
+			dir := setupChatWorkspace(t, srv.URL)
+			writeProfile(t, dir, tt.profile)
+			cfg := "providers:\n  openrouter:\n    api_key: ${OPENROUTER_API_KEY}\n    base_url: " + srv.URL +
+				"\nhttp:\n  allowed_domains: []\n" + tt.shellSection
+			if err := os.WriteFile(filepath.Join(dir, workspaceDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := runChat(context.Background(), strings.NewReader(""), &out, dir, chatOptions{profileName: "default", message: "你好"}); err != nil {
+				t.Fatalf("runChat: %v", err)
+			}
+			warned := strings.Contains(out.String(), "allowed_commands")
+			if warned != tt.wantWarn {
+				t.Errorf("警示出現 = %v, 期望 %v; 輸出: %q", warned, tt.wantWarn, out.String())
+			}
+		})
+	}
+}
+
+// TestChatPathOverlapWarning 是**內部提權路徑**的啟動提醒（ADR-0005 第一條，US 59／62）。
+//
+// 要防的是這件事：父進程的 PATH 若含有一個落在 file.allowed_paths 之內的目錄，Agent
+// 光靠**已被授權的 write_file** 就能在那裡放一個與白名單命令同名的檔案、或覆寫該目錄
+// 下既有的可執行檔——**把「寫檔權限」升級成「執行白名單內程式的權限」**。兩個能力都是
+// 使用者自己開的，所以「攻擊者本來就能寫檔了」那套論證在此不成立。
+//
+// 三格分別打掉三種會做錯的比對：純字串比對（漏掉符號連結那格）、只看字面前綴
+// （foobar 那格會誤報）、以及完全不做（第一格）。**警告而非 fail fast**：重疊可能是
+// 使用者刻意的。
+func TestChatPathOverlapWarning(t *testing.T) {
+	// setupPath 在 Workspace 底下建目錄、回傳要放進 PATH 的那個路徑。
+	tests := []struct {
+		name string
+		// setupPath 回傳要塞進 PATH 的目錄；ws 是 Workspace 根（.oryxos 那一層）。
+		setupPath   func(t *testing.T, ws string) string
+		allowedPath string
+		wantWarn    bool
+	}{
+		{
+			name: "PATH 含落在白名單內的絕對目錄要警告",
+			setupPath: func(t *testing.T, ws string) string {
+				dir := filepath.Join(ws, "scripts", "bin")
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatalf("建立 scripts/bin: %v", err)
+				}
+				return dir
+			},
+			allowedPath: "scripts",
+			wantWarn:    true,
+		},
+		{
+			name: "PATH 是指向白名單內目錄的符號連結也要警告",
+			setupPath: func(t *testing.T, ws string) string {
+				target := filepath.Join(ws, "scripts", "bin")
+				if err := os.MkdirAll(target, 0o755); err != nil {
+					t.Fatalf("建立 scripts/bin: %v", err)
+				}
+				// 連結放在 Workspace **之外**：字面上完全看不出重疊。
+				link := filepath.Join(t.TempDir(), "tools")
+				if err := os.Symlink(target, link); err != nil {
+					t.Skipf("此環境不支援建立符號連結: %v", err)
+				}
+				return link
+			},
+			allowedPath: "scripts",
+			wantWarn:    true,
+		},
+		{
+			name: "子樹前綴假匹配不得警告",
+			setupPath: func(t *testing.T, ws string) string {
+				dir := filepath.Join(ws, "foobar")
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatalf("建立 foobar: %v", err)
+				}
+				if err := os.MkdirAll(filepath.Join(ws, "foo"), 0o755); err != nil {
+					t.Fatalf("建立 foo: %v", err)
+				}
+				return dir
+			},
+			allowedPath: "foo",
+			wantWarn:    false,
+		},
+		{
+			name: "Workspace 之外的 PATH 目錄不警告",
+			setupPath: func(t *testing.T, ws string) string {
+				if err := os.MkdirAll(filepath.Join(ws, "scripts"), 0o755); err != nil {
+					t.Fatalf("建立 scripts: %v", err)
+				}
+				return t.TempDir()
+			},
+			allowedPath: "scripts",
+			wantWarn:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newReplayServer(t, readFixture(t, "chat_reply_1.json"))
+			dir := setupChatWorkspace(t, srv.URL)
+			ws := filepath.Join(dir, workspaceDir)
+			pathDir := tt.setupPath(t, ws)
+			// PATH 只放那一個目錄：不摻真實 PATH，讓這一格只驗重疊判斷本身。
+			t.Setenv("PATH", pathDir)
+
+			cfg := "providers:\n  openrouter:\n    api_key: ${OPENROUTER_API_KEY}\n    base_url: " + srv.URL +
+				"\nhttp:\n  allowed_domains: []\nfile:\n  allowed_paths: [" + tt.allowedPath + "]\n"
+			if err := os.WriteFile(filepath.Join(ws, "config.yaml"), []byte(cfg), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := runChat(context.Background(), strings.NewReader(""), &out, dir, chatOptions{profileName: "default", message: "你好"}); err != nil {
+				t.Fatalf("runChat: %v", err)
+			}
+			warned := strings.Contains(out.String(), "升級成執行權限")
+			if warned != tt.wantWarn {
+				t.Errorf("重疊警示出現 = %v, 期望 %v; 輸出: %q", warned, tt.wantWarn, out.String())
+			}
+		})
+	}
+}
+
+// TestChatWithoutFileAndShellSectionsRejectsBothToolGroups 是**免遷移的完整錨點**。
+//
+// 一份**兩段都沒有**的 config.yaml（既有 Workspace 的形態）必須：啟動成功，**而且
+// 兩組 Tool 一律拒絕**。這一條同時證明「免遷移」與「空白名單即全拒」兩件事——
+// #30 只驗了 file 那一半，這裡收尾。
+//
+// 斷言落在**落庫的對話歷史**上：兩則 tool 訊息都要是 SandboxViolation。只斷言「啟動
+// 成功」不算通過——一個把缺欄位讀成「全部放行」的實作也會啟動成功。
+func TestChatWithoutFileAndShellSectionsRejectsBothToolGroups(t *testing.T) {
+	srv := newReplayServer(t,
+		readFixture(t, "chat_reply_read_file_denied.json"),
+		readFixture(t, "chat_reply_shell_denied.json"),
+		readFixture(t, "chat_reply_both_denied_final.json"),
+	)
+	// setupChatWorkspace 寫出的 config.yaml 本來就只有 providers 與 http 兩段——
+	// 那正是既有 Workspace 的形態，不需要另外做什麼。
+	dir := setupChatWorkspace(t, srv.URL)
+	writeProfile(t, dir, `identity:
+  agent_name: Oryx
+  prompt: 你是 Oryx。
+provider:
+  name: openrouter
+  model: deepseek/deepseek-v4-flash
+tools:
+  - read_file
+  - shell
+`)
+
+	var out bytes.Buffer
+	if err := runChat(context.Background(), strings.NewReader(""), &out,
+		dir, chatOptions{profileName: "default", message: "看一下設定檔，再列個目錄"}); err != nil {
+		t.Fatalf("缺 file 與 shell 兩段時應照常啟動: %v", err)
+	}
+
+	rows := sessionRows(t, filepath.Join(dir, workspaceDir, sessionDBFile))
+	if len(rows) != 1 {
+		t.Fatalf("sessions 資料列數 = %d, 期望 1", len(rows))
+	}
+	var messages []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(rows[0].messagesJSON), &messages); err != nil {
+		t.Fatalf("解析 messages_json: %v", err)
+	}
+
+	var toolMessages []string
+	for _, m := range messages {
+		if m.Role == "tool" {
+			toolMessages = append(toolMessages, m.Content)
+		}
+	}
+	if len(toolMessages) != 2 {
+		t.Fatalf("tool 訊息數 = %d, 期望 2（read_file 一次、shell 一次）: %v", len(toolMessages), messages)
+	}
+	for i, content := range toolMessages {
+		if !strings.Contains(content, "SandboxViolation") {
+			t.Errorf("tool 訊息[%d] = %q, 期望被空白名單擋下（缺欄位 = 空白名單 = 全拒）", i, content)
+		}
+	}
+	// 訊息要指得出去改哪一段，兩組各自的那一段。
+	if !strings.Contains(toolMessages[0], "file.allowed_paths") {
+		t.Errorf("read_file 的拒絕訊息沒指向 file.allowed_paths: %q", toolMessages[0])
+	}
+	if !strings.Contains(toolMessages[1], "shell.allowed_commands") {
+		t.Errorf("shell 的拒絕訊息沒指向 shell.allowed_commands: %q", toolMessages[1])
+	}
+}
+
+// TestShellRuntimeTimeoutComesFromSandboxConfig 釘住「同一份 config.yaml 只搬一次」。
+//
+// `SandboxConfig.ShellTimeout` 存在的理由就是這句話（見它的欄位說明）。`shellRuntime`
+// 若自己再去 `cfg.Shell.EffectiveTimeout()` 取一次，那個欄位就變成沒有人讀的死欄位，
+// 而同一個值有了兩條來源——**兩條來源遲早會分岔，而且分岔時沒有任何東西會報錯**。
+//
+// 真正擋住回歸的是簽章（`shellRuntime` 收的是 `tool.SandboxConfig`，拿不到 `cfg`，
+// 編譯器不讓它有第二條來源）；這一格釘的是另一半：那個值真的流到子進程的上限上，
+// 而且就是使用者在 `timeout_seconds` 寫的那個數字。
+func TestShellRuntimeTimeoutComesFromSandboxConfig(t *testing.T) {
+	cfg := &config.Config{Shell: config.ShellConfig{TimeoutSeconds: 7}}
+	sandbox := sandboxConfig(cfg)
+
+	runtime := shellRuntime(sandbox, t.TempDir())
+	if runtime.Timeout != sandbox.ShellTimeout {
+		t.Errorf("ShellRuntime.Timeout = %v, 期望與 SandboxConfig.ShellTimeout %v 同源",
+			runtime.Timeout, sandbox.ShellTimeout)
+	}
+	if runtime.Timeout != 7*time.Second {
+		t.Errorf("ShellRuntime.Timeout = %v, 期望是 config.yaml 寫的 7 秒", runtime.Timeout)
+	}
+
+	// 三態回退也要一路流下來：省略／零值回退預設，不是回退成零（那會讓每次呼叫
+	// 在啟動的瞬間就假逾時）。
+	if got := shellRuntime(sandboxConfig(&config.Config{}), t.TempDir()).Timeout; got != 30*time.Second {
+		t.Errorf("缺 shell 段時的 Timeout = %v, 期望回退預設的 30 秒", got)
 	}
 }

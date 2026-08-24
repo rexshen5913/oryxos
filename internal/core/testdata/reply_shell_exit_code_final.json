@@ -1,0 +1,14 @@
+{
+  "id": "chatcmpl-fixture-shell-exit-2",
+  "object": "chat.completion",
+  "created": 1722926500,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {"role": "assistant", "content": "ls 回了非零的 exit code，stderr 說那個路徑不存在——所以問題不是命令壞掉，是那個目錄本來就沒有。"},
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {"prompt_tokens": 180, "completion_tokens": 24, "total_tokens": 204}
+}

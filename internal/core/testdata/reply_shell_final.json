@@ -1,0 +1,14 @@
+{
+  "id": "chatcmpl-fixture-shell-2",
+  "object": "chat.completion",
+  "created": 1722926500,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {"role": "assistant", "content": "命令跑完了，exit code 是 0，輸出是：fetching https://api.example.com/v1?api_key=SUPER-SECRET-VALUE"},
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {"prompt_tokens": 180, "completion_tokens": 24, "total_tokens": 204}
+}

@@ -127,7 +127,7 @@ func TestExecutorArgsSummaryRedacted(t *testing.T) {
 			// 未指定白名單的案例全拒：執行必失敗，但日誌照落。
 			r := tool.NewRegistry()
 			root, _ := newWorkspace(t)
-			if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(tool.SandboxConfig{AllowedDomains: tt.allowed}), root); err != nil {
+			if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(tool.SandboxConfig{AllowedDomains: tt.allowed}), root, testShellRuntime(t)); err != nil {
 				t.Fatal(err)
 			}
 			var buf bytes.Buffer

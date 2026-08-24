@@ -1,0 +1,14 @@
+{
+  "id": "chatcmpl-fixture-shell-pipe-3",
+  "object": "chat.completion",
+  "created": 1722926500,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {"role": "assistant", "content": "這個 shell 不支援管線，command 只能放一個程式名。我改成單獨呼叫 ls，notes 底下有 todo.md。"},
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {"prompt_tokens": 180, "completion_tokens": 24, "total_tokens": 204}
+}

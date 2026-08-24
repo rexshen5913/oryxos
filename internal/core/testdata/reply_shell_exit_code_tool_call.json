@@ -1,0 +1,24 @@
+{
+  "id": "chatcmpl-fixture-shell-exit-1",
+  "object": "chat.completion",
+  "created": 1722926500,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_shell_exit",
+            "type": "function",
+            "function": {"name": "shell", "arguments": "{\"command\":\"ls\",\"args\":[\"definitely-not-here\"]}"}
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {"prompt_tokens": 180, "completion_tokens": 24, "total_tokens": 204}
+}

@@ -356,3 +356,159 @@ func TestEffectiveAllowedPaths(t *testing.T) {
 		})
 	}
 }
+
+// TestSandboxCheckerCheckShellCommand 是命令白名單的行為矩陣。
+//
+// 結構化 exec 之下這個檢查退化成**一次字串比對**——`argv[0]` 是不是白名單裡的那個
+// 名字。沒有切分器，因此沒有切分器可以被騙（ADR-0005）。矩陣要證明的正是這件事：
+// 最後兩格（`echo;rm` 被拒、`args` 裡的 metacharacter 放行）合起來說明白名單比對的
+// 對象是**一個程式名**，不是一段命令文字。
+func TestSandboxCheckerCheckShellCommand(t *testing.T) {
+	tests := []struct {
+		name          string
+		allowed       []string
+		command       string
+		wantViolation bool
+	}{
+		{
+			name:    "白名單內的程式名放行",
+			allowed: []string{"echo", "git"},
+			command: "echo",
+		},
+		{
+			name:          "不在白名單拒絕",
+			allowed:       []string{"echo"},
+			command:       "rm",
+			wantViolation: true,
+		},
+		{
+			name:          "空白名單全部拒絕（deny by default）",
+			allowed:       nil,
+			command:       "echo",
+			wantViolation: true,
+		},
+		{
+			name:          "command 為空字串拒絕",
+			allowed:       []string{"echo"},
+			command:       "",
+			wantViolation: true,
+		},
+		{
+			// 含分隔符的名字 exec.Command 會當路徑用、不查 PATH，放行等於讓
+			// ./x 與 /tmp/x 繞過「白名單是一份程式名清單」的語義。
+			name:          "command 是相對路徑拒絕",
+			allowed:       []string{"echo"},
+			command:       "./echo",
+			wantViolation: true,
+		},
+		{
+			// 「echo 在白名單時 /usr/bin/echo 算不算」兩種答案都說得通，選最保守的
+			// 那種最好解釋。
+			name:          "command 是絕對路徑拒絕",
+			allowed:       []string{"echo"},
+			command:       "/usr/bin/echo",
+			wantViolation: true,
+		},
+		{
+			// 這一格是白名單「比對的是程式名」的正面證據：整串 `echo;rm` 不是任何
+			// 白名單條目，所以被拒——不是因為裡面有分號，而是因為沒有一個叫這個
+			// 名字的程式被列出來。**這裡沒有切分器**。
+			name:          "command 含 shell metacharacter 拒絕",
+			allowed:       []string{"echo", "rm"},
+			command:       "echo;rm",
+			wantViolation: true,
+		},
+		{
+			// 白名單條目本身寫成路徑：它永遠比不中任何合法的 command（合法的
+			// command 不含分隔符），列出來等於沒列。
+			name:          "白名單條目寫成路徑時比不中裸命令名",
+			allowed:       []string{"/usr/bin/echo"},
+			command:       "echo",
+			wantViolation: true,
+		},
+		{
+			// 字面完全匹配：不做萬用字元、不做 basename 正規化（spec 定案）。
+			name:          "不做前綴或子字串匹配",
+			allowed:       []string{"echo"},
+			command:       "echoes",
+			wantViolation: true,
+		},
+	}
+
+	checkerFor := func(allowed []string) *tool.SandboxChecker {
+		return tool.NewSandboxChecker(tool.SandboxConfig{AllowedCommands: allowed})
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkerFor(tt.allowed).CheckShellCommand(tt.command)
+			if got := errors.Is(err, tool.ErrSandboxViolation); got != tt.wantViolation {
+				t.Fatalf("CheckShellCommand(%q) 違規 = %v (err=%v), 期望 %v",
+					tt.command, got, err, tt.wantViolation)
+			}
+		})
+	}
+}
+
+// TestSandboxShellCommandErrorIsActionable 驗證拒絕訊息**可行動**：說得出是哪個
+// 命令名被擋，也說得出要往 `config.yaml` 的哪一段加。少了後者，使用者只知道「被擋了」
+// 而不知道去哪裡開。
+//
+// 同時釘住訊息**不把白名單其餘條目倒出來**——那等於交出這個 Workspace 還允許跑哪些
+// 程式（形狀沿用 TestSandboxViolationErrorOmitsQuery）。
+func TestSandboxShellCommandErrorIsActionable(t *testing.T) {
+	checker := tool.NewSandboxChecker(tool.SandboxConfig{AllowedCommands: []string{"echo", "internal-deploy-tool"}})
+
+	err := checker.CheckShellCommand("rm")
+	if err == nil {
+		t.Fatal("rm 不在白名單，期望被拒")
+	}
+	if !strings.Contains(err.Error(), "rm") {
+		t.Errorf("訊息 %q 沒說是哪個命令名被擋", err)
+	}
+	if !strings.Contains(err.Error(), "shell.allowed_commands") {
+		t.Errorf("訊息 %q 沒說要往 config.yaml 的哪一段加", err)
+	}
+	if strings.Contains(err.Error(), "internal-deploy-tool") {
+		t.Errorf("訊息 %q 洩漏了白名單其餘條目", err)
+	}
+}
+
+// TestEffectiveAllowedCommands 是命令白名單的「有效條目」收斂，形狀與理由完全比照
+// EffectiveAllowedPaths：**讓「白名單是不是空的」只有一個定義點**。
+//
+// 兩種條目回不來，因為它們永遠比不中任何請求：空白條目，以及**含路徑分隔符**的條目
+// （合法的 command 不含分隔符，所以 `/usr/bin/git` 這種寫法永遠對不上）。
+//
+// 少了這個收斂，組裝點的啟動提醒會把 `allowed_commands: [/usr/bin/git]` 當成「已配置」
+// 而閉嘴，實際上每次呼叫都被攔——使用者覺得自己照著錯誤訊息把命令加進去了，卻繼續
+// 失敗，而系統一句話都沒說。
+func TestEffectiveAllowedCommands(t *testing.T) {
+	tests := []struct {
+		name    string
+		entries []string
+		want    []string
+	}{
+		{name: "一般條目原樣保留", entries: []string{"echo", "git"}, want: []string{"echo", "git"}},
+		{name: "空字串條目丟掉", entries: []string{"", "echo"}, want: []string{"echo"}},
+		{name: "純空白條目丟掉", entries: []string{"   ", "echo"}, want: []string{"echo"}},
+		{name: "絕對路徑條目丟掉", entries: []string{"/usr/bin/git"}, want: []string{}},
+		{name: "相對路徑條目丟掉", entries: []string{"./bin/tool"}, want: []string{}},
+		{name: "全部無效時是空的", entries: []string{"", "  ", "/usr/bin/git"}, want: []string{}},
+		{name: "nil 是空的", entries: nil, want: []string{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tool.EffectiveAllowedCommands(tt.entries)
+			if len(got) != len(tt.want) {
+				t.Fatalf("EffectiveAllowedCommands(%v) = %v, 期望 %v", tt.entries, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("EffectiveAllowedCommands(%v)[%d] = %q, 期望 %q", tt.entries, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}

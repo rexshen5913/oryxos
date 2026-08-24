@@ -1,0 +1,24 @@
+{
+  "id": "chatcmpl-chat-nomigration-2",
+  "object": "chat.completion",
+  "created": 1722926601,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_nomig_shell",
+            "type": "function",
+            "function": {"name": "shell", "arguments": "{\"command\":\"ls\"}"}
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {"prompt_tokens": 200, "completion_tokens": 16, "total_tokens": 216}
+}

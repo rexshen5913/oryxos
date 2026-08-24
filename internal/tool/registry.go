@@ -188,17 +188,19 @@ func (r *Registry) suggest(missing string) string {
 }
 
 // RegisterBuiltins 顯式註冊本 package 自帶的內建 Tool：HttpTools（http_get、
-// http_post）與 FileTools（read_file、write_file、list_dir），Shell Tool 隨其模組
-// 於後續 ticket 加入。
+// http_post）、FileTools（read_file、write_file、list_dir）與 Shell Tool（shell）。
 //
-// wsRoot 是 Workspace 的根，File Tool 一律經它開檔——**由組裝點傳進來**而不是這裡
-// 自己開（憲法 5.2）：這個 package 不知道 Workspace 在磁碟哪裡，而呼叫端本來就已經
-// 為 Bootstrap 與長期記憶開好同一個 root，再開一個只會多一份要關的東西。
+// 兩組依賴都**由組裝點傳進來**而不是這裡自己造（憲法 5.2）：
+//
+//   - wsRoot 是 Workspace 的根，File Tool 一律經它開檔。這個 package 不知道 Workspace
+//     在磁碟哪裡，而呼叫端本來就已經為 Bootstrap 與長期記憶開好同一個 root，再開一個
+//     只會多一份要關的東西。
+//   - shell 是 Shell Tool 的執行上下文（工作目錄、過濾後的 PATH 段、超時上限）。
 //
 // Memory Tool（save_memory 等）不在此註冊：它們住在 internal/memory，且需要
 // Workspace 的 MEMORY.md 路徑，而 internal/tool 不該知道 Workspace 的檔案佈局。
 // 由組裝點顯式 Register 進同一個 Registry（憲法 2.3 要的是顯式，不是單一函式）。
-func RegisterBuiltins(r *Registry, checker *SandboxChecker, wsRoot *os.Root) error {
+func RegisterBuiltins(r *Registry, checker *SandboxChecker, wsRoot *os.Root, shell ShellRuntime) error {
 	// 漏傳的話註冊會照樣成功，然後第一次 File Tool 呼叫在 root.Lstat 裡解參考 nil
 	// ——repo 裡沒有任何 recover()，那會在對話中途直接殺掉 CLI。在這裡擋下來，
 	// 讓一次接線失誤變成一次啟動錯誤。措辭指向組裝點，理由同下面 Subset 對
@@ -206,9 +208,24 @@ func RegisterBuiltins(r *Registry, checker *SandboxChecker, wsRoot *os.Root) err
 	if wsRoot == nil {
 		return fmt.Errorf("註冊內建 Tool: 缺 Workspace root，File Tool 沒有可開檔的位置（組裝點漏傳了）")
 	}
+	// 同一類的接線失誤，但失敗形態更難查：零值 Timeout 會讓**每一次** shell 呼叫在
+	// 啟動的瞬間就逾時，而錯誤訊息長得像「命令跑太久」——使用者會去調 config.yaml 的
+	// timeout_seconds，那裡卻早已回退好預設值（三態回退在 config 那一層，不重複一份）。
+	// Dir 漏傳的失敗形態比 Timeout **更安靜**：exec.Cmd 的文件寫明 `Dir == ""` 代表
+	// 「在呼叫進程的工作目錄執行」，所以命令照跑、什麼錯都不報——只是 shell 在
+	// Workspace 的**父目錄**動作，而 File Tool 仍在 Workspace 之內。「Dir 固定為
+	// Workspace 根」（與 CheckFilePath 的解析基準同一個）是 shell.go 寫明的載重不變式，
+	// 靜默失效比報錯危險得多。
+	if shell.Dir == "" {
+		return fmt.Errorf("註冊內建 Tool: 缺 shell 的工作目錄，子進程會落在 oryxos 進程當下的目錄而不是 Workspace 根（組裝點漏傳了）")
+	}
+	if shell.Timeout <= 0 {
+		return fmt.Errorf("註冊內建 Tool: shell 的超時上限是 %v，必須為正數（組裝點漏傳了，預設值來自 config 的 shell.timeout_seconds）", shell.Timeout)
+	}
 	for _, t := range []OryxTool{
 		NewHTTPGet(checker), NewHTTPPost(checker),
 		NewReadFile(checker, wsRoot), NewWriteFile(checker, wsRoot), NewListDir(checker, wsRoot),
+		NewShell(checker, shell),
 	} {
 		if err := r.Register(t); err != nil {
 			return fmt.Errorf("註冊內建 Tool: %w", err)

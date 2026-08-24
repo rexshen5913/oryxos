@@ -17,10 +17,13 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -99,10 +102,46 @@ const slowInitializeDelay = 400 * time.Millisecond
 // 強制終止真的沒生效時，子進程仍會自己收掉、不留給後續測試。
 const ignoreStdinCloseLifetime = 30 * time.Second
 
-// TestMain 讓測試二進制在子進程模式下改當 MCP server。
+// argv0ProbeName 是 TestShellArgv0IsWhitelistName 用的探針名字：測試把測試二進制
+// 自己做成一條叫這個名字的符號連結，當作 shell 要執行的程式。
 //
-// 一般模式（沒有 toolMcpServerEnv）照常跑測試，行為與沒有這個 TestMain 時相同。
+// **訊號走 argv[0] 而不是環境變數**是刻意的：Shell Tool 的 Env 是白名單式的（只傳
+// PATH／HOME／LANG），測試自訂的變數傳不進子進程——而 argv[0] 正好就是那一格要驗的
+// 東西，拿它當訊號等於用被測物本身當開關。
+//
+// **這個字串在 shell_test.go 有一份副本**（那邊是 package tool_test，看不到這裡的
+// 常數，而 TestMain 每個測試二進制只能有一個、只能住在這裡）。兩邊對不上時那一格會
+// 直接失敗——它會執行到真正的 m.Run()，於是 stdout 是一整份測試輸出而不是那個名字。
+const argv0ProbeName = "oryxos-argv0-probe"
+
+// probeStderrFloodArg 是探針的第二種行為：`<probe> stderr-flood <n>` 會往 **stderr**
+// 灌 n 個位元組。位元組數由呼叫端給，才驗得到「剛好等於上限不算截斷」那一格。
+// **這個常數在 shell_test.go 有副本**，理由同上。
+const probeStderrFloodArg = "stderr-flood"
+
+// TestMain 讓測試二進制在兩種子進程模式下改當別的東西。
+//
+// 一般模式（argv[0] 不是探針名、也沒有 toolMcpServerEnv）照常跑測試，行為與沒有這個
+// TestMain 時相同。
 func TestMain(m *testing.M) {
+	// 探針模式。必須在 m.Run() 之前返回——那之後會開始解析測試旗標，而這個子進程
+	// 一個旗標都沒拿到。
+	//
+	// 兩種行為，由第一個參數決定：帶 stderr-flood 時往 **stderr** 灌一大坨資料（給
+	// 「stderr 有自己的上限」那一格用），否則把自己的 argv[0] 原樣印到 stdout。
+	if filepath.Base(os.Args[0]) == argv0ProbeName {
+		if len(os.Args) > 2 && os.Args[1] == probeStderrFloodArg {
+			n, err := strconv.Atoi(os.Args[2])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "探針收到不合法的位元組數 %q", os.Args[2])
+				os.Exit(2)
+			}
+			fmt.Fprint(os.Stderr, strings.Repeat("e", n))
+			return
+		}
+		fmt.Println(os.Args[0])
+		return
+	}
 	if os.Getenv(toolMcpServerEnv) != "" {
 		serveToolTestMcpServer(os.Stdin, os.Stdout)
 		return

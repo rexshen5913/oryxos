@@ -84,6 +84,26 @@ func sandboxConfig(cfg *config.Config) tool.SandboxConfig {
 	}
 }
 
+// shellRuntime 把 shell 子進程的執行上下文組起來，與 sandboxConfig 並列在同一層，
+// 理由也相同：buildToolRegistry 有**兩個呼叫點**，各自展開的話兩個命令看到的執行
+// 範圍會不一致。
+//
+// PATH 只在這裡取一次（tool.ParentPathDirs），解析執行檔與子進程 Env 之後共用**同一
+// 份**過濾後清單——「環境已收窄但實際執行的檔案仍由繼承的 PATH 決定」那個落差因此
+// 在結構上不存在。
+//
+// **超時值從 sandbox 那個結構體拿，不再自己去 cfg 取一次。** SandboxConfig.ShellTimeout
+// 存在的理由就是「同一份 config.yaml 只搬一次」（見它的欄位說明）；這裡若另外呼叫一次
+// cfg.Shell.EffectiveTimeout()，那個欄位就變成沒有人讀的死欄位，而同一個值有了兩條
+// 來源——兩條來源遲早會分岔，而且分岔時沒有任何東西會報錯。
+func shellRuntime(sandbox tool.SandboxConfig, ws string) tool.ShellRuntime {
+	return tool.ShellRuntime{
+		Dir:      ws,
+		PathDirs: tool.ParentPathDirs(),
+		Timeout:  sandbox.ShellTimeout,
+	}
+}
+
 // buildToolRegistry 顯式註冊這個 Workspace 的全部內建 Tool（憲法 2.3）：
 // internal/tool 自帶的 HTTP Tool 與 File Tool，加上住在 internal/memory、需要
 // Workspace 路徑的 Memory Tool。每個組裝點都該經此函式取得 Registry——`oryxos init`
@@ -92,10 +112,14 @@ func sandboxConfig(cfg *config.Config) tool.SandboxConfig {
 //
 // wsRoot 是 Workspace 的根：File Tool 一律經它開檔，能力因此界定在 Workspace 之內。
 // 它與長期記憶、Bootstrap 用的是**同一個** root，不另開一份。
-func buildToolRegistry(sandbox tool.SandboxConfig, wsRoot *os.Root, longTerm *memory.LongTermMemory,
-	skills core.ContextLoader, skillRefs []string) (*tool.Registry, error) {
+//
+// **shell 不受它約束**：os.Root 管的是這個 Go 進程自己的開檔（openat），不改變進程
+// 的檔案系統視圖，對子進程完全無效。shell 能碰的範圍是 oryxos 進程本身的權限，
+// 要真隔離得把 oryxos 跑在容器裡（容器級隔離屬擴展階段）。
+func buildToolRegistry(sandbox tool.SandboxConfig, shell tool.ShellRuntime, wsRoot *os.Root,
+	longTerm *memory.LongTermMemory, skills core.ContextLoader, skillRefs []string) (*tool.Registry, error) {
 	registry := tool.NewRegistry()
-	if err := tool.RegisterBuiltins(registry, tool.NewSandboxChecker(sandbox), wsRoot); err != nil {
+	if err := tool.RegisterBuiltins(registry, tool.NewSandboxChecker(sandbox), wsRoot, shell); err != nil {
 		return nil, fmt.Errorf("組裝 Tool registry: %w", err)
 	}
 	for _, memTool := range []tool.OryxTool{memory.NewSaveMemoryTool(longTerm), memory.NewRecallMemoryTool(longTerm)} {
@@ -350,7 +374,8 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	longTerm := memory.NewLongTermMemory(wsRoot, filepath.Join("memory", memoryFile))
 
 	// Profile 的 tools 欄位過濾可用子集，引用未註冊的 Tool 在啟動即報清晰錯誤。
-	registry, err := buildToolRegistry(sandboxConfig(cfg), wsRoot, longTerm, contextLoader, skillRefs)
+	sandbox := sandboxConfig(cfg)
+	registry, err := buildToolRegistry(sandbox, shellRuntime(sandbox, ws), wsRoot, longTerm, contextLoader, skillRefs)
 	if err != nil {
 		return err
 	}
@@ -410,6 +435,28 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 			slices.Contains(prof.Tools, tool.WriteFileToolName) ||
 			slices.Contains(prof.Tools, tool.ListDirToolName)) {
 		fmt.Fprintf(out, "提醒：%s/config.yaml 的 file.allowed_paths 為空，File Tool 呼叫將全部被攔截；請把允許的路徑加入白名單。\n", workspaceDir)
+	}
+	// 命令白名單同一條。判斷「空」同樣用校驗器自己的那一份（EffectiveAllowedCommands）：
+	// `allowed_commands: [/usr/bin/git]` 這種寫成路徑的條目永遠比不中任何請求（合法的
+	// command 不含路徑分隔符），只數長度會把它當成「已配置」而閉嘴。
+	if len(tool.EffectiveAllowedCommands(cfg.Shell.AllowedCommands)) == 0 &&
+		slices.Contains(prof.Tools, tool.ShellToolName) {
+		fmt.Fprintf(out, "提醒：%s/config.yaml 的 shell.allowed_commands 為空，shell 呼叫將全部被攔截；請把允許的程式名加入白名單。\n", workspaceDir)
+	}
+	// 第二種提醒：**PATH 目錄與 file.allowed_paths 重疊是一條內部提權路徑**。
+	//
+	// 父進程的 PATH 若含有一個落在 file.allowed_paths 之內的目錄，Agent 光靠**已被
+	// 授權的 write_file** 就能在那裡放一個與白名單命令同名的檔案、或覆寫該目錄下既有
+	// 的可執行檔——把「寫檔權限」升級成「執行白名單內程式的權限」。這不需要任何外部
+	// 攻擊者：兩個能力都是使用者自己開的。
+	//
+	// **警告而非 fail fast**：重疊可能是使用者刻意的（`node_modules/.bin` 這類寫法
+	// 很常見），而且與 Profile 有沒有列 Tool 無關——設定本身就是那個形狀。
+	if overlapping := tool.PathDirsOverlappingAllowedPaths(
+		tool.ParentPathDirs(), cfg.File.AllowedPaths, ws); len(overlapping) > 0 {
+		fmt.Fprintf(out, "提醒：PATH 上的 %s 落在 %s/config.yaml 的 file.allowed_paths 之內；"+
+			"這代表 write_file 能新增或改掉 shell 跑得到的程式（等於把寫檔權限升級成執行權限）。"+
+			"若非刻意，請讓兩者不要重疊。\n", strings.Join(overlapping, "、"), workspaceDir)
 	}
 
 	// 對話與審計落 Workspace 內單一 SQLite 檔：備份或搬遷 Workspace 就是搬檔案。

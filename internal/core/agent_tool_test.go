@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rexshen5913/oryxos/internal/core"
 	"github.com/rexshen5913/oryxos/internal/provider"
@@ -52,8 +53,27 @@ func newToolAgentIn(t *testing.T, baseURL string, profile *core.Profile, subset 
 	sandbox tool.SandboxConfig, root *os.Root, logger *slog.Logger, st *testStore,
 	extra ...tool.OryxTool) *core.AgentService {
 	t.Helper()
+	return newToolAgentWithShell(t, baseURL, profile, subset, sandbox,
+		testShellRuntime(t, root.Name()), root, logger, st, extra...)
+}
+
+// testShellRuntime 是 shell 的執行上下文預設值：工作目錄是傳進來的 Workspace、
+// PATH 是真實的（這些測試真的跑 echo），超時給得寬。
+//
+// 沒列 shell 的 Profile 完全用不到它，但 RegisterBuiltins 會擋下非正數的 Timeout
+// （那是一個會讓每次呼叫都假逾時的接線失誤），所以這裡一律給一個有效值。
+func testShellRuntime(t *testing.T, dir string) tool.ShellRuntime {
+	t.Helper()
+	return tool.ShellRuntime{Dir: dir, PathDirs: tool.ParentPathDirs(), Timeout: 20 * time.Second}
+}
+
+// newToolAgentWithShell 同 newToolAgentIn，另外指定 shell 的執行上下文。
+func newToolAgentWithShell(t *testing.T, baseURL string, profile *core.Profile, subset []string,
+	sandbox tool.SandboxConfig, shell tool.ShellRuntime, root *os.Root, logger *slog.Logger,
+	st *testStore, extra ...tool.OryxTool) *core.AgentService {
+	t.Helper()
 	r := tool.NewRegistry()
-	if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(sandbox), root); err != nil {
+	if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(sandbox), root, shell); err != nil {
 		t.Fatalf("RegisterBuiltins: %v", err)
 	}
 	for _, et := range extra {

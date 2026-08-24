@@ -48,9 +48,11 @@ func TestToolsListsEverythingWritableIntoProfile(t *testing.T) {
 	}
 	// 內建 Tool、Memory Tool、原生 Go Tool 示例都在同一個 Registry，一起列才回答得了
 	// 「tools 可以寫什麼」。
-	// 三個 File Tool 在這裡不需要任何額外接線：它們經 RegisterBuiltins 進同一個
-	// Registry，於是自動被列出來——「新的內建 Tool 不另闢鏈路」這句話的斷言就是這一格。
-	for _, want := range []string{"http_get", "read_file", "write_file", "list_dir", "save_memory", "recall_memory", "text_stats", "load_skill"} {
+	// 三個 File Tool 與 shell 在這裡不需要任何額外接線：它們經 RegisterBuiltins 進
+	// 同一個 Registry，於是自動被列出來——「新的內建 Tool 不另闢鏈路」這句話的斷言
+	// 就是這一格。使用者要據這份清單知道 Profile 的 tools 欄位可以寫哪些名字，所以
+	// **用途說明也要跟著出來**（下面那格）。
+	for _, want := range []string{"http_get", "read_file", "write_file", "list_dir", "shell", "save_memory", "recall_memory", "text_stats", "load_skill"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("輸出沒有內建 Tool %s:\n%s", want, got)
 		}
@@ -58,6 +60,19 @@ func TestToolsListsEverythingWritableIntoProfile(t *testing.T) {
 	// 描述：光有名字挑不出要哪一個。
 	if !strings.Contains(got, "把收到的 text 原樣回覆") {
 		t.Errorf("輸出沒有 MCP 工具的描述:\n%s", got)
+	}
+	// 四個新 Tool 的**用途**也要列得出來（US 41）：使用者是靠這一欄決定 tools 欄位
+	// 要寫哪幾個名字的，只有名字等於要他自己猜 write_file 會不會追加、shell 支不支援
+	// 管線。比對各自描述裡最有辨識度的那句。
+	for _, want := range []string{
+		"回傳內容與是否被截斷",   // read_file
+		"覆寫該檔案原有的全部內容", // write_file
+		"是否為目錄與大小",     // list_dir
+		"不經 shell 直譯器", // shell
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("輸出沒有帶出新內建 Tool 的用途說明 %q:\n%s", want, got)
+		}
 	}
 }
 

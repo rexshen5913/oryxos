@@ -319,6 +319,8 @@ SandboxChecker 子模組。Tool 執行前做白名單校驗，三個核心方法
 
 任意校驗失敗回傳 SandboxViolation 錯誤，Tool 執行終止。擴展階段用子進程加 bwrap 或容器隔離做完整 sandbox。
 
+Shell Tool 走**結構化 exec**（ADR-0005）：輸入是 `command`（程式名）＋ `args`（參數陣列），以 `exec.CommandContext` 直接執行，不經任何 shell 直譯器。`checkShellCommand` 的「首個 token」因此就是 `argv[0]`，一次字串比對即可，中間沒有第二個解析器可以被騙。連帶收窄執行上下文：`Dir` 固定為 Workspace 根（與 `checkFilePath` 的解析基準同一個），`Env` 白名單式只傳 `PATH`／`HOME`／`LANG` 三個變數，其中 `PATH` 傳的是丟掉相對段與空段後的絕對段清單（與解析執行檔所用的是同一份）。保證只到 OryxOS 直接啟動的子進程的 `argv[0]`，**不延伸到那個程式接下來啟動什麼**。
+
 這裡要點明：Sandbox 加白名單是核心階段唯一的 Tool 治理手段，而 Profile 級的 Tool Policy（哪個 Agent 能用哪些 Tool）放在擴展階段。
 
 核心階段 Profile 的 tools 字段已經能限定 Agent 可用 Tool 子集，算是 Tool 治理的雛形，完整的 allow/deny 策略擴展階段補。

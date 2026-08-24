@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/rexshen5913/oryxos/internal/core"
+	"time"
 )
 
 // TestSubsetErrorListsAvailableTools 釘住**錯誤訊息把死路變成走得出去的路**。
@@ -36,7 +37,7 @@ func TestSubsetErrorListsAvailableTools(t *testing.T) {
 			t.Errorf("關閉 Workspace root: %v", cerr)
 		}
 	})
-	if err := RegisterBuiltins(registry, NewSandboxChecker(SandboxConfig{}), wsRoot); err != nil {
+	if err := RegisterBuiltins(registry, NewSandboxChecker(SandboxConfig{}), wsRoot, ShellRuntime{Dir: t.TempDir(), Timeout: time.Minute}); err != nil {
 		t.Fatalf("RegisterBuiltins: %v", err)
 	}
 	svc, err := ConnectMcpServers(context.Background(), registry, []core.McpServerSpec{

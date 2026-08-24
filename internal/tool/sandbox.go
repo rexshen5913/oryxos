@@ -29,11 +29,12 @@ type SandboxConfig struct {
 	ShellTimeout    time.Duration
 }
 
-// SandboxChecker 做 Tool 執行前的應用層白名單校驗：HTTP 域名、檔案路徑，
-// 以及 Shell 命令（隨 Shell Tool 於後續 ticket 加入）。
+// SandboxChecker 做 Tool 執行前的應用層白名單校驗：HTTP 域名、檔案路徑、Shell 命令。
+// 三種白名單同一個落點是技術方案 §6.7 的設計。
 type SandboxChecker struct {
-	allowedDomains []string
-	allowedPaths   []string
+	allowedDomains  []string
+	allowedPaths    []string
+	allowedCommands []string
 }
 
 // NewSandboxChecker 以 config.yaml 的三段設定建立校驗器；空白名單全部拒絕。
@@ -43,8 +44,9 @@ type SandboxChecker struct {
 // 的啟動提醒與校驗結果不可能對不上（見 EffectiveAllowedPaths 的說明）。
 func NewSandboxChecker(cfg SandboxConfig) *SandboxChecker {
 	return &SandboxChecker{
-		allowedDomains: cfg.AllowedDomains,
-		allowedPaths:   EffectiveAllowedPaths(cfg.AllowedPaths),
+		allowedDomains:  cfg.AllowedDomains,
+		allowedPaths:    EffectiveAllowedPaths(cfg.AllowedPaths),
+		allowedCommands: EffectiveAllowedCommands(cfg.AllowedCommands),
 	}
 }
 
@@ -82,6 +84,42 @@ func EffectiveAllowedPaths(entries []string) []string {
 		effective = append(effective, base)
 	}
 	return effective
+}
+
+// EffectiveAllowedCommands 回傳一組 shell.allowed_commands 之中**校驗器實際會拿來
+// 比對**的條目。兩種條目回不來，因為它們永遠比不中任何請求：
+//
+//   - **空白條目**（`""`、`"   "`）：使用者寫了一條等於沒寫的設定。
+//   - **含路徑分隔符的條目**（`/usr/bin/git`、`./bin/tool`）：合法的 `command` 不含
+//     分隔符（見 CheckShellCommand 第二條），所以這種寫法永遠對不上任何請求。
+//
+// **這個函式存在的理由與 EffectiveAllowedPaths 完全相同**：讓「白名單是不是空的」
+// 只有一個定義點。組裝點的啟動提醒若自己去數 slice 長度，`allowed_commands:
+// [/usr/bin/git]` 會被當成「已配置」而不提醒，實際上卻每次呼叫都被攔——使用者照著
+// 錯誤訊息「把命令加進去了」，然後繼續失敗，而系統一句話都沒說。
+//
+// 條目本身**不做 trim 後再比對**，理由同 EffectiveAllowedPaths：只有「trim 後為空」
+// 才算沒寫。
+func EffectiveAllowedCommands(entries []string) []string {
+	effective := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if strings.TrimSpace(entry) == "" {
+			continue
+		}
+		if hasPathSeparator(entry) {
+			continue
+		}
+		effective = append(effective, entry)
+	}
+	return effective
+}
+
+// hasPathSeparator 判斷一個名字含不含路徑分隔符。Windows 的 `\` 與磁碟機代號都要
+// 認得——只認 `/` 會讓 `C:\Windows\system32\cmd.exe` 在 Windows 上漏過去。
+func hasPathSeparator(name string) bool {
+	return strings.ContainsRune(name, '/') ||
+		strings.ContainsRune(name, filepath.Separator) ||
+		filepath.VolumeName(name) != ""
 }
 
 // isAbsolutePath 判斷一個路徑是不是絕對的。兩種寫法都要認得：作業系統自己的絕對
@@ -171,6 +209,50 @@ func (c *SandboxChecker) CheckFilePath(rawPath string) (string, error) {
 	// 其餘條目一起倒出來等於交出這個 Workspace 還允許哪些路徑。
 	return "", fmt.Errorf("%w: 路徑 %q 不在 file.allowed_paths 白名單（請把它所在的目錄加進 Workspace config.yaml 的 file.allowed_paths）",
 		ErrSandboxViolation, rawPath)
+}
+
+// CheckShellCommand 校驗 command 是 shell.allowed_commands 裡的一個程式名。
+// 任何拒絕都是 ErrSandboxViolation。
+//
+// 技術方案 §6.7 稱它 checkShellCommand（「拆出命令**首個** token 比對白名單」）——
+// 結構化 exec 之下 `argv[0]` **就是**首個 token，那句字面因此原樣成立。
+//
+// **這裡沒有切分器，也不該有**（ADR-0005）。`bash -c` 之下交出去的是一段文字，由
+// bash 決定怎麼切、怎麼展開，Go 這邊的任何檢查都是在猜 bash 會怎麼解讀那串字；
+// 結構化 exec 交出去的是一個陣列，直接進 execve，中間沒有第二個解析器。白名單檢查
+// 因此退化成兩條規則加一次字串比對：
+//
+//  1. **不得為空。** `command` 是必填的程式名。
+//  2. **不得含路徑分隔符。** exec.Command 對含分隔符的名字當路徑用、不查 PATH；
+//     放行則 `./x` 與 `/tmp/x` 會繞過「白名單是一份程式名清單」的語義。而「`git`
+//     在白名單時 `/usr/bin/git` 算不算」這個問題兩種答案都說得通，選最保守的一種
+//     最好解釋。
+//  3. **字面完全匹配。** 不做萬用字元、不做 basename 正規化（spec #4 定案）。
+//
+// **白名單是允許清單，不會長出黑名單**：這裡不硬性擋下任何命令名，`bash`、`sh`、
+// `python`、`find`、`git` 都不例外。窮舉不完的黑名單只會製造「我擋住了」的錯覺，而
+// 「哪些看似無害的工具能拿來執行別的程式」在定義上窮舉不完（`find -exec`、`git -c`
+// 都不是直譯器卻都做得到）。使用者把直譯器列進白名單是他自己的授權決定。
+//
+// **保證的範圍只到 OryxOS 直接啟動的那個子進程的 `argv[0]`**，不延伸到那個程式接下來
+// 啟動什麼。這條界線在 shell.go 的型別說明與 config.yaml 的模板註解裡都要寫出來。
+func (c *SandboxChecker) CheckShellCommand(command string) error {
+	if command == "" {
+		return fmt.Errorf("%w: command 不得為空（請給一個程式名，例如 git）", ErrSandboxViolation)
+	}
+	if hasPathSeparator(command) {
+		return fmt.Errorf("%w: command %q 含路徑分隔符；shell.allowed_commands 是一份程式名清單，只接受不含路徑的名字（例如 git，不是 /usr/bin/git）",
+			ErrSandboxViolation, command)
+	}
+	for _, allowed := range c.allowedCommands {
+		if command == allowed {
+			return nil
+		}
+	}
+	// 訊息只提被拒的那個名字與該改哪一段設定：它會落日誌、也會回填給 LLM，把白名單
+	// 其餘條目一起倒出來等於交出這個 Workspace 還允許跑哪些程式。
+	return fmt.Errorf("%w: 命令 %q 不在 shell.allowed_commands 白名單（要允許它請把這個程式名加進 Workspace config.yaml 的 shell.allowed_commands）",
+		ErrSandboxViolation, command)
 }
 
 // withinSubtree 判斷 target 是否落在 base 這棵子樹內。兩者都已標準化過。
