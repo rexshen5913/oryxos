@@ -250,8 +250,21 @@ func (c *SandboxChecker) CheckShellCommand(command string) error {
 		}
 	}
 	// 訊息只提被拒的那個名字與該改哪一段設定：它會落日誌、也會回填給 LLM，把白名單
-	// 其餘條目一起倒出來等於交出這個 Workspace 還允許跑哪些程式。
-	return fmt.Errorf("%w: 命令 %q 不在 shell.allowed_commands 白名單（要允許它請把這個程式名加進 Workspace config.yaml 的 shell.allowed_commands）",
+	// 其餘條目一起倒出來等於交出這個 Workspace 還允許跑哪些程式。**連基數都不提**
+	// ——「這裡只允許 N 個命令」同樣是這個 Workspace 的資訊。
+	//
+	// **最後那句是對 LLM 說的，不是對使用者說的**（issue #36）。#34 的真實 API 驗收量到
+	// 一組對比：同一個模型、同樣形狀的 SandboxViolation，**路徑**被拒 2 次就停下來告知
+	// 使用者，**命令**被拒卻換了 10 個名字（df、diskutil、stat、du⋯⋯）用光 max_iterations，
+	// 全程沒告訴使用者辦不到——一個沒有產出的 turn 燒掉 10 次 LLM 呼叫，而使用者只看到
+	// 「已達最大迭代次數」，真正的原因完全沒出現在回應裡。
+	//
+	// 差別不在模型，在**可猜的候選數**：路徑被拒時它推得出沒有別的路徑可試；命令被拒時
+	// 候選名近乎無限，而上面那條不洩漏規則（正確地）讓它無從得知什麼是被允許的，於是它
+	// 只能一個一個猜。兩條定案在此互相拉扯，而**能不動安全那條的解法就是把行為指示寫進
+	// 訊息**：告訴它別猜，轉向使用者。
+	return fmt.Errorf("%w: 命令 %q 不在 shell.allowed_commands 白名單（要允許它請把這個程式名加進 Workspace config.yaml 的 shell.allowed_commands）。"+
+		"白名單的內容不會在這裡列出，所以**不要逐一嘗試其他命令名**——請直接告訴使用者你需要哪一個命令，由他決定要不要加進白名單",
 		ErrSandboxViolation, command)
 }
 

@@ -472,6 +472,30 @@ func TestSandboxShellCommandErrorIsActionable(t *testing.T) {
 	if strings.Contains(err.Error(), "internal-deploy-tool") {
 		t.Errorf("訊息 %q 洩漏了白名單其餘條目", err)
 	}
+
+	// **訊息要對 LLM 說話，不只對使用者說話**（issue #36）。
+	//
+	// #34 的真實 API 驗收量到一組對比：同一個模型、同樣形狀的 SandboxViolation，
+	// **路徑**被拒 2 次就停下來告知使用者，**命令**被拒卻換了 10 個名字（df、diskutil、
+	// stat、du⋯⋯）用光 max_iterations，全程沒告訴使用者辦不到。
+	//
+	// 差別不在模型，在於**可猜的候選數**：路徑被拒時它推得出沒有別的路徑可試；命令被
+	// 拒時候選名近乎無限，而訊息（正確地）不揭露白名單其餘條目，於是它只能一個一個猜。
+	//
+	// 修法是純措辭：補一句**對 LLM 的行為指示**——不要逐一嘗試，直接轉向使用者。
+	for _, want := range []string{"逐一", "告訴使用者"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("訊息 %q 未提到 %q——少了對 LLM 的引導，它會改猜下一個命令名而不是轉向使用者", err, want)
+		}
+	}
+
+	// **反向：引導不得以洩漏白名單為代價**（#33 定案不得回退）。
+	// 連「有幾個」都不說——基數本身就是這個 Workspace 的資訊。
+	for _, leak := range []string{"echo", "2 個", "兩個"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("訊息 %q 洩漏了白名單的內容或基數 %q", err, leak)
+		}
+	}
 }
 
 // TestEffectiveAllowedCommands 是命令白名單的「有效條目」收斂，形狀與理由完全比照
