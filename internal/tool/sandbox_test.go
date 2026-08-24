@@ -483,6 +483,10 @@ func TestSandboxShellCommandErrorIsActionable(t *testing.T) {
 	// 拒時候選名近乎無限，而訊息（正確地）不揭露白名單其餘條目，於是它只能一個一個猜。
 	//
 	// 修法是純措辭：補一句**對 LLM 的行為指示**——不要逐一嘗試，直接轉向使用者。
+	//
+	// **同一個模型、同一句 prompt 重驗過：10 次變 1 次。** 這一格與下面那格反向斷言合起來
+	// 擋的就是回退——把引導拿掉（10 次那個形態回來），或「順便把白名單列出來」這種看似
+	// 更有幫助、實際上退回 #33 定案的改法。
 	for _, want := range []string{"逐一", "告訴使用者"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("訊息 %q 未提到 %q——少了對 LLM 的引導，它會改猜下一個命令名而不是轉向使用者", err, want)

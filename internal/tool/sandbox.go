@@ -263,6 +263,10 @@ func (c *SandboxChecker) CheckShellCommand(command string) error {
 	// 候選名近乎無限，而上面那條不洩漏規則（正確地）讓它無從得知什麼是被允許的，於是它
 	// 只能一個一個猜。兩條定案在此互相拉扯，而**能不動安全那條的解法就是把行為指示寫進
 	// 訊息**：告訴它別猜，轉向使用者。
+	//
+	// **改完之後在同一個模型、同一句 prompt、同一份白名單上重驗過：10 次變 1 次**，而且
+	// 模型把「要加進 config.yaml 的哪一段」原樣轉述給了使用者——那句話舊訊息裡本來就有，
+	// 只是模型從沒說出來過，因為它忙著猜下一個名字。白名單內容仍未洩漏。
 	return fmt.Errorf("%w: 命令 %q 不在 shell.allowed_commands 白名單（要允許它請把這個程式名加進 Workspace config.yaml 的 shell.allowed_commands）。"+
 		"白名單的內容不會在這裡列出，所以**不要逐一嘗試其他命令名**——請直接告訴使用者你需要哪一個命令，由他決定要不要加進白名單",
 		ErrSandboxViolation, command)
