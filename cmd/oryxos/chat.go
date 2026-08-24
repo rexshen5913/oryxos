@@ -116,10 +116,17 @@ func shellRuntime(sandbox tool.SandboxConfig, ws string) tool.ShellRuntime {
 // **shell 不受它約束**：os.Root 管的是這個 Go 進程自己的開檔（openat），不改變進程
 // 的檔案系統視圖，對子進程完全無效。shell 能碰的範圍是 oryxos 進程本身的權限，
 // 要真隔離得把 oryxos 跑在容器裡（容器級隔離屬擴展階段）。
-func buildToolRegistry(sandbox tool.SandboxConfig, shell tool.ShellRuntime, wsRoot *os.Root,
+//
+// **shellLimiter 是唯一一個不在這裡建立的依賴，這一點是定案而不是風格**（ticket #35）：
+// 它必須是整個 OryxOS 進程共用的**那一份**，而這個函式**有兩個呼叫點**（runChat 與
+// runTools）——在這裡 `tool.NewShellLimiter()` 就是每次呼叫一份新的，跨 session 的總量
+// 又變回無界，整段威脅模型自我作廢。所以它由呼叫方那一層（composition root）建立一次
+// 再傳進來，形狀與 wsRoot 相同（那個也是呼叫方開好再交進來的）。
+func buildToolRegistry(sandbox tool.SandboxConfig, shell tool.ShellRuntime,
+	shellLimiter *tool.ShellLimiter, wsRoot *os.Root,
 	longTerm *memory.LongTermMemory, skills core.ContextLoader, skillRefs []string) (*tool.Registry, error) {
 	registry := tool.NewRegistry()
-	if err := tool.RegisterBuiltins(registry, tool.NewSandboxChecker(sandbox), wsRoot, shell); err != nil {
+	if err := tool.RegisterBuiltins(registry, tool.NewSandboxChecker(sandbox), wsRoot, shell, shellLimiter); err != nil {
 		return nil, fmt.Errorf("組裝 Tool registry: %w", err)
 	}
 	for _, memTool := range []tool.OryxTool{memory.NewSaveMemoryTool(longTerm), memory.NewRecallMemoryTool(longTerm)} {
@@ -375,7 +382,11 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 
 	// Profile 的 tools 欄位過濾可用子集，引用未註冊的 Tool 在啟動即報清晰錯誤。
 	sandbox := sandboxConfig(cfg)
-	registry, err := buildToolRegistry(sandbox, shellRuntime(sandbox, ws), wsRoot, longTerm, contextLoader, skillRefs)
+	// **composition root：shell 的 admission limiter 在這裡建立，整個進程就這一份。**
+	// 不能下放到 buildToolRegistry——它有兩個呼叫點，在裡面建立就是一份一份（ticket #35）。
+	shellLimiter := tool.NewShellLimiter()
+	registry, err := buildToolRegistry(sandbox, shellRuntime(sandbox, ws), shellLimiter,
+		wsRoot, longTerm, contextLoader, skillRefs)
 	if err != nil {
 		return err
 	}

@@ -1,5 +1,7 @@
 package tool
 
+import "time"
+
 // 回填給 LLM 的結果上限集中在這一個常數區塊。
 //
 // **放同一處是刻意的**：這些數字彼此有關係（它們共同決定一次 turn 最多能塞多少
@@ -24,6 +26,56 @@ const (
 	// 額度（不是合計）。分開算是刻意的：一個把診斷訊息全寫進 stderr 的命令，不該
 	// 因為 stdout 很長就看不到自己的錯誤訊息——而 LLM 的下一步常常只靠 stderr。
 	maxShellOutputBytes = 256 << 10 // 256 KiB
+
+	// maxShellLifecycleWorkers 是 shell 的 admission slot 容量（spec #4 定案的確數）。
+	//
+	// **它數的是「未完成的 lifecycle worker」，不是「未回收的直接子進程」。** 一個
+	// worker 可能卡在**任何**階段：PATH 解析（stat 卡在故障掛載）、Start（fork／execve
+	// 卡住，**此時連直接子進程都還不存在**）、Wait（子進程在 uninterruptible sleep）。
+	// 準確的說法是「至多 8 個未完成的 lifecycle worker，其中每一個可能持有 0 或 1 個
+	// 未回收的直接子進程」——把它描述成「8 個未 reap 的子進程 ＋ 8 條 goroutine」是
+	// 不準確的（spec #29 下修表第二十二列）。
+	//
+	// **它不限制脫離的後代，這一點不能含糊。** 一個 daemonize 的程式（子進程 setsid
+	// 後自己正常退場）會讓 Wait **正常返回**、slot **隨即歸還**，而那個脫離的後代
+	// **還活著**；反覆呼叫因此仍可累積**無界的 detached descendants**。slot 數的是
+	// 「我們還在等的直接子進程」，不是「這台機器上因我們而存在的進程」。要限制後者需要
+	// container／cgroup 等進程樹層級的隔離，屬擴展階段——**使用者不得從「有上限」反推
+	// 成進程樹層級的資源上限**。這與第一道防線的邊界是同一件事的兩面：**脫離 process
+	// group 的東西，我們既殺不到、也數不到。**
+	//
+	// 為什麼需要上限而 MCP 不需要：MCP server 的數量由 config.yaml 限定，洩漏有天然
+	// 上限；shell 由 LLM 觸發、一個 turn 內可反覆呼叫、也可跨 session 重複，同一個
+	// 「留下一條 goroutine 是刻意取捨」原樣套用就變成可被反覆踩的資源洩漏路徑。
+	//
+	// 8 的來源：核心階段單節點、性能目標是 10 個 Agent 等級，8 個並發足夠正常使用。
+	maxShellLifecycleWorkers = 8
+)
+
+// shell 生命週期的三個期限。與上面的回填上限分開，因為它們量的是時間不是大小；形狀
+// 與命名沿用 MCP 那組（mcp.go 的 mcpCloseTimeout／mcpKillReapGrace）。
+const (
+	// shellKillReapGrace 是**期限到、第一道與第二道都已觸發之後**，等待回收的寬限。
+	// 逾期就走第三道：放棄等待、回錯誤。
+	//
+	// **第三道是 bounded return 的唯一來源。** SIGKILL 對卡在 uninterruptible sleep
+	// 的進程無效，該進程不被 OS 回收、Process.Wait 的 wait4 就不返回；而 WaitDelay
+	// 只會「再 Kill 一次 ＋ 關 pipe」，**它不能讓進行中的 Process.Wait 提前返回**。
+	//
+	// 取 2 秒、與 mcpKillReapGrace 同值：SIGKILL 之後的回收是毫秒級的，這個值不是
+	// 效能參數，是「等不到就別再等」的界線。Execute 的最壞返回時間因此是
+	// shell.timeout_seconds ＋ shellKillReapGrace。
+	shellKillReapGrace = 2 * time.Second
+
+	// shellWaitDelay 是第二道防線的期限：Cancel 觸發之後再過這麼久，仍未回收就由
+	// os/exec 關掉**我方**的 pipe，讓複製 goroutine 收工。
+	//
+	// 脫離 process group 的後代照樣抓著輸出 fd（第一道殺不到它），唯一能做的就是關掉
+	// 我們這一側。**這道同時是非 Unix 平台唯一的保障**（那裡沒有 process group）。
+	//
+	// **必須明顯小於 shellKillReapGrace**：第二道要在第三道放棄之前有機會生效，不然
+	// 它形同不存在。
+	shellWaitDelay = 500 * time.Millisecond
 )
 
 // newFilePerm 是 write_file 新建檔案的權限：擁有者可讀寫、其他人唯讀，**不含執行位**。

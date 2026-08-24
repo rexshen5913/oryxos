@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +21,9 @@ import (
 	_ "modernc.org/sqlite" // 測試直接查 sessions 表，用同一個純 Go 驅動
 
 	"github.com/rexshen5913/oryxos/internal/config"
+	"github.com/rexshen5913/oryxos/internal/core"
+	"github.com/rexshen5913/oryxos/internal/memory"
+	"github.com/rexshen5913/oryxos/internal/tool"
 )
 
 // newReplayServer 起一個回放錄製回應的 httptest.Server（ADR-0002）：按請求順序
@@ -1696,5 +1700,97 @@ func TestShellRuntimeTimeoutComesFromSandboxConfig(t *testing.T) {
 	// 在啟動的瞬間就假逾時）。
 	if got := shellRuntime(sandboxConfig(&config.Config{}), t.TempDir()).Timeout; got != 30*time.Second {
 		t.Errorf("缺 shell 段時的 Timeout = %v, 期望回退預設的 30 秒", got)
+	}
+}
+
+// TestShellLimiterIsSharedAcrossBuildToolRegistryCalls 是矩陣 (4b)：admission slot 的
+// 上限**跨 buildToolRegistry 的兩個呼叫點仍然守得住**。
+//
+// **為什麼不能只驗「共用時會共用」。** spec #29 明寫「手動把同一個 limiter 傳給兩個
+// Tool 實例**不算通過**——那只驗了共用的效果，驗不到**建立點在對的那一層**，而後者才是
+// 定案的內容（下修表第十七列：第六輪的修法把 limiter 建在 buildToolRegistry 裡，而它有
+// **兩個呼叫點**，於是「整個進程一份」當場失效）。
+//
+// 所以這一格照 composition root 的實際形狀走：limiter 在**呼叫 buildToolRegistry 之前**
+// 建立一次，然後餵給**兩次真實的 buildToolRegistry 呼叫**（模擬 chat 與 tools 兩條路徑），
+// 讓兩邊拿到的 shell 共同競爭同一組名額。
+//
+// **這一格會抓到的回歸**：有人把 tool.NewShellLimiter() 移進 buildToolRegistry。那時
+// 兩個 registry 各拿一份 8 格的池子，9 個並發呼叫全都進得去，下面的「至少一個被拒」
+// 就會失敗。
+func TestShellLimiterIsSharedAcrossBuildToolRegistryCalls(t *testing.T) {
+	const maxWorkers = 8 // 與 internal/tool 的 maxShellLifecycleWorkers 對齊（對外契約）
+
+	srv := newReplayServer(t)
+	baseDir := setupChatWorkspace(t, srv.URL)
+	ws := filepath.Join(baseDir, workspaceDir)
+	cfgYAML := "providers:\n  openrouter:\n    api_key: ${OPENROUTER_API_KEY}\n    base_url: " + srv.URL +
+		"\nhttp:\n  allowed_domains: []\nshell:\n  allowed_commands: [sleep]\n  timeout_seconds: 2\n"
+	if err := os.WriteFile(filepath.Join(ws, "config.yaml"), []byte(cfgYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load(filepath.Join(ws, "config.yaml"))
+	if err != nil {
+		t.Fatalf("載入設定: %v", err)
+	}
+	wsRoot, err := os.OpenRoot(ws)
+	if err != nil {
+		t.Fatalf("開啟 Workspace: %v", err)
+	}
+	defer func() { _ = wsRoot.Close() }()
+
+	sandbox := sandboxConfig(cfg)
+	longTerm := memory.NewLongTermMemory(wsRoot, filepath.Join("memory", "MEMORY.md"))
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+
+	// ── composition root：建立一次 ──
+	shellLimiter := tool.NewShellLimiter()
+
+	// ── 兩次真實的 buildToolRegistry 呼叫（chat 與 tools 兩條路徑） ──
+	var shells []*tool.Executor
+	for i := range 2 {
+		registry, err := buildToolRegistry(sandbox, shellRuntime(sandbox, ws), shellLimiter,
+			wsRoot, longTerm, config.NewContextLoader(wsRoot), nil)
+		if err != nil {
+			t.Fatalf("第 %d 次 buildToolRegistry: %v", i, err)
+		}
+		exec, err := registry.Subset([]string{"shell"}, nil, logger)
+		if err != nil {
+			t.Fatalf("第 %d 次 Subset: %v", i, err)
+		}
+		shells = append(shells, exec)
+	}
+
+	// N+1 個**並發**呼叫，橫跨兩個 registry。循序驗不到——slot 會在每次之間歸還。
+	const calls = maxWorkers + 1
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	results := make([]core.ToolResult, calls)
+	for i := range calls {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // 一起出發，確保 N+1 個真的同時在場
+			results[i] = shells[i%len(shells)].Execute(context.Background(),
+				core.ToolCall{ID: strconv.Itoa(i), Name: "shell", Arguments: `{"command":"sleep","args":["30"]}`})
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	rejected := 0
+	for _, result := range results {
+		if !result.OK && strings.Contains(result.Error, "已達上限") {
+			rejected++
+		}
+	}
+	if rejected == 0 {
+		t.Errorf("%d 個並發呼叫橫跨兩個 registry，沒有任何一個被 slot 擋下——"+
+			"limiter 不是共用的那一份（是不是被移進 buildToolRegistry 內部建立了？）", calls)
+	}
+	if rejected > calls-maxWorkers {
+		t.Errorf("被拒 %d 個，期望至多 %d 個——上限比 %d 更嚴，兩個 registry 沒有共用同一組名額",
+			rejected, calls-maxWorkers, maxWorkers)
 	}
 }

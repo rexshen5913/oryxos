@@ -127,9 +127,13 @@ func TestMain(m *testing.M) {
 	// 探針模式。必須在 m.Run() 之前返回——那之後會開始解析測試旗標，而這個子進程
 	// 一個旗標都沒拿到。
 	//
-	// 兩種行為，由第一個參數決定：帶 stderr-flood 時往 **stderr** 灌一大坨資料（給
-	// 「stderr 有自己的上限」那一格用），否則把自己的 argv[0] 原樣印到 stdout。
+	// 行為由第一個參數決定：帶 stderr-flood 時往 **stderr** 灌一大坨資料（給「stderr
+	// 有自己的上限」那一格用）、帶 shell 生命週期的探針模式時交給那一組處理，都不是
+	// 就把自己的 argv[0] 原樣印到 stdout。
 	if filepath.Base(os.Args[0]) == argv0ProbeName {
+		if runShellLifecycleProbe(os.Args[1:]) {
+			return
+		}
 		if len(os.Args) > 2 && os.Args[1] == probeStderrFloodArg {
 			n, err := strconv.Atoi(os.Args[2])
 			if err != nil {

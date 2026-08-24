@@ -58,6 +58,7 @@ func newShell(t *testing.T, dir string, allowedCommands []string) tool.OryxTool 
 	return tool.NewShell(
 		tool.NewSandboxChecker(tool.SandboxConfig{AllowedCommands: allowedCommands}),
 		tool.ShellRuntime{Dir: dir, PathDirs: tool.ParentPathDirs(), Timeout: shellTestTimeout},
+		tool.NewShellLimiter(),
 	)
 }
 
@@ -263,6 +264,7 @@ func TestShellArgv0IsWhitelistName(t *testing.T) {
 	shell := tool.NewShell(
 		tool.NewSandboxChecker(tool.SandboxConfig{AllowedCommands: []string{argv0ProbeName}}),
 		tool.ShellRuntime{Dir: t.TempDir(), PathDirs: []string{binDir}, Timeout: shellTestTimeout},
+		tool.NewShellLimiter(),
 	)
 	result := shell.Execute(context.Background(), shellInputJSON(t, argv0ProbeName))
 	if !result.OK {
@@ -321,6 +323,7 @@ func TestShellEnvIsWhitelistedAndPathMatchesResolution(t *testing.T) {
 	shell := tool.NewShell(
 		tool.NewSandboxChecker(tool.SandboxConfig{AllowedCommands: []string{"env"}}),
 		tool.ShellRuntime{Dir: t.TempDir(), PathDirs: pathDirs, Timeout: shellTestTimeout},
+		tool.NewShellLimiter(),
 	)
 	result := shell.Execute(context.Background(), `{"command":"env"}`)
 	if !result.OK {
@@ -359,6 +362,7 @@ func TestShellPathEnvDropsRelativeAndEmptySegments(t *testing.T) {
 	shell := tool.NewShell(
 		tool.NewSandboxChecker(tool.SandboxConfig{AllowedCommands: []string{"env"}}),
 		tool.ShellRuntime{Dir: t.TempDir(), PathDirs: pathDirs, Timeout: shellTestTimeout},
+		tool.NewShellLimiter(),
 	)
 	result := shell.Execute(context.Background(), `{"command":"env"}`)
 	if !result.OK {
@@ -406,6 +410,7 @@ func TestShellCommandOnlyInDroppedSegmentIsNotFound(t *testing.T) {
 	shell := tool.NewShell(
 		tool.NewSandboxChecker(tool.SandboxConfig{AllowedCommands: []string{"mytool"}}),
 		tool.ShellRuntime{Dir: dir, PathDirs: pathDirs, Timeout: shellTestTimeout},
+		tool.NewShellLimiter(),
 	)
 	result := shell.Execute(context.Background(), `{"command":"mytool"}`)
 
@@ -573,6 +578,7 @@ func TestShellStderrHasItsOwnLimit(t *testing.T) {
 	shell := tool.NewShell(
 		tool.NewSandboxChecker(tool.SandboxConfig{AllowedCommands: []string{argv0ProbeName}}),
 		tool.ShellRuntime{Dir: t.TempDir(), PathDirs: []string{binDir}, Timeout: shellTestTimeout},
+		tool.NewShellLimiter(),
 	)
 
 	tests := []struct {
@@ -624,6 +630,7 @@ func TestShellTimeoutAbortsCommand(t *testing.T) {
 	shell := tool.NewShell(
 		tool.NewSandboxChecker(tool.SandboxConfig{AllowedCommands: []string{"sleep"}}),
 		tool.ShellRuntime{Dir: t.TempDir(), PathDirs: tool.ParentPathDirs(), Timeout: 100 * time.Millisecond},
+		tool.NewShellLimiter(),
 	)
 
 	// 這段計時**不是**在斷言 bounded return，而是在斷言「取消訊號真的接上了」。
@@ -673,6 +680,7 @@ func TestShellParentDeadlineIsNotReportedAsShellTimeout(t *testing.T) {
 	shell := tool.NewShell(
 		tool.NewSandboxChecker(tool.SandboxConfig{AllowedCommands: []string{"sleep"}}),
 		tool.ShellRuntime{Dir: t.TempDir(), PathDirs: tool.ParentPathDirs(), Timeout: shellLimit},
+		tool.NewShellLimiter(),
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -770,7 +778,7 @@ func TestBuiltinToolRequiredParamNames(t *testing.T) {
 		{tl: tool.NewWriteFile(checker, root), wantRequired: []string{"path", "content"}},
 		{tl: tool.NewListDir(checker, root), wantRequired: []string{"path"}},
 		{
-			tl:           tool.NewShell(checker, tool.ShellRuntime{Dir: dir, Timeout: shellTestTimeout}),
+			tl:           tool.NewShell(checker, tool.ShellRuntime{Dir: dir, Timeout: shellTestTimeout}, tool.NewShellLimiter()),
 			wantRequired: []string{"command"},
 			wantOptional: []string{"args"},
 		},

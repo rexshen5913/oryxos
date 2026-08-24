@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rexshen5913/oryxos/internal/core"
 	"github.com/rexshen5913/oryxos/internal/tool"
@@ -302,5 +303,89 @@ func TestProcessShellVisibleOnlyWhenListed(t *testing.T) {
 				t.Errorf("送往 LLM 的工具清單 = %v, 期望與 Profile 的 tools %v 完全一致", declared, tt.tools)
 			}
 		})
+	}
+}
+
+// TestProcessShellTimeoutDoesNotHangTheTurn 是 ticket #35 在 seam 層的那一句話：
+// **一個卡死的命令不會卡死整個 turn**。
+//
+// 前四個場景驗的都是「命令跑得動、或被擋下」；這一格驗的是**跑不掉的收得回來**——
+// LLM 要了一個 `sleep 120`、shell 的上限只有幾百毫秒，於是逾時錯誤回填、**第二輪
+// LLM 繼續對話**告知使用者，而不是整個 turn 停在那個命令上。
+//
+// 四件事一起釘住：
+//
+//  1. **turn 在期限內走完**。這是三句保證的第一句在 seam 層的樣子——掛到測試框架的
+//     timeout 去就等於沒有 bounded return，所以這裡量的是真實耗時，不只是「有沒有回」。
+//  2. 回填的是**逾時錯誤**，而且**如實揭露可能有殘留**（US 58）——不說任何
+//     「已清乾淨」的話。
+//  3. **ReAct 循環照常往下走**：tool 訊息之後還有第二輪 assistant 回應。逾時是一個
+//     Tool 結果，不是一次 turn 失敗。
+//  4. **落 tool_invocations**（憲法 6.2）：逾時的呼叫同樣要進審計表，否則「哪些命令
+//     回收不掉」在事後查不到——而那正是 slot 滿時要人介入的排查起點。
+func TestProcessShellTimeoutDoesNotHangTheTurn(t *testing.T) {
+	const shellLimit = 300 * time.Millisecond
+	srv := newReplayServer(t,
+		readFixture(t, "reply_shell_timeout_tool_call.json"),
+		readFixture(t, "reply_shell_timeout_final.json"),
+	)
+	root, dir := newTestWorkspace(t)
+	dbPath := filepath.Join(t.TempDir(), "oryxos.db")
+	db := openStore(t, dbPath)
+	agent := newToolAgentWithShell(t, srv.URL, testProfile(), []string{tool.ShellToolName},
+		tool.SandboxConfig{AllowedCommands: []string{"sleep"}},
+		tool.ShellRuntime{Dir: dir, PathDirs: tool.ParentPathDirs(), Timeout: shellLimit},
+		root, discardLogger(), db)
+	session := activeSession(t, db.sessions())
+
+	started := time.Now()
+	resp, err := agent.Process(context.Background(), session, "幫我跑一個很久的命令")
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+
+	// (1) turn 在期限內走完。`sleep 120` 若真的跑完，這裡會是兩分鐘。
+	if elapsed > 30*time.Second {
+		t.Errorf("整個 turn 花了 %v（命令是 sleep 120）——逾時沒有把它中止，bounded return 不成立", elapsed)
+	}
+	// (3) ReAct 循環往下走了：第二輪 assistant 回應存在且據逾時作答。
+	if !strings.Contains(resp, "中止") {
+		t.Errorf("回應 = %q, 期望第二輪據逾時繼續對話", resp)
+	}
+	msgs := session.Messages
+	if len(msgs) != 4 {
+		t.Fatalf("歷史長度 = %d, 期望 4（user／assistant tool_calls／tool／assistant）: %+v", len(msgs), msgs)
+	}
+	if msgs[2].Role != core.RoleTool || msgs[2].ToolCallID != "call_shell_timeout_1" {
+		t.Fatalf("messages[2] 應為回應 call_shell_timeout_1 的 tool 訊息: %+v", msgs[2])
+	}
+
+	// (2) 回填是逾時錯誤，且如實揭露殘留。**比對語意關鍵字而不是整句**——措辭屬於
+	// 實作，綁死字串會讓下一次調整措辭連帶改一批無關測試。
+	toolMsg := msgs[2].Content
+	for _, want := range []string{"逾時", "殘留"} {
+		if !strings.Contains(toolMsg, want) {
+			t.Errorf("回填的 tool 訊息 %q 未提到 %q", toolMsg, want)
+		}
+	}
+	// **不得宣稱清乾淨了**：三句保證的第三句明說脫離 group 的後代殺不到。
+	for _, forbidden := range []string{"已清乾淨", "全部收掉", "無殘留"} {
+		if strings.Contains(toolMsg, forbidden) {
+			t.Errorf("回填的 tool 訊息宣稱 %q，但脫離 process group 的後代殺不到: %q", forbidden, toolMsg)
+		}
+	}
+
+	// (4) 逾時的呼叫同樣落審計表。
+	db.flush(t)
+	invocations := queryToolInvocations(t, dbPath)
+	if len(invocations) != 1 {
+		t.Fatalf("tool_invocations 資料列數 = %d, 期望 1（逾時也要落庫）: %+v", len(invocations), invocations)
+	}
+	if got := invocations[0].toolName; got != tool.ShellToolName {
+		t.Errorf("tool_name = %q, 期望 shell", got)
+	}
+	if !strings.Contains(invocations[0].parameters, "sleep") {
+		t.Errorf("parameters 未落庫呼叫參數: %q", invocations[0].parameters)
 	}
 }

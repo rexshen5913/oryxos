@@ -20,7 +20,7 @@ func newHTTPRegistry(t *testing.T) *tool.Registry {
 	t.Helper()
 	root, _ := newWorkspace(t)
 	r := tool.NewRegistry()
-	if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(tool.SandboxConfig{}), root, testShellRuntime(t)); err != nil {
+	if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(tool.SandboxConfig{}), root, testShellRuntime(t), tool.NewShellLimiter()); err != nil {
 		t.Fatalf("RegisterBuiltins: %v", err)
 	}
 	return r
@@ -166,7 +166,7 @@ func TestRegisterBuiltinsRejectsIncompleteShellRuntime(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tool.RegisterBuiltins(tool.NewRegistry(), tool.NewSandboxChecker(tool.SandboxConfig{}), root, tt.shell)
+			err := tool.RegisterBuiltins(tool.NewRegistry(), tool.NewSandboxChecker(tool.SandboxConfig{}), root, tt.shell, tool.NewShellLimiter())
 			if err == nil {
 				t.Fatal("接線不完整時應報錯，實際註冊成功——那會變成執行期才發現的安靜錯誤")
 			}
@@ -178,11 +178,37 @@ func TestRegisterBuiltinsRejectsIncompleteShellRuntime(t *testing.T) {
 }
 
 func TestRegisterBuiltinsRejectsNilWorkspaceRoot(t *testing.T) {
-	err := tool.RegisterBuiltins(tool.NewRegistry(), tool.NewSandboxChecker(tool.SandboxConfig{}), nil, testShellRuntime(t))
+	err := tool.RegisterBuiltins(tool.NewRegistry(), tool.NewSandboxChecker(tool.SandboxConfig{}), nil, testShellRuntime(t), tool.NewShellLimiter())
 	if err == nil {
 		t.Fatal("wsRoot 為 nil 時應報錯，實際成功註冊——第一次 read_file 呼叫才會 panic")
 	}
 	if !strings.Contains(err.Error(), "組裝點") {
 		t.Errorf("錯誤訊息 %q 未指向組裝點", err.Error())
+	}
+}
+
+// TestRegisterBuiltinsRejectsNilShellLimiter 把「組裝點漏傳 admission limiter」從一次
+// **安靜失效的資源洩漏**變成一次啟動錯誤（ticket #35）。
+//
+// 這一格的失敗形態比 nil wsRoot 與不完整的 ShellRuntime **都危險**。前兩者要嘛立刻
+// panic、要嘛每次呼叫都出錯，總之會被發現；limiter 若改成「nil 視同不限制」，上限會
+// **看起來還在**（型別、參數、文件、註解全都在）卻完全不生效——而它防的是一條只在
+// 反覆踩之後才顯現的洩漏路徑，不會有人在驗收時發現。
+//
+// 所以這裡的判準是「報錯」，不是「寬容處理」：limiter 是 shell 生命週期唯一的資源
+// 天花板，沒有它就沒有那個天花板，那不是可以預設放行的東西。
+func TestRegisterBuiltinsRejectsNilShellLimiter(t *testing.T) {
+	root, _ := newWorkspace(t)
+	err := tool.RegisterBuiltins(tool.NewRegistry(), tool.NewSandboxChecker(tool.SandboxConfig{}),
+		root, testShellRuntime(t), nil)
+	if err == nil {
+		t.Fatal("limiter 為 nil 時應報錯，實際成功註冊——上限會看起來還在卻完全不生效")
+	}
+	if !strings.Contains(err.Error(), "組裝點") {
+		t.Errorf("錯誤訊息 %q 未指向組裝點", err.Error())
+	}
+	// 訊息要說得出「不能在 buildToolRegistry 內部建立」——那是下一個人最可能做錯的事。
+	if !strings.Contains(err.Error(), "buildToolRegistry") {
+		t.Errorf("錯誤訊息 %q 未說明建立點必須在 composition root", err.Error())
 	}
 }

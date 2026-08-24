@@ -1,0 +1,17 @@
+{
+  "id": "chatcmpl-fixture-shell-timeout-2",
+  "object": "chat.completion",
+  "created": 1722926701,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "那個命令跑太久被中止了，我沒有拿到結果。要我改用一個比較短的命令，還是把 shell.timeout_seconds 調高再試一次？"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {"prompt_tokens": 240, "completion_tokens": 40, "total_tokens": 280}
+}

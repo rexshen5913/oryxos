@@ -190,17 +190,23 @@ func (r *Registry) suggest(missing string) string {
 // RegisterBuiltins 顯式註冊本 package 自帶的內建 Tool：HttpTools（http_get、
 // http_post）、FileTools（read_file、write_file、list_dir）與 Shell Tool（shell）。
 //
-// 兩組依賴都**由組裝點傳進來**而不是這裡自己造（憲法 5.2）：
+// 三組依賴都**由組裝點傳進來**而不是這裡自己造（憲法 5.2）：
 //
 //   - wsRoot 是 Workspace 的根，File Tool 一律經它開檔。這個 package 不知道 Workspace
 //     在磁碟哪裡，而呼叫端本來就已經為 Bootstrap 與長期記憶開好同一個 root，再開一個
 //     只會多一份要關的東西。
 //   - shell 是 Shell Tool 的執行上下文（工作目錄、過濾後的 PATH 段、超時上限）。
+//   - shellLimiter 是 shell 的 admission slot。**它與另外兩個不同：必須是整個 OryxOS
+//     進程共用的那一份。** 這個函式**有兩個呼叫點**（cmd/oryxos 的 chat 與 tools），
+//     所以它既不能在這裡建立、也不能在呼叫它的那個 buildToolRegistry 裡建立——那樣
+//     就是每次呼叫一份新的，「整個進程一份」當場失效，跨 session 的總量又變回無界。
+//     建立點必須再往上一層（composition root）。
 //
 // Memory Tool（save_memory 等）不在此註冊：它們住在 internal/memory，且需要
 // Workspace 的 MEMORY.md 路徑，而 internal/tool 不該知道 Workspace 的檔案佈局。
 // 由組裝點顯式 Register 進同一個 Registry（憲法 2.3 要的是顯式，不是單一函式）。
-func RegisterBuiltins(r *Registry, checker *SandboxChecker, wsRoot *os.Root, shell ShellRuntime) error {
+func RegisterBuiltins(r *Registry, checker *SandboxChecker, wsRoot *os.Root,
+	shell ShellRuntime, shellLimiter *ShellLimiter) error {
 	// 漏傳的話註冊會照樣成功，然後第一次 File Tool 呼叫在 root.Lstat 裡解參考 nil
 	// ——repo 裡沒有任何 recover()，那會在對話中途直接殺掉 CLI。在這裡擋下來，
 	// 讓一次接線失誤變成一次啟動錯誤。措辭指向組裝點，理由同下面 Subset 對
@@ -222,10 +228,17 @@ func RegisterBuiltins(r *Registry, checker *SandboxChecker, wsRoot *os.Root, she
 	if shell.Timeout <= 0 {
 		return fmt.Errorf("註冊內建 Tool: shell 的超時上限是 %v，必須為正數（組裝點漏傳了，預設值來自 config 的 shell.timeout_seconds）", shell.Timeout)
 	}
+	// 第三種接線失誤，失敗形態比前兩種**都安靜**：limiter 漏傳的話第一次 shell 呼叫會
+	// 在 acquire 裡對 nil 解參考，直接殺掉 CLI；就算改成「nil 視同不限制」也更糟——
+	// 那會讓上限**看起來還在**（型別、參數、文件都在）卻完全不生效，而它防的正是一條
+	// 只在反覆踩之後才顯現的資源洩漏路徑，不會有人在驗收時發現。
+	if shellLimiter == nil {
+		return fmt.Errorf("註冊內建 Tool: 缺 shell 的 admission limiter，未完成的 lifecycle worker 將沒有上限（組裝點漏傳了；它必須由 composition root 建立一次再注入，不能在 buildToolRegistry 內部建立）")
+	}
 	for _, t := range []OryxTool{
 		NewHTTPGet(checker), NewHTTPPost(checker),
 		NewReadFile(checker, wsRoot), NewWriteFile(checker, wsRoot), NewListDir(checker, wsRoot),
-		NewShell(checker, shell),
+		NewShell(checker, shell, shellLimiter),
 	} {
 		if err := r.Register(t); err != nil {
 			return fmt.Errorf("註冊內建 Tool: %w", err)

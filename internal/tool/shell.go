@@ -63,18 +63,30 @@ type ShellRuntime struct {
 // 自己開檔，openat 管得住），但它**不改變進程的檔案系統視圖**，對子進程沒有任何作用。
 // 要真隔離就把 oryxos 跑在容器裡，容器級隔離屬擴展階段。
 //
-// **逾時在本票只做到 exec.CommandContext 的原生行為**（只 Kill 直接子進程）：沒有
-// process group 終止、沒有 bounded wait。後代若持有 stdout／stderr，Wait 可能不返回。
-// 這是**已知缺口，由 ticket #35 關閉**——在那之前，逾時的回填訊息一律如實說明可能有
-// 殘留進程，不說任何「已清乾淨」的話。
+// **逾時的保證只有三句，不得寫得更好聽**（ticket #35，完整論述見 shell_lifecycle.go）：
+// Execute **一定在期限內返回**（第零道 ＋ 第三道，**不是** WaitDelay）；**同一 process
+// group 內、且可被 SIGKILL 回收的**後代一定被收掉；**不保證**脫離 group 者死亡、不保證
+// 卡在 uninterruptible sleep 的直接子進程被回收、也不保證卡在解析或 Start 的 worker
+// 完成——這些情形的回填與審計訊息都**如實說明可能有殘留**。
 type shellTool struct {
 	checker *SandboxChecker
 	runtime ShellRuntime
+	// limiter 是**整個 OryxOS 進程共用一份**的 admission slot，由 composition root
+	// 建立一次再注入（憲法 5.2；不是 package 級全域，也不在 buildToolRegistry 內部
+	// 建立——那個函式有兩個呼叫點）。詳見 ShellLimiter 的型別說明。
+	limiter *ShellLimiter
+	// hooks 是測試替身的同步點，正式路徑一律是零值（全 nil）。見 shellTestHooks。
+	hooks shellTestHooks
 }
 
 // NewShell 建立內建 Tool shell。依賴顯式注入（憲法 5.2），形狀同 NewReadFile。
-func NewShell(checker *SandboxChecker, runtime ShellRuntime) OryxTool {
-	return &shellTool{checker: checker, runtime: runtime}
+//
+// limiter 刻意是**獨立參數**而不是 ShellRuntime 的一個欄位：ShellRuntime 是**單次執行
+// 的上下文收窄**（工作目錄、PATH、期限），而 limiter 是**跨執行、跨 registry 共用**的
+// 進程級資源。放進去會讓「整個進程一份」這個性質在呼叫點上完全看不見——而那正是
+// spec #29 下修表第十七列要保護的東西。
+func NewShell(checker *SandboxChecker, runtime ShellRuntime, limiter *ShellLimiter) OryxTool {
+	return &shellTool{checker: checker, runtime: runtime, limiter: limiter}
 }
 
 func (t *shellTool) Name() string { return ShellToolName }
@@ -121,10 +133,12 @@ type shellOutput struct {
 	StderrTruncated bool   `json:"stderr_truncated,omitempty"`
 }
 
-// Execute 校驗命令名、在過濾後的 PATH 絕對段裡解析出絕對路徑，然後執行。
+// Execute 校驗命令名、取得 admission slot，然後把「解析 ＋ 建構 ＋ Start」交給第零道
+// 那條 goroutine，自己以帶期限的 select 等它。
 //
 // 任何失敗都以錯誤 ToolResult 回填給 LLM，不 panic、不中斷 turn。**沒有一條路徑標
-// Retryable**：白名單拒絕、找不到程式、逾時、取消，重跑一次結果都一樣。
+// Retryable**：白名單拒絕、找不到程式、逾時、取消、slot 已滿，重跑一次結果都一樣
+// ——slot 已滿尤其不能標，那會把「拒絕」變成 ReAct 循環的重試風暴。
 func (t *shellTool) Execute(ctx context.Context, input string) core.ToolResult {
 	var in shellInput
 	if err := json.Unmarshal([]byte(input), &in); err != nil {
@@ -134,96 +148,117 @@ func (t *shellTool) Execute(ctx context.Context, input string) core.ToolResult {
 		return core.ToolResult{Error: fmt.Sprintf("%s 被取消: %v", ShellToolName, err)}
 	}
 
-	// 白名單在**解析執行檔之前**：不先擋下來，一個不被允許的命令名照樣會讓我們去
-	// stat 一輪 PATH，而那本身就是資訊洩漏（哪些程式裝在這台機器上）。
+	// 白名單在**解析執行檔之前、也在取 slot 之前**：兩個理由。不先擋下來，一個不被
+	// 允許的命令名照樣會讓我們去 stat 一輪 PATH，而那本身就是資訊洩漏（哪些程式裝在
+	// 這台機器上）；而且被拒的呼叫**不該消耗**一張入場券——它連 worker 都不會起。
 	if err := t.checker.CheckShellCommand(in.Command); err != nil {
 		return core.ToolResult{Error: err.Error()}
 	}
 
-	resolved, err := lookupInPathDirs(in.Command, t.runtime.PathDirs)
-	if err != nil {
-		return core.ToolResult{Error: err.Error()}
+	// **slot 在第零道那條 goroutine 開始之前取得**，不只是 Start 之前——現在連 PATH
+	// 解析都可能卡住（stat 落在故障的 NFS／FUSE 掛載上），門要開在最外面。
+	//
+	// **滿了就在啟動進程之前拒絕，不排隊**：排隊會把「拒絕」變成「掛住」，違背
+	// bounded return 的初衷。
+	if !t.limiter.acquire() {
+		return core.ToolResult{Error: t.slotExhaustedMessage(in.Command)}
 	}
+	slot := &shellSlot{limiter: t.limiter}
 
 	// 逾時是這個 Tool 自己的期限，疊在呼叫端的 ctx 之上：呼叫端更早取消仍然生效。
-	runCtx, cancel := context.WithTimeout(ctx, t.runtime.Timeout)
+	//
+	// **用 WithTimeoutCause 而不是 WithTimeout，是為了把「誰先到期」固定在第一次取消的
+	// 當下。** 事後比對 ctx.Err() 判斷不出順序：shell 的上限先到、命令被殺、而回收在
+	// 呼叫端的期限**之後**才完成時，那時 ctx.Err() 已經非 nil，於是一個**由 shell 自己
+	// 的上限觸發**的中止會被報成「呼叫端的期限先到」——使用者於是跑去調一個沒被觸及的
+	// 設定，而真正該調的 timeout_seconds 反而沒人動。context.Cause 讀的是第一次取消時
+	// 記下的原因，與之後誰又到期無關。
+	runCtx, cancel := context.WithTimeoutCause(ctx, t.runtime.Timeout, errShellTimeout)
 	defer cancel()
 
-	// **一律 exec.CommandContext 建構，不得手動組 &exec.Cmd{}。** 這不是風格選擇：
-	// exec.Cmd 存放 context 的欄位**未匯出**，只有 CommandContext 設得了；而 Cancel
-	// 的官方文件明寫「the command must have been created with CommandContext」。
-	// 手動建構的 Cmd **完全沒有取消監看**——ticket #35 的第一道防線（覆寫 cmd.Cancel
-	// 做 process-group kill）會從一開始就掛不上去，而它同樣能讓 argv[0]、Dir、Env
-	// 全都正確、逾時也「會中止」，於是完全通過本票的驗收，等到 #35 開工才炸。
-	cmd := exec.CommandContext(runCtx, resolved, in.Args...)
-	// **這一行不能省。** 官方文件：「Args[0] is always name, not the possibly resolved
-	// Path」——傳絕對路徑當 name，argv[0] 就是那個絕對路徑。後果有二：「白名單決定
-	// argv[0]」在字面上不再成立；busybox／git 這類依 argv[0] 改變行為的 multicall
-	// 程式會看到不同的名字。傳絕對路徑同時讓 Go 不觸發隱式 LookPath，ErrDot 分支
-	// 一併消失。
-	cmd.Args[0] = in.Command
-	cmd.Dir = t.runtime.Dir
-	cmd.Env = shellChildEnv(t.runtime.PathDirs)
+	handoff := &shellHandoff{}
+	delivery := t.startShellWorker(runCtx, in, handoff, slot)
 
-	stdout := &boundedBuffer{limit: maxShellOutputBytes}
-	stderr := &boundedBuffer{limit: maxShellOutputBytes}
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
+	var started *shellStarted
+	select {
+	case res := <-delivery:
+		if res.err != nil {
+			// 解析或 Start 失敗。slot 已由 worker 歸還（所有權從未移交）。
+			return core.ToolResult{Error: res.err.Error()}
+		}
+		if !handoff.mainTake() {
+			// 走不到（只有主路徑寫得到 abandoned，而它在這個分支沒寫過），但保留
+			// 這條判斷讓「handed 只能由主路徑提交」是程式自己的性質，不是註解的宣稱。
+			return core.ToolResult{Error: t.abortMessage(runCtx, in.Command, cleanupInBackground)}
+		}
+		started = res.started
+	case <-runCtx.Done():
+		// **期限處理者永遠是決定者。** 決定的當下誰持有進程，誰就負責 kill＋reap。
+		//
+		// **兩條路徑的清理揭露不同，這一點不能合成一句。** 兩者都還沒 Wait 成功，所以
+		// 都**不得**宣稱「已收掉」——但它們沒有確認的東西不一樣：ready 那條進程確實存在
+		// 且已交給 reaper，pending 那條連「命令有沒有啟動」都還不確定。
+		if prev := handoff.mainAbandon(); prev == shellReady {
+			// 進程已存在、worker 正在投遞：**必須有人把它收下來**，否則它留在背景
+			// 跑到底。轉交 detached reaper，自己**不等**（等就破壞 bounded return）。
+			reapDetachedShell(delivery, slot)
+			return core.ToolResult{Error: t.abortMessage(runCtx, in.Command, cleanupInBackground)}
+		}
+		// prev == shellPending：worker 可能還卡在解析、或卡在一個**已 fork 但尚未從
+		// Start 返回**的階段——那時取消監看還沒建立、進程可能存在也可能不存在。清理
+		// 交由 worker 自行完成（見 reapAbandonedShell），而三句保證的第三句明說
+		// **卡住的 worker 不保證完成**。
+		return core.ToolResult{Error: t.abortMessage(runCtx, in.Command, cleanupUnconfirmed)}
+	}
 
-	runErr := cmd.Run()
+	// ── 進程已接管。第一道（cmd.Cancel）與第二道（WaitDelay）由 runCtx 到期自動觸發 ──
+	reaped := reapStartedShell(started, slot, t.hooks.swallowReap)
+	// **等法是「等 runCtx 結束，之後最多再等 grace」，不是算一個總時長。** 兩件事都
+	// 靠這個形狀成立：解析與 Start 花掉的時間自動算在同一個期限裡（不會變成
+	// `2×timeout + grace`）；而**取消**也能立刻起算 grace——`Deadline()` 在 context 被
+	// 取消時**不動**，用「還剩多久 ＋ grace」算會讓 Ctrl+C 之後再等掉整段剩餘上限。
+	waitErr, ok := awaitShellReap(runCtx, reaped, shellKillReapGrace)
+	if !ok {
+		// **第三道防線：放棄等待。** 這是 bounded return 的唯一來源——SIGKILL 對卡在
+		// uninterruptible sleep 的進程無效，Process.Wait 的 wait4 因此不返回，而
+		// WaitDelay 只會「再 Kill 一次 ＋ 關 pipe」，**不能讓進行中的 Wait 提前返回**。
+		//
+		// **這裡一個位元組都不碰 stdout／stderr**：os/exec 的複製 goroutine 還在寫，
+		// 讀它不只是「內容不完整」，是資料競爭。
+		return core.ToolResult{Error: t.abandonedMessage(runCtx, in.Command)}
+	}
 
-	// ctx 的狀態要先看：逾時／取消時 Run 也會回一個 ExitError（signal: killed），
-	// 照 exit code 那條路走會把「被我們砍掉」報成「命令自己失敗了」。
-	//
-	// **順序是先看呼叫端的 ctx，再看自己的期限，這一點不能反過來。** runCtx 是 ctx 的
-	// 子節點，而 context 的錯誤會沿著父子傳下來——呼叫端的 ctx 若**自己帶期限**且先
-	// 到期，runCtx.Err() 同樣是 DeadlineExceeded。先比對 runCtx 的話，那種情形會被報成
-	// 「shell 的上限到了」並附上一個根本沒被觸及的秒數，使用者於是跑去調
-	// timeout_seconds，怎麼調都沒用。
-	//
-	// 目前的呼叫端（main.go 的 signal.NotifyContext）只帶取消不帶期限，所以這條現在
-	// 走不到——但那是**呼叫端當下的性質**，不是這段程式的性質。哪天有人加一個 per-turn
-	// 的期限，這裡就會開始說謊；先把順序排對，讓那句話結構上成立。
-	switch {
-	case errors.Is(ctx.Err(), context.Canceled):
-		return core.ToolResult{Error: fmt.Sprintf(
-			"%s 執行 %s 被取消，已中止；命令若派生過子進程，那些後代可能仍有殘留",
-			ShellToolName, in.Command)}
-	case ctx.Err() != nil:
-		// 呼叫端自己的期限先到。**訊息刻意不提 shell 的上限**——提了就是把使用者
-		// 導向一個沒被觸及的設定。
-		return core.ToolResult{Error: fmt.Sprintf(
-			"%s 執行 %s 中止：呼叫端的期限先到（%v），不是 shell 自己的上限；命令若派生過子進程，那些後代可能仍有殘留",
-			ShellToolName, in.Command, ctx.Err())}
-	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
-		// **訊息如實說明可能有殘留，不說任何「已清乾淨」的話。** 本票的逾時只是
-		// exec.CommandContext 的原生行為（只 Kill 直接子進程），後代若自己派生就
-		// 收不到——ticket #35 會把保證補上去並替換這段措辭。
-		return core.ToolResult{Error: fmt.Sprintf(
-			"%s 執行 %s 逾時（上限 %s），已中止；命令若派生過子進程，那些後代可能仍有殘留",
-			ShellToolName, in.Command, t.runtime.Timeout)}
+	// ctx 的狀態要先看：逾時／取消時 Wait 也會回一個 ExitError（signal: killed），
+	// 照 exit code 那條路走會把「被我們砍掉」報成「命令自己失敗了」。誰的期限先到由
+	// abortCause 判斷（順序的理由寫在那裡）。
+	if runCtx.Err() != nil {
+		// **只有這一條路徑上 Wait 真的返回了**，所以只有這裡能宣稱同 group 內、可被
+		// SIGKILL 回收的後代已經收掉。
+		return core.ToolResult{Error: t.abortMessage(runCtx, in.Command, cleanupReaped)}
 	}
 
 	out := shellOutput{
-		Stdout:          stdout.text(),
-		Stderr:          stderr.text(),
-		StdoutTruncated: stdout.dropped,
-		StderrTruncated: stderr.dropped,
+		Stdout:          started.stdout.text(),
+		Stderr:          started.stderr.text(),
+		StdoutTruncated: started.stdout.dropped,
+		StderrTruncated: started.stderr.dropped,
 	}
 	var exitErr *exec.ExitError
 	switch {
-	case runErr == nil:
+	case waitErr == nil:
 		out.ExitCode = 0
-	case errors.As(runErr, &exitErr):
+	case errors.As(waitErr, &exitErr):
 		// **非零 exit code 不算 Tool 失敗**，與 HTTP Tool 對非 2xx 的既有語義同構
 		// （http.go 對任何狀態碼都回 OK:true）。「測試失敗了」正是 Agent 最需要知道
 		// 的那個事實，把它報成 Tool 壞掉只會讓 ReAct 循環退避重試一件重跑幾次都
 		// 一樣的事。
 		out.ExitCode = exitErr.ExitCode()
 	default:
-		// 走到這裡代表命令**沒跑起來**（解析後檔案被刪、權限被改、fork 資源不足）。
-		// 這與「跑起來但失敗了」是兩件事，不能混成同一種回填。
-		return core.ToolResult{Error: fmt.Sprintf("%s 啟動 %s 失敗: %v", ShellToolName, in.Command, runErr)}
+		// 走到這裡代表 Wait 自己出了問題（不是命令回非零）。**cmd.Cancel 的 ESRCH →
+		// os.ErrProcessDone 映射就是為了不讓一個本來成功的命令掉進這一格**：取消與
+		// 正常結束競態時 kill(-pgid) 回 ESRCH，若原樣回傳，Go 會把成功的 Wait 改報成
+		// 失敗（見 shell_cancel_unix.go）。
+		return core.ToolResult{Error: fmt.Sprintf("%s 等待 %s 結束: %v", ShellToolName, in.Command, waitErr)}
 	}
 
 	content, err := json.Marshal(out)
@@ -231,6 +266,103 @@ func (t *shellTool) Execute(ctx context.Context, input string) core.ToolResult {
 		return core.ToolResult{Error: fmt.Sprintf("編碼 %s 結果: %v", ShellToolName, err)}
 	}
 	return core.ToolResult{OK: true, Content: string(content)}
+}
+
+// ── 四種終止訊息。措辭集中在這裡，因為它們共同構成對外的那三句保證 ──
+
+// ── 三句保證在使用者面前的樣子 ──
+//
+// 揭露拆成**兩半**，因為它們回答的是不同的問題：`cleanup*` 說「同 group 的後代**這次
+// 收到什麼程度**」，`residualEscaped` 說「脫離 group 的那些我們**本來就**碰不到」。
+//
+// **合成一句是不行的。** 只有 Wait 真的返回的那條路徑才能說「已收掉」；期限先到的兩條
+// 路徑上回收都還沒完成，宣稱收乾淨就是說謊——而本票的第三句保證正是「這些情形都要
+// **如實說明可能有殘留**」。
+
+// residualEscaped 是每一條中止路徑都要帶的那半句。
+//
+// 脫離 process group 的後代（自己 setsid 的）我們**既殺不到、也數不到**——這與 slot
+// 「有上限」是同一件事的兩面，不能讓使用者從後者反推出前者也被管住了。
+const residualEscaped = "命令若派生過**脫離 process group** 的後代（自己 setsid 的），" +
+	"那些殘留我們殺不到、也數不到"
+
+// cleanupReaped 只用在 **Wait 已經返回**的路徑上。這是唯一能宣稱「已收掉」的地方。
+const cleanupReaped = "同一 process group 內、可被 SIGKILL 回收的後代已收掉"
+
+// cleanupInBackground 用在**進程確實存在、但回收交給了背景**的路徑（移交競態下的
+// detached reaper，以及主路徑放棄接管時）。
+//
+// 措辭刻意停在「已交出去」而不是「已收掉」：那條 reaper 還在跑，本次呼叫沒有等它。
+const cleanupInBackground = "該進程已交由背景回收（對 process group 送 SIGKILL ＋ Wait），" +
+	"但**本次呼叫未等它完成**，因此尚未確認收乾淨"
+
+// cleanupUnconfirmed 用在**連命令有沒有啟動都還不確定**的路徑（期限到時仍是 pending）。
+//
+// 那時 worker 可能卡在 PATH 解析，也可能卡在一個**已 fork 但尚未從 Start 返回**的
+// 階段——後者連取消監看都還沒建立。而三句保證的第三句明說：**卡在解析或 Start 的
+// worker 不保證完成**。
+const cleanupUnconfirmed = "命令**尚未確認啟動**（解析或啟動本身可能卡住，那時連取消監看都還沒建立），" +
+	"清理交由背景的 lifecycle worker 負責，而**卡住的 worker 不保證完成**"
+
+// errShellTimeout 是 shell 自己那個期限的 cause 標記。
+//
+// 它讓「誰先到期」在**第一次取消的當下**就被固定下來，而不是事後比對 ctx.Err() 去猜
+// ——後者在「shell 先到期、回收拖過了呼叫端的期限」時會給出相反的答案。
+var errShellTimeout = errors.New("shell 的執行上限到期")
+
+// abortCause 說明是誰的期限先到，讀的是**第一次取消時記下的** cause。
+//
+// **順序必須在取消的當下決定，不能事後比對。** runCtx 是 ctx 的子節點，context 的錯誤
+// 會沿父子傳下來；等回收結束再看 ctx.Err()，只能知道「現在兩邊都過期了」，分不出誰先。
+// 呼叫端那兩種措辭**刻意不提 shell 的上限**——提了就是把使用者導向一個沒被觸及的設定。
+func (t *shellTool) abortCause(runCtx context.Context) string {
+	cause := context.Cause(runCtx)
+	switch {
+	case errors.Is(cause, errShellTimeout):
+		return fmt.Sprintf("逾時（上限 %s）", t.runtime.Timeout)
+	case errors.Is(cause, context.Canceled):
+		return "被呼叫端取消"
+	case cause != nil:
+		return fmt.Sprintf("呼叫端的期限先到（%v），不是 shell 自己的上限", cause)
+	default:
+		// 走不到（只在 runCtx 已 Done 時呼叫），保留一句不說謊的話而不是空字串。
+		return "中止"
+	}
+}
+
+// abortMessage 是中止路徑的統一措辭：誰的期限到了 ＋ **這次收到什麼程度** ＋ 脫離者的揭露。
+func (t *shellTool) abortMessage(runCtx context.Context, command, cleanup string) string {
+	return fmt.Sprintf("%s 執行 %s %s，已中止；%s；%s",
+		ShellToolName, command, t.abortCause(runCtx), cleanup, residualEscaped)
+}
+
+// abandonedMessage 是第三道防線：期限與寬限都過了，回收訊號仍未到達。
+//
+// **代價要寫出來而不是被隱藏**（US 63）：這條路徑上留下了一條回收 goroutine，而那條
+// goroutine 佔著的 slot 要等它終於返回才歸還。
+func (t *shellTool) abandonedMessage(runCtx context.Context, command string) string {
+	return fmt.Sprintf(
+		"%s 執行 %s %s，且強制終止後仍未回收，已放棄等待並返回；"+
+			"該直接子進程可能卡在無法中斷的狀態（SIGKILL 對它無效），因此**可能有殘留進程**，"+
+			"並留下一條回收 goroutine 佔著一個 lifecycle worker 名額直到它終於返回；%s",
+		ShellToolName, command, t.abortCause(runCtx), residualEscaped)
+}
+
+// slotExhaustedMessage 是 admission slot 已滿。
+//
+// **措辭不得把上限講過頭**（spec #29 下修表第二十二列）：數的是「未完成的 lifecycle
+// worker」，不是「未 reap 的子進程」——worker 可能卡在 PATH 解析或 Start，那時連子進程
+// 都還不存在。而且要**明說它不限制脫離的後代**，否則使用者會從「有上限」反推成進程樹
+// 層級的資源上限。
+func (t *shellTool) slotExhaustedMessage(command string) string {
+	return fmt.Sprintf(
+		"%s 拒絕執行 %s：目前有 %d 個未完成的 lifecycle worker（上限 %d），已達上限，在啟動進程之前拒絕。"+
+			"每個 worker 可能持有 0 或 1 個未回收的直接子進程——它可能卡在 PATH 解析、啟動或等待，"+
+			"卡在前兩者時連子進程都還不存在。這些是**回收不掉、需要人介入**的命令："+
+			"請查看這台機器上殘留的進程並手動處理，或調整 shell.timeout_seconds。"+
+			"注意這個上限**不限制脫離 process group 的後代**（daemonize 的程式會讓名額正常歸還而後代還活著，"+
+			"可無界累積）——要限制那個需要 container／cgroup 等進程樹層級的隔離，屬擴展階段。",
+		ShellToolName, command, t.limiter.inFlight(), maxShellLifecycleWorkers)
 }
 
 // lookupInPathDirs 在過濾後的絕對 PATH 段裡找 name，回傳絕對路徑。

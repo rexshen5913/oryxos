@@ -73,7 +73,7 @@ func newToolAgentWithShell(t *testing.T, baseURL string, profile *core.Profile, 
 	st *testStore, extra ...tool.OryxTool) *core.AgentService {
 	t.Helper()
 	r := tool.NewRegistry()
-	if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(sandbox), root, shell); err != nil {
+	if err := tool.RegisterBuiltins(r, tool.NewSandboxChecker(sandbox), root, shell, tool.NewShellLimiter()); err != nil {
 		t.Fatalf("RegisterBuiltins: %v", err)
 	}
 	for _, et := range extra {
