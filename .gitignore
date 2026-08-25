@@ -60,6 +60,10 @@ website/zh/docs/
 website/public/logo.svg
 website/public/architecture.svg
 
+# ── Python 位元碼（.claude/skills 的工具腳本執行時生成）──
+__pycache__/
+*.py[cod]
+
 # ── OS / 編輯器產物 ──
 .DS_Store
 Thumbs.db
