@@ -76,7 +76,18 @@ func newHTTPClient(checker *SandboxChecker) *http.Client {
 	return &http.Client{
 		Timeout: httpRequestTimeout,
 		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			return checker.CheckHTTPURL(req.URL.String())
+			decision, err := checker.CheckHTTPURL(req.URL.String())
+			if decision == SandboxAllow {
+				return nil
+			}
+			if err == nil {
+				// **這一層的 nil 就是放行**——http.Client 拿它決定跟不跟這一跳。所以
+				// 非放行卻沒帶理由時必須自己補一個，不能把 nil 交出去（fail closed）。
+				// 這是四個回填點裡唯一一個「沒有錯誤」會被讀成允許的地方，其餘三個回填
+				// 的是文字，走 sandboxRefusal。
+				return fmt.Errorf("%w: redirect 目標未獲放行", ErrSandboxViolation)
+			}
+			return err
 		},
 	}
 }
@@ -107,8 +118,11 @@ func (t *httpTool) Execute(ctx context.Context, input string) core.ToolResult {
 	if in.URL == "" {
 		return core.ToolResult{Error: fmt.Sprintf("%s 缺必填參數 url", t.name)}
 	}
-	if err := t.checker.CheckHTTPURL(in.URL); err != nil {
-		return core.ToolResult{Error: err.Error()}
+	// 判斷的依據是**決策**而不是「有沒有錯誤」：兩者今天等價，但第三態（SandboxAsk）
+	// 落地後就不是了，而屆時把「要問人」讀成「放行」是最糟的方向（見 SandboxDecision）。
+	// 不標 Retryable——重跑一次白名單的答案不會變。
+	if decision, err := t.checker.CheckHTTPURL(in.URL); decision != SandboxAllow {
+		return core.ToolResult{Error: sandboxRefusal(err)}
 	}
 
 	var body io.Reader

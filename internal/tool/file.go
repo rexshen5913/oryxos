@@ -96,9 +96,11 @@ func (t *readFileTool) Execute(ctx context.Context, input string) core.ToolResul
 		return core.ToolResult{Error: fmt.Sprintf("%s 被取消: %v", ReadFileToolName, err)}
 	}
 
-	rel, err := t.checker.CheckFilePath(in.Path)
-	if err != nil {
-		return core.ToolResult{Error: err.Error()}
+	// 判斷的依據是**決策**而不是「有沒有錯誤」，理由見 SandboxDecision：兩者今天
+	// 等價，第三態落地後就不是了。不標 Retryable——重跑一次白名單的答案不會變。
+	decision, rel, err := t.checker.CheckFilePath(in.Path)
+	if decision != SandboxAllow {
+		return core.ToolResult{Error: sandboxRefusal(err)}
 	}
 
 	info, err := statNoSymlink(t.root, rel)
@@ -278,9 +280,10 @@ func (t *writeFileTool) Execute(ctx context.Context, input string) core.ToolResu
 		return core.ToolResult{Error: fmt.Sprintf("%s 被取消: %v", WriteFileToolName, err)}
 	}
 
-	rel, err := t.checker.CheckFilePath(in.Path)
-	if err != nil {
-		return core.ToolResult{Error: err.Error()}
+	// 依決策而不是依「有沒有錯誤」判斷，理由同 read_file 那一處。
+	decision, rel, err := t.checker.CheckFilePath(in.Path)
+	if decision != SandboxAllow {
+		return core.ToolResult{Error: sandboxRefusal(err)}
 	}
 	// **超過上限一律明確拒絕，不截斷。** 寫入與讀取在這裡不對稱：讀截斷是安全的
 	// （少看到一段內容，而且有 truncated 標記），寫截斷會在磁碟上留下一個內容不完整
@@ -488,9 +491,10 @@ func (t *listDirTool) Execute(ctx context.Context, input string) core.ToolResult
 		return core.ToolResult{Error: fmt.Sprintf("%s 被取消: %v", ListDirToolName, err)}
 	}
 
-	rel, err := t.checker.CheckFilePath(in.Path)
-	if err != nil {
-		return core.ToolResult{Error: err.Error()}
+	// 依決策而不是依「有沒有錯誤」判斷，理由同 read_file 那一處。
+	decision, rel, err := t.checker.CheckFilePath(in.Path)
+	if decision != SandboxAllow {
+		return core.ToolResult{Error: sandboxRefusal(err)}
 	}
 
 	info, err := statNoSymlink(t.root, rel)

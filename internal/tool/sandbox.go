@@ -13,6 +13,53 @@ import (
 // Tool 執行終止、錯誤作為 tool 結果回填給 LLM。
 var ErrSandboxViolation = errors.New("SandboxViolation")
 
+// SandboxDecision 是一次 Sandbox 校驗的**結論**，與拒絕理由（error）成對回傳。
+//
+// **為什麼結論要獨立成型別，而不是繼續只看 error。** 「拒絕」與「需人工審批」在 error
+// 這個型別上長得一模一樣（都是非 nil），呼叫端分辨不了；而擴展階段的 Tool Policy
+// （issue #39）與人工審批（issue #40）正需要這個分辨。現在把結論拆出來，第三態落地時
+// 只是多產生一個既有的值，三個校驗方法與每一個呼叫點的簽名都不必再動第二次。
+//
+// **零值是 SandboxDeny，這是刻意的（fail closed）。** 沒被賦值的決策——結構體零值、
+// 日後多一條 return 分支忘了填——一律落在「擋下來」。放行必須是有人明確寫出
+// SandboxAllow 才會發生，漏填不會變成一個安靜的繞過。
+//
+// **非放行的決策一律附一個非 nil 的錯誤**，內容是可以直接回填給 LLM 的拒絕理由。
+// 這是這個型別對呼叫端的契約，由 TestSandboxCheckDecisions 釘住。
+type SandboxDecision int
+
+const (
+	// SandboxDeny 拒絕這次呼叫。**它是零值**，理由見型別說明。
+	SandboxDeny SandboxDecision = iota
+
+	// SandboxAllow 放行這次呼叫。
+	SandboxAllow
+
+	// SandboxAsk 表示這次呼叫要經人工審批才能繼續。
+	//
+	// **核心階段不產生它。** 本階段的白名單校驗只有放行與拒絕兩態，行為與這個型別
+	// 出現之前完全等價（TestSandboxCheckNeverAsks 釘住這一點）。它先佔住型別上的位置，
+	// 是為了讓擴展階段的 Tool Policy（issue #39）與人工審批（issue #40）落地時不必回頭
+	// 改所有呼叫點——那正是這整個型別存在的理由。
+	//
+	// 呼叫端因此一律以「決策是不是 SandboxAllow」判斷能不能做，**不是以「有沒有錯誤」**：
+	// 兩者今天等價，第三態落地後就不是了，而屆時把「要問人」讀成「放行」是最糟的方向。
+	SandboxAsk
+)
+
+// sandboxRefusal 取一次**非放行**決策要回填給 LLM 的文字。
+//
+// 存在的理由只有一個：「非放行必附非 nil 錯誤」是一句文件契約，不是型別保證。四個
+// 回填點各寫一次 err.Error() 的話，契約哪天被打破就是四個地方在對話中途對 nil 解參考
+// ——repo 裡沒有任何 recover()，那會直接殺掉 CLI。收在這裡，最壞情況只退化成一句
+// 沒那麼有幫助的話。
+func sandboxRefusal(err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	return "Sandbox 拒絕了這次呼叫，但沒有附上理由（這是 SandboxChecker 的 bug，請回報）"
+}
+
 // SandboxConfig 是 config.yaml 三段 Sandbox 設定的執行期形狀，由組裝點填好後
 // 顯式注入（憲法 5.2）。
 //
@@ -135,26 +182,29 @@ func escapesWorkspace(clean string) bool {
 }
 
 // CheckHTTPURL 解析 rawURL 的 host 後做通配符匹配；解析不了、非 http/https、
-// 或 host 不在白名單一律回 ErrSandboxViolation（deny by default）。
+// 或 host 不在白名單一律回 SandboxDeny ＋ ErrSandboxViolation（deny by default）。
 // 錯誤訊息不內嵌原始 URL——它會落日誌與回填 LLM，query 常帶密鑰。
-func (c *SandboxChecker) CheckHTTPURL(rawURL string) error {
+//
+// 回傳形狀與另外兩個校驗方法一致：**決策在最前、error 在最後**，中間留給那個檢查
+// 特有的產物（見 CheckFilePath）。決策的語義見 SandboxDecision。
+func (c *SandboxChecker) CheckHTTPURL(rawURL string) (SandboxDecision, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("%w: 無法解析 URL（%d bytes）", ErrSandboxViolation, len(rawURL))
+		return SandboxDeny, fmt.Errorf("%w: 無法解析 URL（%d bytes）", ErrSandboxViolation, len(rawURL))
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("%w: scheme %q 不被允許（僅 http/https）", ErrSandboxViolation, u.Scheme)
+		return SandboxDeny, fmt.Errorf("%w: scheme %q 不被允許（僅 http/https）", ErrSandboxViolation, u.Scheme)
 	}
 	host := strings.ToLower(u.Hostname())
 	if host == "" {
-		return fmt.Errorf("%w: URL 缺 host", ErrSandboxViolation)
+		return SandboxDeny, fmt.Errorf("%w: URL 缺 host", ErrSandboxViolation)
 	}
 	for _, pattern := range c.allowedDomains {
 		if matchDomain(strings.ToLower(pattern), host) {
-			return nil
+			return SandboxAllow, nil
 		}
 	}
-	return fmt.Errorf("%w: host %q 不在 http.allowed_domains 白名單", ErrSandboxViolation, host)
+	return SandboxDeny, fmt.Errorf("%w: host %q 不在 http.allowed_domains 白名單", ErrSandboxViolation, host)
 }
 
 // matchDomain 比對單條白名單：`*.example.com` 匹配任意層級子域名（不含裸域名
@@ -184,30 +234,34 @@ func matchDomain(pattern, host string) bool {
 // 它是**應用層**的那一道防線，純字串判斷、不碰檔案系統：訊息要告訴使用者去改哪一段
 // 設定。開檔層的把關（os.Root ＋ 拒絕符號連結 ＋ Lstat 型別檢查）在 file.go，兩者
 // 分工明確、不互相取代。
-func (c *SandboxChecker) CheckFilePath(rawPath string) (string, error) {
+//
+// 回傳形狀與另外兩個校驗方法一致：**決策在最前、error 在最後**。標準化後的路徑夾在
+// 中間，因為它是這個檢查特有的產物——三者共有的那兩樣東西因此在三個方法裡都在同一個
+// 位置，呼叫端不會有哪一個要記成例外。決策不是 SandboxAllow 時路徑是空字串。
+func (c *SandboxChecker) CheckFilePath(rawPath string) (SandboxDecision, string, error) {
 	if rawPath == "" {
-		return "", fmt.Errorf("%w: 路徑不得為空（請給相對 Workspace 根的路徑）", ErrSandboxViolation)
+		return SandboxDeny, "", fmt.Errorf("%w: 路徑不得為空（請給相對 Workspace 根的路徑）", ErrSandboxViolation)
 	}
 	if isAbsolutePath(rawPath) {
-		return "", fmt.Errorf("%w: 路徑 %q 是絕對路徑；file.allowed_paths 的基準是 Workspace 根，請改用相對路徑",
+		return SandboxDeny, "", fmt.Errorf("%w: 路徑 %q 是絕對路徑；file.allowed_paths 的基準是 Workspace 根，請改用相對路徑",
 			ErrSandboxViolation, rawPath)
 	}
 
 	target := filepath.Clean(filepath.FromSlash(rawPath))
 	if escapesWorkspace(target) {
-		return "", fmt.Errorf("%w: 路徑 %q 標準化後穿越出 Workspace 根，一律拒絕", ErrSandboxViolation, rawPath)
+		return SandboxDeny, "", fmt.Errorf("%w: 路徑 %q 標準化後穿越出 Workspace 根，一律拒絕", ErrSandboxViolation, rawPath)
 	}
 
 	// c.allowedPaths 已在建構時經 EffectiveAllowedPaths 收斂：這裡拿到的每一條都
 	// 標準化過、也確定有比對的意義，所以迴圈裡只剩單純的子樹包含判斷。
 	for _, base := range c.allowedPaths {
 		if withinSubtree(base, target) {
-			return target, nil
+			return SandboxAllow, target, nil
 		}
 	}
 	// 訊息只提被拒的那條路徑與該改哪一段設定：它會落日誌、也會回填給 LLM，把白名單
 	// 其餘條目一起倒出來等於交出這個 Workspace 還允許哪些路徑。
-	return "", fmt.Errorf("%w: 路徑 %q 不在 file.allowed_paths 白名單（請把它所在的目錄加進 Workspace config.yaml 的 file.allowed_paths）",
+	return SandboxDeny, "", fmt.Errorf("%w: 路徑 %q 不在 file.allowed_paths 白名單（請把它所在的目錄加進 Workspace config.yaml 的 file.allowed_paths）",
 		ErrSandboxViolation, rawPath)
 }
 
@@ -236,17 +290,19 @@ func (c *SandboxChecker) CheckFilePath(rawPath string) (string, error) {
 //
 // **保證的範圍只到 OryxOS 直接啟動的那個子進程的 `argv[0]`**，不延伸到那個程式接下來
 // 啟動什麼。這條界線在 shell.go 的型別說明與 config.yaml 的模板註解裡都要寫出來。
-func (c *SandboxChecker) CheckShellCommand(command string) error {
+//
+// 回傳形狀與另外兩個校驗方法一致：**決策在最前、error 在最後**（見 CheckFilePath）。
+func (c *SandboxChecker) CheckShellCommand(command string) (SandboxDecision, error) {
 	if command == "" {
-		return fmt.Errorf("%w: command 不得為空（請給一個程式名，例如 git）", ErrSandboxViolation)
+		return SandboxDeny, fmt.Errorf("%w: command 不得為空（請給一個程式名，例如 git）", ErrSandboxViolation)
 	}
 	if hasPathSeparator(command) {
-		return fmt.Errorf("%w: command %q 含路徑分隔符；shell.allowed_commands 是一份程式名清單，只接受不含路徑的名字（例如 git，不是 /usr/bin/git）",
+		return SandboxDeny, fmt.Errorf("%w: command %q 含路徑分隔符；shell.allowed_commands 是一份程式名清單，只接受不含路徑的名字（例如 git，不是 /usr/bin/git）",
 			ErrSandboxViolation, command)
 	}
 	for _, allowed := range c.allowedCommands {
 		if command == allowed {
-			return nil
+			return SandboxAllow, nil
 		}
 	}
 	// 訊息只提被拒的那個名字與該改哪一段設定：它會落日誌、也會回填給 LLM，把白名單
@@ -267,7 +323,7 @@ func (c *SandboxChecker) CheckShellCommand(command string) error {
 	// **改完之後在同一個模型、同一句 prompt、同一份白名單上重驗過：10 次變 1 次**，而且
 	// 模型把「要加進 config.yaml 的哪一段」原樣轉述給了使用者——那句話舊訊息裡本來就有，
 	// 只是模型從沒說出來過，因為它忙著猜下一個名字。白名單內容仍未洩漏。
-	return fmt.Errorf("%w: 命令 %q 不在 shell.allowed_commands 白名單（要允許它請把這個程式名加進 Workspace config.yaml 的 shell.allowed_commands）。"+
+	return SandboxDeny, fmt.Errorf("%w: 命令 %q 不在 shell.allowed_commands 白名單（要允許它請把這個程式名加進 Workspace config.yaml 的 shell.allowed_commands）。"+
 		"白名單的內容不會在這裡列出，所以**不要逐一嘗試其他命令名**——請直接告訴使用者你需要哪一個命令，由他決定要不要加進白名單",
 		ErrSandboxViolation, command)
 }

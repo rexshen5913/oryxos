@@ -326,7 +326,7 @@ func TestInitFileSectionTemplate(t *testing.T) {
 	// 校驗器，任何路徑都必須被擋下。
 	checker := tool.NewSandboxChecker(sandboxConfig(cfg))
 	for _, p := range []string{"notes/todo.md", "config.yaml", "."} {
-		if _, err := checker.CheckFilePath(p); !errors.Is(err, tool.ErrSandboxViolation) {
+		if _, _, err := checker.CheckFilePath(p); !errors.Is(err, tool.ErrSandboxViolation) {
 			t.Errorf("stock Workspace 對 %q 的校驗 = %v, 期望 SandboxViolation（空白名單全拒）", p, err)
 		}
 	}
@@ -393,7 +393,7 @@ func TestInitShellSectionTemplate(t *testing.T) {
 	// 校驗器，任何命令都必須被擋下。
 	checker := tool.NewSandboxChecker(sandboxConfig(cfg))
 	for _, name := range []string{"echo", "git", "ls"} {
-		if err := checker.CheckShellCommand(name); !errors.Is(err, tool.ErrSandboxViolation) {
+		if _, err := checker.CheckShellCommand(name); !errors.Is(err, tool.ErrSandboxViolation) {
 			t.Errorf("stock Workspace 對命令 %q 的校驗 = %v, 期望 SandboxViolation（空白名單全拒）", name, err)
 		}
 	}

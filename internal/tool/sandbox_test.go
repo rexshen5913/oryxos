@@ -95,7 +95,7 @@ func TestSandboxCheckerCheckHTTPURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tool.NewSandboxChecker(tool.SandboxConfig{AllowedDomains: tt.allowed}).CheckHTTPURL(tt.url)
+			_, err := tool.NewSandboxChecker(tool.SandboxConfig{AllowedDomains: tt.allowed}).CheckHTTPURL(tt.url)
 			if tt.wantViolation {
 				if !errors.Is(err, tool.ErrSandboxViolation) {
 					t.Errorf("CheckHTTPURL(%q) = %v, 期望 SandboxViolation", tt.url, err)
@@ -118,7 +118,7 @@ func TestSandboxViolationErrorOmitsQuery(t *testing.T) {
 	}
 	checker := tool.NewSandboxChecker(tool.SandboxConfig{AllowedDomains: []string{"trusted.example.com"}})
 	for _, u := range urls {
-		err := checker.CheckHTTPURL(u)
+		_, err := checker.CheckHTTPURL(u)
 		if !errors.Is(err, tool.ErrSandboxViolation) {
 			t.Fatalf("CheckHTTPURL(%q) = %v, 期望 SandboxViolation", u, err)
 		}
@@ -274,7 +274,7 @@ func TestSandboxCheckerCheckFilePath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			checker := tool.NewSandboxChecker(tool.SandboxConfig{AllowedPaths: tt.allowed})
-			rel, err := checker.CheckFilePath(tt.path)
+			_, rel, err := checker.CheckFilePath(tt.path)
 			if tt.wantViolation {
 				if !errors.Is(err, tool.ErrSandboxViolation) {
 					t.Fatalf("CheckFilePath(%q) = %q, %v, 期望 SandboxViolation", tt.path, rel, err)
@@ -299,7 +299,7 @@ func TestSandboxFilePathErrorIsActionableAndNarrow(t *testing.T) {
 	const otherEntry = "internal/private-notes"
 	checker := tool.NewSandboxChecker(tool.SandboxConfig{AllowedPaths: []string{"notes", otherEntry}})
 
-	_, err := checker.CheckFilePath("secrets/api.txt")
+	_, _, err := checker.CheckFilePath("secrets/api.txt")
 	if !errors.Is(err, tool.ErrSandboxViolation) {
 		t.Fatalf("CheckFilePath = %v, 期望 SandboxViolation", err)
 	}
@@ -441,7 +441,7 @@ func TestSandboxCheckerCheckShellCommand(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := checkerFor(tt.allowed).CheckShellCommand(tt.command)
+			_, err := checkerFor(tt.allowed).CheckShellCommand(tt.command)
 			if got := errors.Is(err, tool.ErrSandboxViolation); got != tt.wantViolation {
 				t.Fatalf("CheckShellCommand(%q) 違規 = %v (err=%v), 期望 %v",
 					tt.command, got, err, tt.wantViolation)
@@ -459,7 +459,7 @@ func TestSandboxCheckerCheckShellCommand(t *testing.T) {
 func TestSandboxShellCommandErrorIsActionable(t *testing.T) {
 	checker := tool.NewSandboxChecker(tool.SandboxConfig{AllowedCommands: []string{"echo", "internal-deploy-tool"}})
 
-	err := checker.CheckShellCommand("rm")
+	_, err := checker.CheckShellCommand("rm")
 	if err == nil {
 		t.Fatal("rm 不在白名單，期望被拒")
 	}

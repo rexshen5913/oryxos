@@ -151,8 +151,10 @@ func (t *shellTool) Execute(ctx context.Context, input string) core.ToolResult {
 	// 白名單在**解析執行檔之前、也在取 slot 之前**：兩個理由。不先擋下來，一個不被
 	// 允許的命令名照樣會讓我們去 stat 一輪 PATH，而那本身就是資訊洩漏（哪些程式裝在
 	// 這台機器上）；而且被拒的呼叫**不該消耗**一張入場券——它連 worker 都不會起。
-	if err := t.checker.CheckShellCommand(in.Command); err != nil {
-		return core.ToolResult{Error: err.Error()}
+	//
+	// 判斷的依據是**決策**而不是「有沒有錯誤」，理由見 SandboxDecision。
+	if decision, err := t.checker.CheckShellCommand(in.Command); decision != SandboxAllow {
+		return core.ToolResult{Error: sandboxRefusal(err)}
 	}
 
 	// **slot 在第零道那條 goroutine 開始之前取得**，不只是 Start 之前——現在連 PATH
