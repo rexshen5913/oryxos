@@ -25,15 +25,19 @@ type ReActLoop struct {
 	memory    MemoryService
 	audit     AuditStore
 	bootstrap ContextLoader
+	// events 播報循環內的執行過程。播報點與既有的審計落點**相鄰**：兩者記的是同一
+	// 批事實，放在一起可以避免日後加事件時漏掉其中一邊。
+	events EventSink
 	// logger 落引擎層的結構化日誌。目前只有 Skill 段截斷這一種——它是「持續
 	// 存在的降級」，每個 turn 都成立，得在每個 turn 記得到（見 Run）。
 	logger *slog.Logger
 }
 
-// NewReActLoop 以 provider、Tool 子集、Memory 門面、審計儲存、上下文載入器與
-// logger 建立 ReAct 循環；六者都不得為 nil。
-func NewReActLoop(provider ProviderService, tools ToolExecutor, memory MemoryService, audit AuditStore, bootstrap ContextLoader, logger *slog.Logger) *ReActLoop {
-	return &ReActLoop{provider: provider, tools: tools, memory: memory, audit: audit, bootstrap: bootstrap, logger: logger}
+// NewReActLoop 以 provider、Tool 子集、Memory 門面、審計儲存、上下文載入器、
+// 事件流與 logger 建立 ReAct 循環；七者都不得為 nil（不關心執行過程的呼叫端傳
+// NopEventSink）。
+func NewReActLoop(provider ProviderService, tools ToolExecutor, memory MemoryService, audit AuditStore, bootstrap ContextLoader, events EventSink, logger *slog.Logger) *ReActLoop {
+	return &ReActLoop{provider: provider, tools: tools, memory: memory, audit: audit, bootstrap: bootstrap, events: events, logger: logger}
 }
 
 // Run 對 session 的當前對話歷史跑 ReAct 循環，回傳 Agent 的最終回應。每輪把
@@ -107,7 +111,10 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 	}
 
 	var lastContent string // 最後一輪 LLM 內容，強制終止時作為已知進度附上
-	for range maxIterations {
+	for i := range maxIterations {
+		// 播報在呼叫**之前**：這則事件的用途是讓等待中的使用者看到「它還在跑、
+		// 現在是第幾輪」，等呼叫回來才播報就晚了整整一次 LLM 往返。
+		EmitEvent(ctx, l.events, l.logger, Event{Kind: EventIteration, Iteration: i + 1})
 		started := time.Now()
 		resp, err := l.provider.Chat(ctx, ChatRequest{
 			Provider:    profile.Provider.Name,
@@ -123,6 +130,11 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 			return "", fmt.Errorf("呼叫 LLM: %w", err)
 		}
 		session.Append(Message{Role: RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls})
+		// 只有 tool_calls、content 為空的那一輪不播報：這則事件說的是「LLM 產出了
+		// 文字」，空字串不是產出，播出去只會在 CLI 上多一行空白。
+		if resp.Content != "" {
+			EmitEvent(ctx, l.events, l.logger, Event{Kind: EventAssistantText, Text: resp.Content})
+		}
 		if len(resp.ToolCalls) == 0 {
 			return resp.Content, nil
 		}
@@ -170,6 +182,10 @@ func (l *ReActLoop) executeWithRetry(ctx context.Context, profile *Profile, sess
 		}
 		retries++
 		delay *= 2
+		// 播報在退避等待**之後**、實際執行之前。放在等待之前能讓使用者早幾百毫秒
+		// 看到訊息，但 ctx 在等待中被取消時就會播出一次沒有發生過的重試——事件記的
+		// 是已發生的事實，寧可晚一點也不要記錯。
+		EmitEvent(ctx, l.events, l.logger, Event{Kind: EventToolRetrying, ToolName: call.Name, Iteration: retries})
 		result = l.execute(ctx, profile, session, call)
 	}
 	return result, retries, nil

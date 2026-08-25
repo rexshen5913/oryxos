@@ -417,7 +417,18 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	// 擋下整個啟動。
 	profileTools := degradeUnavailableMcpTools(out, prof, mcpSpecs, mcpClients.Failures(), registry)
 
-	executor, err := registry.Subset(profileTools, autoIncludedTools(skillRefs), logger)
+	// 執行過程的事件流：CLI 用它在等待期間顯示進度。輸出不是終端機時
+	// （`--message` 接管線、重導向到檔案、測試接 buffer）ProgressSinkFor 會退回
+	// 不做事的實作，既有輸出格式一個字都不變。
+	//
+	// 它在這裡建立而不是等到組 AgentService 時才建，是因為 Tool 事件由掛在 Executor
+	// 上的中介層播報——Subset 需要它。
+	events := cli.ProgressSinkFor(out)
+	// 中介層掛在 **Profile 過濾後的** Executor 上，不掛在全域 Registry 上：
+	// 「這個 Agent 的 Tool 要怎麼被攔」本來就該因 Agent 而異。目前只掛事件播報一層；
+	// Tool Policy（issue #39）是可預見的第二層，屬擴展階段。
+	executor, err := registry.Subset(profileTools, autoIncludedTools(skillRefs), logger,
+		tool.NewEventMiddleware(events, logger))
 	if err != nil {
 		// 指向 `oryxos tools`（issue #27）：Subset 那一層已經把同一台 server 的可用名字
 		// 列出來了，但工具多時會截斷，而且使用者常是連前綴都記錯。查詢途徑的名字放在
@@ -509,7 +520,7 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	}()
 	// Bootstrap 上下文（AGENTS.md／USER.md／SOUL.md）：每個 turn 由 ReAct 循環
 	// 載入一次注入 system prompt，順序與覆蓋語義見 ADR-0003。
-	agent := core.NewAgentService(prof, provider.NewService(providerConfigs, logger), executor, memories, audit, contextLoader, logger)
+	agent := core.NewAgentService(prof, provider.NewService(providerConfigs, logger), executor, memories, audit, contextLoader, events, logger)
 	ch := cli.New(agent, session, prof.Identity.AgentName, in, out)
 
 	if opts.message != "" {

@@ -53,7 +53,7 @@ func newLoadSkillAgentOn(t *testing.T, baseURL string, root *os.Root, prof *core
 	}, discardLogger())
 	return core.NewAgentService(prof, svc, exec,
 		memory.NewService(st.sessions(), memory.NewLongTermMemory(root, memoryRelPath)),
-		st.audit, loader, discardLogger())
+		st.audit, loader, core.NopEventSink{}, discardLogger())
 }
 
 // toolMessageOf 回傳第 n 次 LLM 邊界請求裡的 tool 訊息內容（沒有則回空字串）。
@@ -178,7 +178,7 @@ func TestSkillSectionPromiseWithoutToolFailsBeforeSending(t *testing.T) {
 			}, discardLogger())
 			agent := core.NewAgentService(prof, svc, exec,
 				memory.NewService(st.sessions(), memory.NewLongTermMemory(root, memoryRelPath)),
-				st.audit, loader, logger)
+				st.audit, loader, core.NopEventSink{}, logger)
 
 			_, err = agent.Process(t.Context(), core.NewSession("cli", "local", "default"), "早安")
 			if !tt.wantErr {

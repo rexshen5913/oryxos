@@ -88,7 +88,12 @@ func (r *Registry) register(t OryxTool, server string) error {
 //
 // 這仍然是顯式註冊（憲法 2.3）：觸發條件是使用者自己寫的 skills 欄位，不是反射或
 // 型別掃描。Tool 本身也仍要先 Register 進 Registry 才推導得到。
-func (r *Registry) Subset(names, autoIncluded []string, logger *slog.Logger) (*Executor, error) {
+//
+// middlewares 是掛在**這一份子集**上的中介層，先掛載者位於洋蔥外層（見 Middleware）。
+// 一個都不傳時執行路徑與這個參數出現之前完全一樣——這正是既有每一個呼叫點的情況。
+// 它是變參而不是必填的第四個參數，理由就是這個：不關心中介層的組裝點不必寫一個
+// 看起來像漏填了什麼的 nil。
+func (r *Registry) Subset(names, autoIncluded []string, logger *slog.Logger, middlewares ...Middleware) (*Executor, error) {
 	sub := make(map[string]OryxTool, len(names)+len(autoIncluded))
 	ordered := make([]string, 0, len(names)+len(autoIncluded))
 	for _, name := range names {
@@ -115,7 +120,10 @@ func (r *Registry) Subset(names, autoIncluded []string, logger *slog.Logger) (*E
 		sub[name] = t.tool
 		ordered = append(ordered, name)
 	}
-	return &Executor{names: ordered, tools: sub, logger: logger}, nil
+	exec := &Executor{names: ordered, tools: sub, logger: logger}
+	// 鏈路在這裡組一次，之後每次呼叫直接走它。
+	exec.chain = chainMiddlewares(exec.dispatch, middlewares)
+	return exec, nil
 }
 
 // All 回傳全部已註冊的 Tool，按名字排序。

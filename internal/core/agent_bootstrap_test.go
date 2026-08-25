@@ -95,7 +95,7 @@ func newBootstrapAgentWithLogger(t *testing.T, baseURL string, root *os.Root, pr
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, discardLogger())
 	return core.NewAgentService(prof, svc, skillAwareTools(t, loader, prof),
-		memory.NewService(st.sessions(), longTerm), st.audit, loader, logger)
+		memory.NewService(st.sessions(), longTerm), st.audit, loader, core.NopEventSink{}, logger)
 }
 
 // skillAwareTools 回傳這個 Profile 該有的 Tool 子集：沒有 Skill 時是空集合，
