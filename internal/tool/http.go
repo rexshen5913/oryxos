@@ -113,16 +113,16 @@ type httpOutput struct {
 func (t *httpTool) Execute(ctx context.Context, input string) core.ToolResult {
 	var in httpInput
 	if err := json.Unmarshal([]byte(input), &in); err != nil {
-		return core.ToolResult{Error: fmt.Sprintf("解析 %s 輸入參數: %v", t.name, err)}
+		return core.ToolResult{Error: fmt.Sprintf("解析 %s 輸入參數: %v", t.name, err), ErrorKind: core.ToolErrorInvalidArgs}
 	}
 	if in.URL == "" {
-		return core.ToolResult{Error: fmt.Sprintf("%s 缺必填參數 url", t.name)}
+		return core.ToolResult{Error: fmt.Sprintf("%s 缺必填參數 url", t.name), ErrorKind: core.ToolErrorInvalidArgs}
 	}
 	// 判斷的依據是**決策**而不是「有沒有錯誤」：兩者今天等價，但第三態（SandboxAsk）
 	// 落地後就不是了，而屆時把「要問人」讀成「放行」是最糟的方向（見 SandboxDecision）。
 	// 不標 Retryable——重跑一次白名單的答案不會變。
 	if decision, err := t.checker.CheckHTTPURL(in.URL); decision != SandboxAllow {
-		return core.ToolResult{Error: sandboxRefusal(err)}
+		return core.ToolResult{Error: sandboxRefusal(err), ErrorKind: core.ToolErrorSandbox}
 	}
 
 	var body io.Reader
@@ -149,7 +149,7 @@ func (t *httpTool) Execute(ctx context.Context, input string) core.ToolResult {
 		target := core.RedactErrorText(in.URL)
 		if errors.Is(err, ErrSandboxViolation) {
 			// redirect 校驗失敗：SandboxViolation 不可重試。
-			return core.ToolResult{Error: fmt.Sprintf("%s 請求被攔截（%s）: %v", t.name, target, cause)}
+			return core.ToolResult{Error: fmt.Sprintf("%s 請求被攔截（%s）: %v", t.name, target, cause), ErrorKind: core.ToolErrorSandbox}
 		}
 		return core.ToolResult{Error: fmt.Sprintf("%s 請求失敗（%s）: %v", t.name, target, cause), Retryable: true}
 	}

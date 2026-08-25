@@ -3,7 +3,9 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 
@@ -80,10 +82,10 @@ type loadSkillInput struct {
 func (t *LoadSkillTool) Execute(ctx context.Context, input string) core.ToolResult {
 	var in loadSkillInput
 	if err := json.Unmarshal([]byte(input), &in); err != nil {
-		return core.ToolResult{Error: fmt.Sprintf("解析 load_skill 輸入參數: %v", err)}
+		return core.ToolResult{Error: fmt.Sprintf("解析 load_skill 輸入參數: %v", err), ErrorKind: core.ToolErrorInvalidArgs}
 	}
 	if in.Name == "" {
-		return core.ToolResult{Error: "load_skill 需要 name 參數：請指定要取回哪一份 Skill。"}
+		return core.ToolResult{Error: "load_skill 需要 name 參數：請指定要取回哪一份 Skill。", ErrorKind: core.ToolErrorInvalidArgs}
 	}
 	if len(t.allowed) == 0 {
 		return core.ToolResult{Error: fmt.Sprintf(
@@ -97,7 +99,15 @@ func (t *LoadSkillTool) Execute(ctx context.Context, input string) core.ToolResu
 
 	body, err := t.loader.SkillBody(ctx, in.Name)
 	if err != nil {
-		return core.ToolResult{Error: fmt.Sprintf("load_skill 取回 %q 的正文失敗: %v", in.Name, err)}
+		// turn 進行中被刪掉是既有的明確場景（Skill 段每個 turn 重讀，段落列了它、
+		// 取正文時卻已經不在）。載入端以 %w 包了 os.ErrNotExist，所以這裡辨識得出來；
+		// 訊息不變，只補上分類。其餘失敗（frontmatter 壞掉、符號連結、非普通檔）
+		// 不屬本票遷移的三類，維持未分類。
+		res := core.ToolResult{Error: fmt.Sprintf("load_skill 取回 %q 的正文失敗: %v", in.Name, err)}
+		if errors.Is(err, os.ErrNotExist) {
+			res.ErrorKind = core.ToolErrorNotFound
+		}
+		return res
 	}
 	return core.ToolResult{OK: true, Content: body}
 }

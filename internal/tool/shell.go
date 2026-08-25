@@ -142,7 +142,18 @@ type shellOutput struct {
 func (t *shellTool) Execute(ctx context.Context, input string) core.ToolResult {
 	var in shellInput
 	if err := json.Unmarshal([]byte(input), &in); err != nil {
-		return core.ToolResult{Error: fmt.Sprintf("解析 %s 輸入參數: %v", ShellToolName, err)}
+		return core.ToolResult{Error: fmt.Sprintf("解析 %s 輸入參數: %v", ShellToolName, err), ErrorKind: core.ToolErrorInvalidArgs}
+	}
+	// 必填欄位在**送進 Sandbox 校驗之前**檢查，與另外五個內建 Tool 同形（read_file
+	// 那幾個都先擋 `path` 為空）。少了這道，`{}` 會一路走到 CheckShellCommand("")，
+	// 被那裡的防禦性拒絕包成 SandboxViolation——訊息尚可，**類型卻錯了**：schema 宣告
+	// 了 required 卻沒給，那是 invalid_args，不是白名單決策。兩者的下一步不同（改參數
+	// vs 找使用者改設定），分錯類等於給 LLM 錯的指引。
+	//
+	// CheckShellCommand 對空字串的那道拒絕**保留不動**：它是校驗器對任何呼叫端都成立
+	// 的防線，不因為這裡多了一道就該拆掉（ticket #46 的既有測試也釘著它）。
+	if in.Command == "" {
+		return core.ToolResult{Error: fmt.Sprintf("%s 缺必填參數 command", ShellToolName), ErrorKind: core.ToolErrorInvalidArgs}
 	}
 	if err := ctx.Err(); err != nil {
 		return core.ToolResult{Error: fmt.Sprintf("%s 被取消: %v", ShellToolName, err)}
@@ -154,7 +165,7 @@ func (t *shellTool) Execute(ctx context.Context, input string) core.ToolResult {
 	//
 	// 判斷的依據是**決策**而不是「有沒有錯誤」，理由見 SandboxDecision。
 	if decision, err := t.checker.CheckShellCommand(in.Command); decision != SandboxAllow {
-		return core.ToolResult{Error: sandboxRefusal(err)}
+		return core.ToolResult{Error: sandboxRefusal(err), ErrorKind: core.ToolErrorSandbox}
 	}
 
 	// **slot 在第零道那條 goroutine 開始之前取得**，不只是 Start 之前——現在連 PATH

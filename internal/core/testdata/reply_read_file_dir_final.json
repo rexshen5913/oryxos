@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-read-file-dir-final",
+  "object": "chat.completion",
+  "created": 1722926560,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "notes 是一個目錄，不是檔案，所以讀不了它的內容。我目前手上只有讀檔的能力，沒辦法列出它底下有什麼；請直接告訴我要讀哪一個檔案。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 226,
+    "completion_tokens": 33,
+    "total_tokens": 259
+  }
+}

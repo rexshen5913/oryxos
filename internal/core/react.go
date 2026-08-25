@@ -133,15 +133,14 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 			if err != nil {
 				return "", err
 			}
-			content := result.Content
-			if !result.OK {
-				if retries > 0 && result.Retryable {
-					content = fmt.Sprintf("Tool 執行失敗（已重試 %d 次）: %s", retries, result.Error)
-				} else {
-					content = "Tool 執行失敗: " + result.Error
-				}
-			}
-			session.Append(Message{Role: RoleTool, Content: content, ToolCallID: call.ID})
+			// 回填內容一律經**單一組裝點**（見 toolMessageContent）：原始錯誤在前、
+			// 該類型給 LLM 的指引在後。審計不走這裡，它記的是 result.Error 原文
+			// （見 execute），兩邊刻意分岔。
+			session.Append(Message{
+				Role:       RoleTool,
+				Content:    toolMessageContent(result, retries),
+				ToolCallID: call.ID,
+			})
 		}
 	}
 

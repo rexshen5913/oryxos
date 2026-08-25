@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-read-file-missing-final",
+  "object": "chat.completion",
+  "created": 1722926400,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "notes/todo.md 在 Workspace 裡並不存在，所以我讀不到它的內容。我目前手上只有讀檔的能力，沒辦法替你確認那個目錄底下實際有哪些檔案；請你確認一下確切的檔名或路徑，我再讀一次。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 218,
+    "completion_tokens": 41,
+    "total_tokens": 259
+  }
+}

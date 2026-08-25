@@ -84,10 +84,10 @@ type readFileOutput struct {
 func (t *readFileTool) Execute(ctx context.Context, input string) core.ToolResult {
 	var in readFileInput
 	if err := json.Unmarshal([]byte(input), &in); err != nil {
-		return core.ToolResult{Error: fmt.Sprintf("解析 %s 輸入參數: %v", ReadFileToolName, err)}
+		return core.ToolResult{Error: fmt.Sprintf("解析 %s 輸入參數: %v", ReadFileToolName, err), ErrorKind: core.ToolErrorInvalidArgs}
 	}
 	if in.Path == "" {
-		return core.ToolResult{Error: fmt.Sprintf("%s 缺必填參數 path", ReadFileToolName)}
+		return core.ToolResult{Error: fmt.Sprintf("%s 缺必填參數 path", ReadFileToolName), ErrorKind: core.ToolErrorInvalidArgs}
 	}
 	// 取消在這裡收：底下的 os.Root 開檔與讀取都**不吃 context**，走進去之後就沒有
 	// 中止點了（憲法 5.3）。真正會無限期阻塞的那一種（具名管道）由下面的型別檢查
@@ -100,16 +100,16 @@ func (t *readFileTool) Execute(ctx context.Context, input string) core.ToolResul
 	// 等價，第三態落地後就不是了。不標 Retryable——重跑一次白名單的答案不會變。
 	decision, rel, err := t.checker.CheckFilePath(in.Path)
 	if decision != SandboxAllow {
-		return core.ToolResult{Error: sandboxRefusal(err)}
+		return core.ToolResult{Error: sandboxRefusal(err), ErrorKind: core.ToolErrorSandbox}
 	}
 
 	info, err := statNoSymlink(t.root, rel)
 	switch {
 	case errors.Is(err, ErrSandboxViolation):
-		return core.ToolResult{Error: err.Error()}
+		return core.ToolResult{Error: err.Error(), ErrorKind: core.ToolErrorSandbox}
 	case errors.Is(err, os.ErrNotExist):
 		// 「不存在」與「沒權限」要分得出來：使用者（與 LLM）對這兩件事的下一步不同。
-		return core.ToolResult{Error: fmt.Sprintf("%s 找不到 %s：這個檔案在 Workspace 內不存在", ReadFileToolName, rel)}
+		return core.ToolResult{Error: fmt.Sprintf("%s 找不到 %s：這個檔案在 Workspace 內不存在", ReadFileToolName, rel), ErrorKind: core.ToolErrorNotFound}
 	case errors.Is(err, os.ErrPermission):
 		return core.ToolResult{Error: fmt.Sprintf("%s 讀不到 %s：權限不足", ReadFileToolName, rel)}
 	case err != nil:
@@ -130,7 +130,7 @@ func (t *readFileTool) Execute(ctx context.Context, input string) core.ToolResul
 		// 日後若把這段抽成回 error 的函式，errors.Is 才仍然認得它（憲法 5.1）。
 		violation := fmt.Errorf("%w: %s 的目標 %s 不是普通檔（實際為 %s）；裝置檔、具名管道與 socket 一律拒絕",
 			ErrSandboxViolation, ReadFileToolName, rel, info.Mode().Type())
-		return core.ToolResult{Error: violation.Error()}
+		return core.ToolResult{Error: violation.Error(), ErrorKind: core.ToolErrorSandbox}
 	}
 
 	// 權限不足在這裡才浮出來：Lstat 讀的是 metadata，一個 0o000 的檔案 stat 得到、
@@ -140,7 +140,13 @@ func (t *readFileTool) Execute(ctx context.Context, input string) core.ToolResul
 		return core.ToolResult{Error: fmt.Sprintf("%s 讀不到 %s：權限不足", ReadFileToolName, rel)}
 	}
 	if err != nil {
-		return core.ToolResult{Error: fmt.Sprintf("%s 開啟 %s: %v", ReadFileToolName, rel, err)}
+		// Lstat 過了、開檔時卻不見了：有人在這兩步之間刪掉它。訊息不變，只補上分類
+		// ——「不存在」的下一步與一般 I/O 失敗不同（見 core.ToolErrorNotFound）。
+		res := core.ToolResult{Error: fmt.Sprintf("%s 開啟 %s: %v", ReadFileToolName, rel, err)}
+		if errors.Is(err, os.ErrNotExist) {
+			res.ErrorKind = core.ToolErrorNotFound
+		}
+		return res
 	}
 	defer func() { _ = f.Close() }()
 
@@ -268,13 +274,13 @@ type writeFileOutput struct {
 func (t *writeFileTool) Execute(ctx context.Context, input string) core.ToolResult {
 	var in writeFileInput
 	if err := json.Unmarshal([]byte(input), &in); err != nil {
-		return core.ToolResult{Error: fmt.Sprintf("解析 %s 輸入參數: %v", WriteFileToolName, err)}
+		return core.ToolResult{Error: fmt.Sprintf("解析 %s 輸入參數: %v", WriteFileToolName, err), ErrorKind: core.ToolErrorInvalidArgs}
 	}
 	if in.Path == "" {
-		return core.ToolResult{Error: fmt.Sprintf("%s 缺必填參數 path", WriteFileToolName)}
+		return core.ToolResult{Error: fmt.Sprintf("%s 缺必填參數 path", WriteFileToolName), ErrorKind: core.ToolErrorInvalidArgs}
 	}
 	if in.Content == nil {
-		return core.ToolResult{Error: fmt.Sprintf("%s 缺必填參數 content（要寫空檔請明確給空字串）", WriteFileToolName)}
+		return core.ToolResult{Error: fmt.Sprintf("%s 缺必填參數 content（要寫空檔請明確給空字串）", WriteFileToolName), ErrorKind: core.ToolErrorInvalidArgs}
 	}
 	if err := ctx.Err(); err != nil {
 		return core.ToolResult{Error: fmt.Sprintf("%s 被取消: %v", WriteFileToolName, err)}
@@ -283,7 +289,7 @@ func (t *writeFileTool) Execute(ctx context.Context, input string) core.ToolResu
 	// 依決策而不是依「有沒有錯誤」判斷，理由同 read_file 那一處。
 	decision, rel, err := t.checker.CheckFilePath(in.Path)
 	if decision != SandboxAllow {
-		return core.ToolResult{Error: sandboxRefusal(err)}
+		return core.ToolResult{Error: sandboxRefusal(err), ErrorKind: core.ToolErrorSandbox}
 	}
 	// **超過上限一律明確拒絕，不截斷。** 寫入與讀取在這裡不對稱：讀截斷是安全的
 	// （少看到一段內容，而且有 truncated 標記），寫截斷會在磁碟上留下一個內容不完整
@@ -335,13 +341,13 @@ func (t *writeFileTool) checkWriteTarget(rel string) (core.ToolResult, bool) {
 		info, err := statNoSymlink(t.root, parent)
 		switch {
 		case errors.Is(err, ErrSandboxViolation):
-			return core.ToolResult{Error: err.Error()}, false
+			return core.ToolResult{Error: err.Error(), ErrorKind: core.ToolErrorSandbox}, false
 		case errors.Is(err, os.ErrNotExist):
 			// **不自動建目錄**：路徑打錯不該在工作區裡長出一串空資料夾，而 MkdirAll
 			// 會讓一次筆誤留下永久痕跡。訊息要講清楚下一步是什麼。
 			return core.ToolResult{Error: fmt.Sprintf(
 				"%s 寫不了 %s：父目錄 %s 不存在，write_file 不會自動建目錄；請先確認路徑，或改寫到一個已存在的目錄",
-				WriteFileToolName, rel, parent)}, false
+				WriteFileToolName, rel, parent), ErrorKind: core.ToolErrorNotFound}, false
 		case errors.Is(err, os.ErrPermission):
 			return core.ToolResult{Error: fmt.Sprintf("%s 寫不了 %s：父目錄 %s 權限不足", WriteFileToolName, rel, parent)}, false
 		case err != nil:
@@ -366,7 +372,7 @@ func (t *writeFileTool) checkWriteTarget(rel string) (core.ToolResult, bool) {
 	if info.Mode()&os.ModeSymlink != 0 {
 		violation := fmt.Errorf("%w: 路徑 %s 是符號連結，一律拒絕不跟隨（只接受 Workspace 內的實體檔案）",
 			ErrSandboxViolation, rel)
-		return core.ToolResult{Error: violation.Error()}, false
+		return core.ToolResult{Error: violation.Error(), ErrorKind: core.ToolErrorSandbox}, false
 	}
 	if info.IsDir() {
 		return core.ToolResult{Error: fmt.Sprintf("%s 的目標 %s 是目錄，不是檔案", WriteFileToolName, rel)}, false
@@ -377,7 +383,7 @@ func (t *writeFileTool) checkWriteTarget(rel string) (core.ToolResult, bool) {
 		// 在這條路上直接失效。
 		violation := fmt.Errorf("%w: %s 的目標 %s 不是普通檔（實際為 %s）；裝置檔、具名管道與 socket 一律拒絕",
 			ErrSandboxViolation, WriteFileToolName, rel, info.Mode().Type())
-		return core.ToolResult{Error: violation.Error()}, false
+		return core.ToolResult{Error: violation.Error(), ErrorKind: core.ToolErrorSandbox}, false
 	}
 	return core.ToolResult{}, true
 }
@@ -400,7 +406,13 @@ func writeIOFailure(stage, rel string, err error) core.ToolResult {
 		return core.ToolResult{Error: fmt.Sprintf("%s %s %s：權限不足", WriteFileToolName, stage, rel)}
 	}
 	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrExist) {
-		return core.ToolResult{Error: fmt.Sprintf("%s %s %s: %v", WriteFileToolName, stage, rel, err)}
+		// 訊息兩者共用（都是「檢查完才被人動過」的競爭），但**只有前者是 not_found**
+		// ——「已存在」不是找不到，分類不能跟著一起給。
+		res := core.ToolResult{Error: fmt.Sprintf("%s %s %s: %v", WriteFileToolName, stage, rel, err)}
+		if errors.Is(err, os.ErrNotExist) {
+			res.ErrorKind = core.ToolErrorNotFound
+		}
+		return res
 	}
 	return core.ToolResult{
 		Error:     fmt.Sprintf("%s %s %s: %v（暫時性的 I/O 失敗，例如磁碟已滿或配額用盡）", WriteFileToolName, stage, rel, err),
@@ -480,10 +492,10 @@ type listDirOutput struct {
 func (t *listDirTool) Execute(ctx context.Context, input string) core.ToolResult {
 	var in listDirInput
 	if err := json.Unmarshal([]byte(input), &in); err != nil {
-		return core.ToolResult{Error: fmt.Sprintf("解析 %s 輸入參數: %v", ListDirToolName, err)}
+		return core.ToolResult{Error: fmt.Sprintf("解析 %s 輸入參數: %v", ListDirToolName, err), ErrorKind: core.ToolErrorInvalidArgs}
 	}
 	if in.Path == "" {
-		return core.ToolResult{Error: fmt.Sprintf("%s 缺必填參數 path", ListDirToolName)}
+		return core.ToolResult{Error: fmt.Sprintf("%s 缺必填參數 path", ListDirToolName), ErrorKind: core.ToolErrorInvalidArgs}
 	}
 	// 取消在這裡收，理由同 read_file：底下的 os.Root 開檔與 ReadDir 都**不吃 context**
 	// （憲法 5.3）。會無限期阻塞的那一種（具名管道）由下面的型別檢查在開檔前擋掉。
@@ -494,15 +506,15 @@ func (t *listDirTool) Execute(ctx context.Context, input string) core.ToolResult
 	// 依決策而不是依「有沒有錯誤」判斷，理由同 read_file 那一處。
 	decision, rel, err := t.checker.CheckFilePath(in.Path)
 	if decision != SandboxAllow {
-		return core.ToolResult{Error: sandboxRefusal(err)}
+		return core.ToolResult{Error: sandboxRefusal(err), ErrorKind: core.ToolErrorSandbox}
 	}
 
 	info, err := statNoSymlink(t.root, rel)
 	switch {
 	case errors.Is(err, ErrSandboxViolation):
-		return core.ToolResult{Error: err.Error()}
+		return core.ToolResult{Error: err.Error(), ErrorKind: core.ToolErrorSandbox}
 	case errors.Is(err, os.ErrNotExist):
-		return core.ToolResult{Error: fmt.Sprintf("%s 找不到 %s：這個目錄在 Workspace 內不存在", ListDirToolName, rel)}
+		return core.ToolResult{Error: fmt.Sprintf("%s 找不到 %s：這個目錄在 Workspace 內不存在", ListDirToolName, rel), ErrorKind: core.ToolErrorNotFound}
 	case errors.Is(err, os.ErrPermission):
 		return core.ToolResult{Error: fmt.Sprintf("%s 讀不到 %s：權限不足", ListDirToolName, rel)}
 	case err != nil:
@@ -522,7 +534,7 @@ func (t *listDirTool) Execute(ctx context.Context, input string) core.ToolResult
 		// 而 os.Root.Open 不吃 context——不在開檔前擋下，憲法 5.3 在這條路上失效。
 		violation := fmt.Errorf("%w: %s 的目標 %s 不是目錄（實際為 %s）；裝置檔、具名管道與 socket 一律拒絕",
 			ErrSandboxViolation, ListDirToolName, rel, info.Mode().Type())
-		return core.ToolResult{Error: violation.Error()}
+		return core.ToolResult{Error: violation.Error(), ErrorKind: core.ToolErrorSandbox}
 	}
 
 	// 權限不足在這裡才浮出來：Lstat 讀的是 metadata，一個 0o000 的目錄 stat 得到、
@@ -532,7 +544,12 @@ func (t *listDirTool) Execute(ctx context.Context, input string) core.ToolResult
 		return core.ToolResult{Error: fmt.Sprintf("%s 讀不到 %s：權限不足", ListDirToolName, rel)}
 	}
 	if err != nil {
-		return core.ToolResult{Error: fmt.Sprintf("%s 開啟 %s: %v", ListDirToolName, rel, err)}
+		// 與 read_file 同一條競爭：Lstat 過了、開目錄時已被刪。訊息不變，只補分類。
+		res := core.ToolResult{Error: fmt.Sprintf("%s 開啟 %s: %v", ListDirToolName, rel, err)}
+		if errors.Is(err, os.ErrNotExist) {
+			res.ErrorKind = core.ToolErrorNotFound
+		}
+		return res
 	}
 	defer func() { _ = d.Close() }()
 

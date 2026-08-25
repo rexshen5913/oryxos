@@ -13,7 +13,8 @@ type ToolDefinition struct {
 	InputSchema json.RawMessage
 }
 
-// ToolResult 是一次 Tool 執行的結果：成功標識、結果內容、錯誤資訊、是否可重試。
+// ToolResult 是一次 Tool 執行的結果：成功標識、結果內容、錯誤資訊、是否可重試、
+// 失敗的領域類型。
 // Retryable 標示的失敗由 ReAct 循環按指數退避重試（最多三次，需求 8.2）；
 // 重試耗盡或不可重試時，錯誤作為 tool 結果回填給 LLM。
 type ToolResult struct {
@@ -21,6 +22,12 @@ type ToolResult struct {
 	Content   string // OK 時的結果內容
 	Error     string // 失敗時的錯誤資訊，作為 tool 結果回填給 LLM
 	Retryable bool
+	// ErrorKind 是失敗的領域類型，決定回填時要附哪一段給 LLM 的指引。
+	//
+	// 與 Retryable **正交**：一個回答「這是哪一類失敗」，一個回答「要不要重試」。
+	// 零值是未分類，回填內容與這個欄位出現之前逐位元組相同（見 ToolErrorKind）。
+	// OK 為真時這個欄位沒有意義，一律留零值。
+	ErrorKind ToolErrorKind
 }
 
 // ToolExecutor 是 ReAct 循環執行 Tool 的介面，由 internal/tool 以
