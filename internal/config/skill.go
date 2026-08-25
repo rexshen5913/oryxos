@@ -135,10 +135,19 @@ func (l *ContextLoader) readSkillWithBody(ref string) (core.SkillMeta, string, e
 
 // parseSkill 解析一份 SKILL.md 的內容，校驗 frontmatter 並確認 name 與引用名一致。
 //
-// 比對前把 CRLF 正規化成 LF：SKILL.md 隨 Workspace 進 git，而 Git for Windows 安裝時
-// 預設 `core.autocrlf=true`——不正規化的話 frontmatter 的 `---` 分隔線在 Windows
-// checkout 出來是 `---\r`，整份 Skill 會被判成「沒有 frontmatter」（#16 已為 Bootstrap
-// 的舊模板比對付過同一筆學費）。
+// 比對前把 CRLF 正規化成 LF。不正規化的話 frontmatter 的 `---` 分隔線會是 `---\r`，
+// 整份 Skill 被判成「沒有 frontmatter」（#16 已為 Bootstrap 的舊模板比對付過同一筆學費）。
+//
+// **這與 oryxos 跑在哪個平台無關**——ADR-0006 已明確不支援 Windows，所以理由不能是
+// 「在 Windows 上讀到 CRLF」。要防的是 **CRLF 隨檔案抵達一台 Unix 機器**：SKILL.md 設計
+// 成隨 Workspace 散佈，而它不一定經過 Git 的文字往返（`core.autocrlf=true` 會在 commit
+// 時把 CRLF 收回 LF）。三條真實路徑繞過那道正規化——壓縮檔／`scp`／`COPY` 直送、撰寫端
+// `core.autocrlf=false` 讓 CRLF 進到 repo、或檔案在 Windows 上由編輯器以 UTF-8 ＋ CRLF
+// 存檔（VS Code 在 Windows 的預設換行）後被複製進來。三者的失敗地點都在這裡，不在 Windows。
+//
+// **舉的例子刻意都是 UTF-8**：`normalizeNewlines` 是位元組層的 `\r\n` → `\n` 替換，只對
+// UTF-8／ASCII 成立。UTF-16 存檔（例如 Windows PowerShell 5.1 的 `Out-File` 預設）換行是
+// `\r\x00\n\x00`，這道正規化比對不到，也不在本函式要處理的範圍內。
 func parseSkill(ref, content string) (core.SkillMeta, string, error) {
 	front, body, err := splitFrontmatter(normalizeNewlines(content))
 	if err != nil {

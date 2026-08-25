@@ -36,10 +36,20 @@ var legacyTemplates = map[string]string{
 
 // isUneditedLegacyTemplate 判斷 content 是否原封不動就是該檔的舊版出廠模板。
 //
-// 比對前把 CRLF 正規化成 LF，**只影響比對、不影響回傳的內容**。理由：Bootstrap
-// 檔案明確設計成隨 Workspace 進 git（技術方案 §9.3），而 Git for Windows 安裝時
-// 預設 `core.autocrlf=true`——同一份未經編輯的舊模板在 Windows checkout 出來就是
-// CRLF，純位元比對會失手，那些說明文字又會被注入。
+// 比對前把 CRLF 正規化成 LF，**只影響比對、不影響回傳的內容**。一份未經編輯的舊模板
+// 若帶著 CRLF，純位元比對會失手，那些說明文字又會被注入。
+//
+// **這與 oryxos 跑在哪個平台無關**——ADR-0006 已明確不支援 Windows，所以理由不能是
+// 「在 Windows 上讀到 CRLF」。要防的是 **CRLF 隨檔案抵達一台 Unix 機器**：Bootstrap
+// 檔案設計成隨 Workspace 散佈（技術方案 §9.3），而它不一定經過 Git 的文字往返
+// （`core.autocrlf=true` 會在 commit 時把 CRLF 收回 LF）。三條真實路徑繞過那道正規化——
+// 壓縮檔／`scp`／`COPY` 直送、撰寫端 `core.autocrlf=false` 讓 CRLF 進到 repo、或檔案在
+// Windows 上由編輯器以 UTF-8 ＋ CRLF 存檔（VS Code 在 Windows 的預設換行）後被複製進來。
+// 三者的失敗地點都在這裡，不在 Windows。
+//
+// **舉的例子刻意都是 UTF-8**：下面的 `normalizeNewlines` 是位元組層的 `\r\n` → `\n`
+// 替換，只對 UTF-8／ASCII 成立。UTF-16 存檔（例如 Windows PowerShell 5.1 的 `Out-File`
+// 預設）換行是 `\r\x00\n\x00`，這道正規化比對不到，也不在它要處理的範圍內。
 //
 // 只正規化換行、不做 TrimSpace 之類的寬鬆比對：那會把「使用者在檔尾多敲一個空行」
 // 也當成未編輯，越界到覆寫使用者編輯那一側去。

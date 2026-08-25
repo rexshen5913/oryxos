@@ -1299,9 +1299,10 @@ var legacyBootstrapTemplates = map[string]string{
 `,
 }
 
-// crlfLegacyBootstrapTemplates 是同一份舊模板的 CRLF 版本，模擬 Windows 上
-// `core.autocrlf=true`（Git for Windows 安裝時的預設）checkout 出來的形態。
-// Bootstrap 檔案設計成隨 Workspace 進 git，所以這是真會發生的磁碟狀態。
+// crlfLegacyBootstrapTemplates 是同一份舊模板的 CRLF 版本。Bootstrap 檔案設計成
+// 隨 Workspace 散佈，而 CRLF 有數條途徑抵達一台 Unix 機器上的 Workspace（不經 Git
+// 文字往返的封裝、複製，或撰寫端未正規化就進了 repo），所以這是真會發生的磁碟狀態。
+// 完整理由見 internal/config 的 isUneditedLegacyTemplate 註解。
 //
 // 刻意獨立寫死、不從 LF 版轉換：要驗的正是「換行形態不同的同一份未編輯模板」
 // 也要被辨識出來，用程式轉換等於拿實作的假設去驗實作。

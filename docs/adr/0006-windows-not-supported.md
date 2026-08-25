@@ -180,13 +180,15 @@ B **與 CRLF 那類不同**，不要混為一談：CRLF 是「Windows 產生的�
 
 - Workspace 以壓縮檔、`scp`、共享磁碟或 `Dockerfile` 的 `COPY` 從一台 Windows 機器搬到 Linux 伺服器——中間沒有 Git，CRLF 原樣抵達
 - 撰寫者的 Windows 環境 `core.autocrlf` 設成 `false` 或被 `.gitattributes` 覆寫，CRLF 因此**進到 repo 裡**，Linux 端 checkout 拿到的就是 CRLF
-- 檔案由 Windows 工具直接產生（PowerShell 的 `Out-File` 預設輸出 CRLF），再複製進 Workspace
+- 檔案在 Windows 上由編輯器以 **UTF-8 ＋ CRLF** 存檔（VS Code 在 Windows 的預設換行），再複製進 Workspace
 
 三者都不需要 oryxos 跑在 Windows 上，症狀卻都出現在 Linux：frontmatter 的 `---` 分隔線變成 `---\r`，整份 Skill 被判成「沒有 frontmatter」（issue #16 已為 Bootstrap 的舊模板比對付過同一筆學費）。
 
+**三個例子刻意都是 UTF-8，這是保留論證的適用邊界。** `normalizeNewlines` 是位元組層的 `\r\n` → `\n` 替換，只對 UTF-8／ASCII 成立。UTF-16 存檔（例如 Windows PowerShell 5.1 的 `Out-File` 預設是 UTF-16LE；PowerShell 6+ 才改為 `utf8NoBOM`）換行是 `\r\x00\n\x00`，這道正規化比對不到——**那不是本段論證涵蓋的情況，舉例時不能拿它當證據**。
+
 **檔案來自 Windows，與程式跑在 Windows，是兩件不同的事。** 本 ADR 只排除後者。未來讀者看到這些正規化，不要當成 Windows 支援的殘留物清掉——那會弄壞一批真實使用者，而且症狀出現在一台 Linux 機器上，極難聯想回這裡。
 
-因此本 ADR 附帶一項後續：`skill.go` 與 `legacy_bootstrap.go` 的註解應改寫成上述理由，否則它們會留著一條指向已排除平台的依據，讓下一個讀者誤判成可刪。
+`skill.go` 與 `legacy_bootstrap.go` 的註解原本留著一條指向已排除平台的依據（「在 Windows checkout 出來就是 CRLF」），會讓下一個讀者誤判成可刪——**已改寫成上述理由**：明寫「這與 oryxos 跑在哪個平台無關」，並列出那三條繞過 Git 文字往返的路徑。
 
 **`internal/storage` 的 `fileDSN` 不屬於本節這一類。** 它處理的是 Windows 的路徑**字串形狀**，而那種字串進不到一台 Linux 機器的 `filepath.Abs`——與本節「Windows 產生的檔案、Linux 消費」是兩回事。詳見上方「逐處判斷的依據」，該處也說明了它為什麼不在本 ADR 裁定範圍內。
 
@@ -204,15 +206,16 @@ issue #38 與 ticket #50 原按舊理由寫成——**已於本 ADR 定案當日
 
 日後若要重新納入 Windows，必須明確 supersede 本 ADR，而不是靠某張 ticket 順手把它加回自檢清單或 CI matrix。這條約束與上方的清理討論方向相反但同源：**平台範圍的增減都得是明示的決定，不是某次改動的副作用。**
 
-### README 應寫明「不支援 Windows」
+### README 已寫明「不支援 Windows」
 
-目前 `README.md` 對平台一字未提，使用者無從得知。補的是本 ADR 決定了的那一條——**不支援 Windows**。
+`README.md` 原本對平台一字未提，使用者無從得知。**已於技術棧表格補上一列**，內容是本 ADR 決定了的那一條——**不支援 Windows**——加上需求文檔 §8.4 的 Linux 主流發行版與 macOS 的開發環境定位，並註明其餘平台未表態。
 
-正面的支援清單**已經有出處了**：需求文檔 §8.4 的 Linux 主流發行版。README 要寫就引用它，不要另立一份。
+正面的支援清單**已經有出處**：需求文檔 §8.4。README 引用它，沒有另立一份。
 
-若要一併寫現況，措辭必須對得上事實一與事實二：Linux 是需求指定的支援平台，但**沒有自動化 runtime 驗證**（唯一的 CI 只建置網站）；macOS 是開發環境，需求文檔未賦予部署地位；FreeBSD／OpenBSD／NetBSD 建置通過但執行未驗證；Solaris 與 AIX 建置就不通過。
+留給日後編輯 README 的人兩條約束：
 
-**不要把「網站 CI 跑在 Ubuntu」寫成「Linux 已被涵蓋」**——那是審查抓到過的過度解讀。
+- 措辭必須對得上事實一與事實二——Linux 是需求指定的支援平台，但**沒有自動化 runtime 驗證**（唯一的 CI 只建置網站）；macOS 是開發環境，需求文檔未賦予部署地位；FreeBSD／OpenBSD／NetBSD 建置通過但執行未驗證；Solaris 與 AIX 建置就不通過。
+- **不要把「網站 CI 跑在 Ubuntu」寫成「Linux 已被涵蓋」**——那是審查抓到過的過度解讀。
 
 不要在 README 寫出一份看起來權威的「支援平台清單」：那份清單本 ADR 沒有授權，寫出來就等於用文檔悄悄完成一次未經定案的決定。
 

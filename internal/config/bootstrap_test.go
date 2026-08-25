@@ -359,8 +359,9 @@ func TestLegacyTemplatesTreatedAsEmpty(t *testing.T) {
 			want:    "",
 		},
 		{
-			// Git for Windows 的 core.autocrlf=true 會把 checkout 出來的檔案轉成
-			// CRLF；同一份未編輯的舊模板換個換行形態，仍不該被注入。
+			// 一份未編輯的舊模板換個換行形態，仍不該被注入。CRLF 會怎麼抵達一台
+			// Unix 機器，見 isUneditedLegacyTemplate 的註解（不經 Git 文字往返的
+			// 封裝、複製，或撰寫端未正規化就進了 repo）。
 			name:    "CRLF 換行的舊 AGENTS.md 仍視為空",
 			file:    "AGENTS.md",
 			content: strings.ReplaceAll(legacyTemplates[agentsFile], "\n", "\r\n"),
