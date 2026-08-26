@@ -43,7 +43,7 @@ settings:
 				Identity:    core.Identity{AgentName: "Oryx", Prompt: "你是 Oryx。"},
 				Provider:    core.ProviderRef{Name: "openai", Model: "gpt-4o-mini", Temperature: 0.7},
 				Tools:       []string{"http_get", "http_post"},
-				Settings:    core.Settings{MaxIterations: 5, MaxHistoryTurns: 8},
+				Settings:    core.Settings{MaxIterations: 5, MaxHistoryTurns: 8, MaxRepeatedToolFailures: 3},
 			},
 		},
 		{
@@ -52,7 +52,19 @@ settings:
 			want: &core.Profile{
 				Name:     "d",
 				Provider: core.ProviderRef{Name: "openai", Model: "m"},
-				Settings: core.Settings{MaxIterations: 10, MaxHistoryTurns: 20},
+				Settings: core.Settings{MaxIterations: 10, MaxHistoryTurns: 20, MaxRepeatedToolFailures: 3},
+			},
+		},
+		{
+			// 死循環守衛的門檻走的是與另外兩個相同的「零值回退預設」形狀（ticket #54）：
+			// **明設的值不得被預設值蓋掉**。上面兩格證明未設定時回退，這一格證明設定了
+			// 就作數——少了它，一個把 effective 寫成無條件回傳預設值的實作也會全綠。
+			name: "明設 max_repeated_tool_failures 時保留",
+			yaml: "name: d\nprovider:\n  name: openai\n  model: m\nsettings:\n  max_repeated_tool_failures: 5\n",
+			want: &core.Profile{
+				Name:     "d",
+				Provider: core.ProviderRef{Name: "openai", Model: "m"},
+				Settings: core.Settings{MaxIterations: 10, MaxHistoryTurns: 20, MaxRepeatedToolFailures: 5},
 			},
 		},
 		{

@@ -148,11 +148,20 @@ type ProviderRef struct {
 type Settings struct {
 	MaxIterations   int `yaml:"max_iterations"`
 	MaxHistoryTurns int `yaml:"max_history_turns"`
+	// MaxRepeatedToolFailures 是死循環守衛的門檻：同一個 Tool 帶等價參數連續失敗
+	// 幾次之後，回填內容要多帶一段要求改變策略的提示（ticket #54）。
+	MaxRepeatedToolFailures int `yaml:"max_repeated_tool_failures"`
 }
 
 const (
 	defaultMaxIterations   = 10
 	defaultMaxHistoryTurns = 20
+	// defaultMaxRepeatedToolFailures 是死循環守衛的預設門檻。
+	//
+	// 3 是在兩個方向之間取的：**大到**讓 LLM 有機會自行修正（換個路徑、補個欄位
+	// 常常第二次就對了，門檻 2 會在正常的試錯上誤觸發），**小到**在預設的 10 次
+	// iteration 上限內還留得下七次讓它換路——提示來得太晚就沒有意義了。
+	defaultMaxRepeatedToolFailures = 3
 )
 
 // effectiveMaxIterations 回傳迭代上限，零值（含負值）回退預設。預設在讀取點
@@ -170,6 +179,18 @@ func (s Settings) effectiveMaxHistoryTurns() int {
 		return defaultMaxHistoryTurns
 	}
 	return s.MaxHistoryTurns
+}
+
+// effectiveMaxRepeatedToolFailures 回傳死循環守衛的門檻，零值（含負值）回退預設。
+//
+// 形狀刻意與上面兩個一模一樣（ticket #54 明訂）：**沒有寫這個欄位的既有 Profile
+// 因此完全不必遷移**——零值就是預設值，不是「守衛關閉」。手組、未經 LoadProfile 的
+// Profile 也一樣拿得到門檻，理由同 effectiveMaxIterations。
+func (s Settings) effectiveMaxRepeatedToolFailures() int {
+	if s.MaxRepeatedToolFailures <= 0 {
+		return defaultMaxRepeatedToolFailures
+	}
+	return s.MaxRepeatedToolFailures
 }
 
 // LoadProfile 從 path 讀取並解析 Profile YAML，套用 Settings 預設值並做基礎校驗
@@ -200,5 +221,6 @@ func LoadProfile(path string) (*Profile, error) {
 
 	p.Settings.MaxIterations = p.Settings.effectiveMaxIterations()
 	p.Settings.MaxHistoryTurns = p.Settings.effectiveMaxHistoryTurns()
+	p.Settings.MaxRepeatedToolFailures = p.Settings.effectiveMaxRepeatedToolFailures()
 	return &p, nil
 }

@@ -151,7 +151,12 @@ const toolGuidanceSeparator = "\n\n"
 //
 // retries 是實際重試次數，只有可重試的失敗才會大於零——那段措辭與位置都維持本票之前
 // 的原樣，未分類（零值）的結果因此逐位元組不變。
-func toolMessageContent(result ToolResult, retries int) string {
+//
+// repeated 是死循環守衛回報的連續失敗次數（ticket #54），大於零才附提示、且一定排在
+// 類型指引**之後**。兩段話的分工是刻意的：類型指引說的是「這一類失敗該怎麼辦」，
+// 死循環提示說的是「你已經在這條路上原地打轉」——後者只有在前者顯然沒被聽進去時才
+// 該出現，順序反過來等於先喊停再解釋，LLM 會少掉判斷的依據。
+func toolMessageContent(result ToolResult, retries, repeated int) string {
 	if result.OK {
 		return result.Content
 	}
@@ -167,5 +172,32 @@ func toolMessageContent(result ToolResult, retries int) string {
 		b.WriteString(toolGuidanceSeparator)
 		b.WriteString(guidance)
 	}
+	if repeated > 0 {
+		b.WriteString(toolGuidanceSeparator)
+		b.WriteString(loopGuardNotice(repeated))
+	}
 	return b.String()
+}
+
+// loopGuardNotice 是死循環守衛達門檻時附加的提示（ticket #54）。
+//
+// 措辭沿用 ToolErrorKind.Guidance 那三條硬規則（不指名任何 Tool、不假設重試歷史、
+// 不對世界下斷言），另外多守一條**本票特有**的：
+//
+//   - **明說「換寫法不算換做法」。** 守衛存在的理由就是 LLM 會調鍵序、多加空白再送
+//     一次同樣的呼叫；不把這件事講出來，它完全可以照著「請改變策略」照做，然後送出
+//     一組等價參數，下一輪再收到同一段提示。這句話是把規範化規則本身告訴 LLM——
+//     沒有它，守衛只擋得住循環的症狀，擋不住成因。
+//
+// 帶上實際次數而不是含糊地說「很多次」：具體的數字讓 LLM 判斷得出自己已經走多遠，
+// 也讓這段話在對話記錄裡可查證。
+//
+// **與 sandbox 那類的專屬訊息並存**：那一類沒有通用指引（見 ToolErrorSandbox），
+// 訊息末尾的專屬建議在單次拒絕時不會被接上任何東西（TestShellWhitelistSpecificMessageKept
+// 釘住）。連續三次之後才附這段是刻意的——那時專屬建議顯然沒有奏效，加碼不是稀釋。
+func loopGuardNotice(repeated int) string {
+	return fmt.Sprintf("你已經用等價的參數連續呼叫這個 Tool 失敗 %d 次——"+
+		"調整鍵序或空白不算換了做法。"+
+		"再送一次相同或等價的參數不會有不同結果：請改變策略（換參數、換途徑，"+
+		"或先取得缺少的資訊），或者直接告訴使用者卡在哪裡、需要他提供什麼。", repeated)
 }

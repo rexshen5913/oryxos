@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-fixture-loop-guard-tool-call",
+  "object": "chat.completion",
+  "created": 1722926100,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": {{ID}},
+            "type": "function",
+            "function": {
+              "name": "write_file",
+              "arguments": {{ARGS}}
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 186,
+    "completion_tokens": 26,
+    "total_tokens": 212
+  }
+}

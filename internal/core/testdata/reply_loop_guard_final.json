@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-loop-guard-final",
+  "object": "chat.completion",
+  "created": 1722926400,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "我沒辦法寫進 notes/sub/a.md：那個檔案的父目錄 notes/sub 並不存在，而我不會自動建立目錄。我已經試過幾次同樣的路徑，再試下去結果不會改變，所以先停下來問你：要我改寫到已經存在的 notes 底下，還是你先把 notes/sub 這個目錄建起來？"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 302,
+    "completion_tokens": 58,
+    "total_tokens": 360
+  }
+}

@@ -2,7 +2,9 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"regexp"
 	"strings"
@@ -15,6 +17,39 @@ import (
 // 日誌，與 ReAct 循環寫出的審計記錄。它們是純字串處理、沒有依賴，放這裡不牽動
 // 任何依賴方向（tool 與 storage 本來就 import core）。
 
+// decodeToolArgs 把 Tool 呼叫參數解析成一個**完整的** JSON 文件，數字保留原始字面
+// （json.Number）。s 不是合法 JSON、或第一個 JSON 值後面還有尾隨內容時回 ok=false。
+//
+// 兩條落盤／比對路徑共用它：RedactArgs（審計與日誌）與 normalizeToolArgs（死循環
+// 守衛的 key）。共用不只是省行數——兩邊對「什麼算一份合法參數」的答案必須一致，
+// 否則守衛的 key 與日誌記下的那份會是不同的東西。
+//
+// **兩件事都不能少，各自有踩過的理由：**
+//
+//  1. **UseNumber。** 解成 float64 再序列化的話，超過 2^53 的整數會被截到同一個值
+//     （實測 9007199254740993 → 9007199254740992），小數字面也會被改寫（1.0 → 1）。
+//     審計記的是事實，守衛的 key 要能區分兩個不同的 numeric ID，兩者都輸不起這個。
+//  2. **要求第二次 Decode 剛好回 io.EOF。** Decoder.Decode 只吃第一個 JSON 值，後面
+//     還有東西它**不報錯**（json.Unmarshal 會）。而 Decoder.More() 擋不住這件事——
+//     它回答的是「當前 array/object 裡還有沒有下一個元素」，所以 `{"a":1}]` 的尾隨
+//     `]` 會被它讀成「容器結束」而回 false（實測確認），一個不合法的參數字串於是
+//     安靜地與合法的收斂成同一個結果。再 Decode 一次則會撞上語法錯誤而擋下。
+//
+// 尾隨的空白不算內容：`{"a":1}\n` 是合法的 JSON 文件，第二次 Decode 會乾淨地回 io.EOF。
+func decodeToolArgs(s string) (any, bool) {
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, false
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, false
+	}
+	return v, true
+}
+
 // sensitiveKeyParts 是參數中須遮蔽值的 key 片段（大小寫不敏感、子串命中）。
 var sensitiveKeyParts = []string{"token", "secret", "password", "api_key", "apikey", "authorization", "credential", "cookie"}
 
@@ -26,9 +61,12 @@ var urlPattern = regexp.MustCompile(`https?://[^\s"'）)]+`)
 // 控制單行長度做的事，審計要的是可查證，不該把參數切一半。
 //
 // 參數不是合法 JSON 時無法逐欄位判斷哪裡敏感，只回長度：寧可少記，不賭它安全。
+//
+// **遮蔽是這個函式該做的事，改動精度不是**：解析走 decodeToolArgs，數字因此以
+// json.Number 的形式原樣通過（見該函式，以及 redactValue 為什麼接不到它）。
 func RedactArgs(args string) string {
-	var v any
-	if err := json.Unmarshal([]byte(args), &v); err != nil {
+	v, ok := decodeToolArgs(args)
+	if !ok {
 		return fmt.Sprintf("<非 JSON 參數 %d bytes>", len(args))
 	}
 	redacted, err := json.Marshal(redactValue("", v))
@@ -62,6 +100,9 @@ func redactValue(key string, v any) any {
 			out[i] = redactValue(key, item)
 		}
 		return out
+	// json.Number 是具名型別，**接不到**這個 case（type switch 精確比對型別），
+	// 於是落到 default 原樣回傳——那正是保留數字字面所需要的。敏感的數值欄位不靠
+	// 這裡處理，上面的 isSensitiveKey 已經先攔下了。
 	case string:
 		if strings.EqualFold(key, "body") {
 			return fmt.Sprintf("[%d bytes]", len(val))

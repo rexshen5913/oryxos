@@ -110,6 +110,12 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 			profile.Name, len(skills), LoadSkillToolName)
 	}
 
+	// 死循環守衛的計數**只活在這一次 Run 之內**（見 loopGuard）。用區域變數而不是
+	// ReActLoop 的欄位，這條性質就由語言本身保證：不必靠誰記得在 turn 結尾清空，
+	// 也不會有兩個併發的 turn 共用一份計數（憲法 5.2）。
+	maxRepeatedFailures := profile.Settings.effectiveMaxRepeatedToolFailures()
+	guard := newLoopGuard(maxRepeatedFailures)
+
 	var lastContent string // 最後一輪 LLM 內容，強制終止時作為已知進度附上
 	for i := range maxIterations {
 		// 播報在呼叫**之前**：這則事件的用途是讓等待中的使用者看到「它還在跑、
@@ -145,12 +151,28 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 			if err != nil {
 				return "", err
 			}
+			// 守衛在**回填組裝之前**觀測：這一次要不要附提示，取決於含這一次在內的
+			// 連續失敗次數；等內容組好再回頭改，就得把已經拼完的字串拆開。
+			normalized, repeated := guard.observe(call, result)
+			if repeated > 0 {
+				// 落警告日誌而不是播事件：這是給維運與日後評測指標看的降級訊號
+				// （ticket #54 明言它要能成為評測指標之一），不是使用者在 CLI 上等著
+				// 看的執行進度——後者才是 EmitEvent 服務的對象。
+				//
+				// args 記的是**規範化後的參數本身、不做雜湊**，除錯時才看得出是哪一組
+				// 參數在循環；但它仍然過 RedactArgs——所有落盤路徑共用同一套去敏規則
+				// （見 redact.go），日誌不因為「這只是除錯資訊」就例外。
+				l.logger.Warn("tool_loop_guard_tripped",
+					"session_id", session.ID, "profile", profile.Name,
+					"tool", call.Name, "args", RedactArgs(normalized),
+					"repeated", repeated, "threshold", maxRepeatedFailures)
+			}
 			// 回填內容一律經**單一組裝點**（見 toolMessageContent）：原始錯誤在前、
-			// 該類型給 LLM 的指引在後。審計不走這裡，它記的是 result.Error 原文
-			// （見 execute），兩邊刻意分岔。
+			// 該類型給 LLM 的指引居中、死循環提示在後。審計不走這裡，它記的是
+			// result.Error 原文（見 execute），兩邊刻意分岔。
 			session.Append(Message{
 				Role:       RoleTool,
-				Content:    toolMessageContent(result, retries),
+				Content:    toolMessageContent(result, retries, repeated),
 				ToolCallID: call.ID,
 			})
 		}
