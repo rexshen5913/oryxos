@@ -1,0 +1,41 @@
+# OryxOS 評測用例。一個檔案一條用例，加新用例只要多一個 .yaml，不必寫 Go 程式碼。
+#
+# 執行：make eval（會呼叫真實 Provider 並產生費用）
+#
+# 完整 schema：
+#
+#   name:     用例名，出現在輸出裡用來指認是哪一條（必填）
+#   profile:  用哪份 Profile 跑，對應 .oryxos/profiles/<name>.yaml（必填）
+#   setup:
+#     files:  路徑 → 內容，建立在**乾淨的 Workspace** 裡（選填）
+#             路徑相對 Workspace 根，父目錄自動建立；絕對路徑與穿越出 Workspace
+#             的路徑一律拒絕
+#   task:     送給 Agent 的訊息（必填）
+#   assert:   至少一條（必填）
+#     - kind: reply_contains   value: 期望出現在最終回應的文字
+#     - kind: tool_called      value: 期望被呼叫過的 Tool 名（呼叫失敗也算呼叫過）
+#
+# 目前只有上面兩種斷言，其餘種類會在解析時就被擋下。
+#
+# 一條 tool_called 用例長這樣——它需要那份 Profile 的 tools 列出 read_file，
+# 且 config.yaml 的 file.allowed_paths 含有 notes，所以不預設放進 evals/：
+#
+#   name: 讀檔案並回答
+#   profile: default
+#   setup:
+#     files:
+#       notes/todo.md: |
+#         買牛奶
+#   task: 讀 notes/todo.md，告訴我裡面寫什麼
+#   assert:
+#     - kind: reply_contains
+#       value: 牛奶
+#     - kind: tool_called
+#       value: read_file
+
+name: 最小鏈路：真實 Agent 回得出指定文字
+profile: default
+task: 請只回覆這四個字，不要有任何其他內容：評測通過
+assert:
+  - kind: reply_contains
+    value: 評測通過

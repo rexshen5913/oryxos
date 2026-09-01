@@ -26,7 +26,7 @@
 
 Commit message 嚴格遵循 Conventional Commits：`<type>(<scope>): <subject>`。
 
-`scope` 用 package 名（`core`、`provider`、`memory`、`tool`、`web`、`storage`、`config`、`cli`）；文檔期則用 `docs`、`website`、`agents`。
+`scope` 用 package 名（`core`、`provider`、`memory`、`tool`、`web`、`storage`、`config`、`cli`、`eval`）；文檔期則用 `docs`、`website`、`agents`。
 
 ---
 
