@@ -43,7 +43,7 @@ settings:
 				Identity:    core.Identity{AgentName: "Oryx", Prompt: "你是 Oryx。"},
 				Provider:    core.ProviderRef{Name: "openai", Model: "gpt-4o-mini", Temperature: 0.7},
 				Tools:       []string{"http_get", "http_post"},
-				Settings:    core.Settings{MaxIterations: 5, MaxHistoryTurns: 8, MaxRepeatedToolFailures: 3},
+				Settings:    core.Settings{MaxIterations: 5, MaxHistoryTurns: 8, MaxRepeatedToolFailures: 3, MaxContextRunes: 100000},
 			},
 		},
 		{
@@ -52,7 +52,7 @@ settings:
 			want: &core.Profile{
 				Name:     "d",
 				Provider: core.ProviderRef{Name: "openai", Model: "m"},
-				Settings: core.Settings{MaxIterations: 10, MaxHistoryTurns: 20, MaxRepeatedToolFailures: 3},
+				Settings: core.Settings{MaxIterations: 10, MaxHistoryTurns: 20, MaxRepeatedToolFailures: 3, MaxContextRunes: 100000},
 			},
 		},
 		{
@@ -64,7 +64,19 @@ settings:
 			want: &core.Profile{
 				Name:     "d",
 				Provider: core.ProviderRef{Name: "openai", Model: "m"},
-				Settings: core.Settings{MaxIterations: 10, MaxHistoryTurns: 20, MaxRepeatedToolFailures: 5},
+				Settings: core.Settings{MaxIterations: 10, MaxHistoryTurns: 20, MaxRepeatedToolFailures: 5, MaxContextRunes: 100000},
+			},
+		},
+		{
+			// 上下文預算走的是同一個「零值回退預設」形狀（ticket #48）：明設的值
+			// 不得被預設值蓋掉。理由與上一格相同，形狀相同的三個欄位各自要有證據
+			// ——共用一格的話，漏接其中一個欄位的正規化不會有人發現。
+			name: "明設 max_context_runes 時保留",
+			yaml: "name: d\nprovider:\n  name: openai\n  model: m\nsettings:\n  max_context_runes: 2048\n",
+			want: &core.Profile{
+				Name:     "d",
+				Provider: core.ProviderRef{Name: "openai", Model: "m"},
+				Settings: core.Settings{MaxIterations: 10, MaxHistoryTurns: 20, MaxRepeatedToolFailures: 3, MaxContextRunes: 2048},
 			},
 		},
 		{

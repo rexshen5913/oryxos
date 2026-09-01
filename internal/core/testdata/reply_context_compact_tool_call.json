@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-fixture-context-compact-tool-call",
+  "object": "chat.completion",
+  "created": 1722926100,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": {{ID}},
+            "type": "function",
+            "function": {
+              "name": "read_file",
+              "arguments": {{ARGS}}
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 168,
+    "completion_tokens": 22,
+    "total_tokens": 190
+  }
+}

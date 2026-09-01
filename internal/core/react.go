@@ -116,17 +116,32 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 	maxRepeatedFailures := profile.Settings.effectiveMaxRepeatedToolFailures()
 	guard := newLoopGuard(maxRepeatedFailures)
 
+	// 上下文預算在迴圈之前取一次：它是 Profile 的設定，turn 之內不會變，取出來是
+	// 為了讓下面的日誌說得出用的是哪個數字（組裝函式自己也讀得到，但它不落日誌）。
+	maxContextRunes := profile.Settings.effectiveMaxContextRunes()
+
 	var lastContent string // 最後一輪 LLM 內容，強制終止時作為已知進度附上
 	for i := range maxIterations {
 		// 播報在呼叫**之前**：這則事件的用途是讓等待中的使用者看到「它還在跑、
 		// 現在是第幾輪」，等呼叫回來才播報就晚了整整一次 LLM 往返。
 		EmitEvent(ctx, l.events, l.logger, Event{Kind: EventIteration, Iteration: i + 1})
+		// 上下文壓縮與 Skill 段截斷同一個形狀（見 ComposeSkillSection）：組裝函式回報
+		// 降級量，由這裡落日誌。壓縮發生在**每個 iteration**——它取決於當下的對話
+		// 歷史長度，而歷史在 turn 之內每輪都在長，turn 開始時算一次會漏掉後面幾輪。
+		msgs, compacted := buildMessages(profile, session, boot, longTerm, skillSection)
+		if compacted > 0 {
+			// 落警告日誌而不是播事件：這是「使用者看不見卻在花錢」的降級，該讓維運
+			// 查得到；CLI 上等著看的是執行進度，不是預算會計（EmitEvent 服務的對象）。
+			l.logger.Warn("context_compacted",
+				"profile", profile.Name, "compacted", compacted,
+				"budget_runes", maxContextRunes, "iteration", i+1)
+		}
 		started := time.Now()
 		resp, err := l.provider.Chat(ctx, ChatRequest{
 			Provider:    profile.Provider.Name,
 			Model:       profile.Provider.Model,
 			Temperature: profile.Provider.Temperature,
-			Messages:    buildMessages(profile, session, boot, longTerm, skillSection),
+			Messages:    msgs,
 			Tools:       defs,
 		})
 		// 每次 LLM 呼叫都落審計，成敗都記——審計記的是已發生的事實，失敗那次
@@ -258,18 +273,24 @@ func (l *ReActLoop) recordLLMCall(ctx context.Context, profile *Profile, session
 }
 
 // buildMessages 組裝一次 LLM 呼叫的訊息序列：system prompt 依 ADR-0003 的順序
-// 拼出（見 composeSystemPrompt），加上按 max_history_turns 截斷後的近期對話歷史。
+// 拼出（見 composeSystemPrompt），加上按 max_history_turns 截斷後的近期對話歷史，
+// 最後套上下文壓縮（見 compactToolResults），回傳序列與被壓的條數。
+//
+// **兩層截斷的順序是定死的**：先 turn 級（哪幾輪還算數），再內容級（還算數的那幾輪
+// 裡每條留多長）。反過來的話會先花力氣壓一批馬上要被整輪丟掉的訊息，而且內容級的
+// 預算會被那些訊息吃掉，留給真正要送出去的那幾輪反而更少。
 //
 // boot 與 longTerm 都是呼叫端在 turn 開始時取好的快照，當參數傳入——本函式不碰檔案，
 // 維持無 I/O、好測（技術方案 §4.2）。對話歷史則每次都從當前 session 重新取，
 // 含本 turn 內剛追加的 assistant 與 tool 訊息。
-func buildMessages(profile *Profile, session *Session, boot BootstrapContext, longTerm, skillSection string) []Message {
+func buildMessages(profile *Profile, session *Session, boot BootstrapContext, longTerm, skillSection string) ([]Message, int) {
 	history := truncateHistory(session.Messages, profile.Settings.effectiveMaxHistoryTurns())
 	msgs := make([]Message, 0, len(history)+1)
 	if system := composeSystemPrompt(profile.Identity.Prompt, boot, longTerm, skillSection); system != "" {
 		msgs = append(msgs, Message{Role: RoleSystem, Content: system})
 	}
-	return append(msgs, history...)
+	msgs = append(msgs, history...)
+	return compactToolResults(msgs, profile.Settings.effectiveMaxContextRunes())
 }
 
 // truncateHistory 保留近期 maxTurns 輪對話（一輪自一條 user 訊息起算，當前輪

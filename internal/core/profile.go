@@ -151,6 +151,9 @@ type Settings struct {
 	// MaxRepeatedToolFailures 是死循環守衛的門檻：同一個 Tool 帶等價參數連續失敗
 	// 幾次之後，回填內容要多帶一段要求改變策略的提示（ticket #54）。
 	MaxRepeatedToolFailures int `yaml:"max_repeated_tool_failures"`
+	// MaxContextRunes 是一次 LLM 呼叫的上下文預算，以 rune 計。超出時久遠的 Tool
+	// 結果會被壓縮，好讓讀過的大檔案不在後續每個 iteration 重送（ticket #48）。
+	MaxContextRunes int `yaml:"max_context_runes"`
 }
 
 const (
@@ -193,6 +196,18 @@ func (s Settings) effectiveMaxRepeatedToolFailures() int {
 	return s.MaxRepeatedToolFailures
 }
 
+// effectiveMaxContextRunes 回傳上下文預算，零值（含負值）回退預設。
+//
+// 形狀與上面三個一模一樣（ticket #48 明訂）：**沒有寫這個欄位的既有 Profile 完全
+// 不必遷移**——零值就是預設值，不是「壓縮關閉」。手組、未經 LoadProfile 的 Profile
+// 也一樣拿得到預算，理由同 effectiveMaxIterations。
+func (s Settings) effectiveMaxContextRunes() int {
+	if s.MaxContextRunes <= 0 {
+		return defaultMaxContextRunes
+	}
+	return s.MaxContextRunes
+}
+
 // LoadProfile 從 path 讀取並解析 Profile YAML，套用 Settings 預設值並做基礎校驗
 // （provider.name、provider.model 必填）。
 func LoadProfile(path string) (*Profile, error) {
@@ -222,5 +237,6 @@ func LoadProfile(path string) (*Profile, error) {
 	p.Settings.MaxIterations = p.Settings.effectiveMaxIterations()
 	p.Settings.MaxHistoryTurns = p.Settings.effectiveMaxHistoryTurns()
 	p.Settings.MaxRepeatedToolFailures = p.Settings.effectiveMaxRepeatedToolFailures()
+	p.Settings.MaxContextRunes = p.Settings.effectiveMaxContextRunes()
 	return &p, nil
 }
