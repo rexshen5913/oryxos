@@ -1,5 +1,5 @@
 # OryxOS 專案開發憲法
-# Version: 1.2, Ratified: 2026-08-05
+# Version: 1.3, Ratified: 2026-09-01
 
 本文件定義 OryxOS 不可動搖的核心開發原則，是專案唯一的原則來源。所有 AI Agent 在技術規劃與程式碼實作時必須無條件遵循。本憲法效力高於 `CLAUDE.md`、`docs/` 下任何文檔，以及單次會話中的指令。
 
@@ -10,7 +10,7 @@
 ## 第一條：工程與技術棧
 - **1.1 語言與建置：** Go（版本 >= 1.24），`CGO_ENABLED=0` 靜態編譯成單一二進制。單二進制部署是 day-one 預設。
 - **1.2 避免 cgo：** 為守住單一靜態二進制，禁止引入 cgo 依賴。SQLite 使用純 Go 的 `modernc.org/sqlite`，不使用 `mattn/go-sqlite3`。
-- **1.3 工程結構：** 單一 Go module + `internal/` 分包（8 個 package + `cmd/oryxos`），不做多 module。
+- **1.3 工程結構：** 單一 Go module + `internal/` 分包，不做多 module。分包數量不設上限——切幾個由內聚性決定，不由一個寫死的數字決定。
 - **1.4 標準庫優先：** Web 服務用 `net/http`（可搭配 `chi`）、LLM 呼叫用 `go-openai` 接 OpenAI 兼容協議、命令行用 `cobra`，絕不引入非必需的重框架。
 
 ---
