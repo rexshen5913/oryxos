@@ -28,16 +28,22 @@ type ReActLoop struct {
 	// events 播報循環內的執行過程。播報點與既有的審計落點**相鄰**：兩者記的是同一
 	// 批事實，放在一起可以避免日後加事件時漏掉其中一邊。
 	events EventSink
+	// prices 是 Workspace 的定價表，用來把 token 用量換算成成本（ticket #49）。
+	//
+	// **允許為 nil**，與上面幾個依賴不同：nil 代表這個 Workspace 沒有配置定價，
+	// 每次呼叫的成本因此落 NULL。map 的零值讀取本來就安全，不需要一個 NopPriceList
+	// 來表達「沒有」——那是 EventSink 那種介面才需要的形狀。
+	prices PriceList
 	// logger 落引擎層的結構化日誌。目前只有 Skill 段截斷這一種——它是「持續
 	// 存在的降級」，每個 turn 都成立，得在每個 turn 記得到（見 Run）。
 	logger *slog.Logger
 }
 
 // NewReActLoop 以 provider、Tool 子集、Memory 門面、審計儲存、上下文載入器、
-// 事件流與 logger 建立 ReAct 循環；七者都不得為 nil（不關心執行過程的呼叫端傳
-// NopEventSink）。
-func NewReActLoop(provider ProviderService, tools ToolExecutor, memory MemoryService, audit AuditStore, bootstrap ContextLoader, events EventSink, logger *slog.Logger) *ReActLoop {
-	return &ReActLoop{provider: provider, tools: tools, memory: memory, audit: audit, bootstrap: bootstrap, events: events, logger: logger}
+// 事件流、定價表與 logger 建立 ReAct 循環；除 prices 外都不得為 nil（不關心執行
+// 過程的呼叫端傳 NopEventSink，沒有配置定價的 Workspace 傳 nil）。
+func NewReActLoop(provider ProviderService, tools ToolExecutor, memory MemoryService, audit AuditStore, bootstrap ContextLoader, events EventSink, prices PriceList, logger *slog.Logger) *ReActLoop {
+	return &ReActLoop{provider: provider, tools: tools, memory: memory, audit: audit, bootstrap: bootstrap, events: events, prices: prices, logger: logger}
 }
 
 // Run 對 session 的當前對話歷史跑 ReAct 循環，回傳 Agent 的最終回應。每輪把
@@ -259,16 +265,58 @@ func (l *ReActLoop) execute(ctx context.Context, profile *Profile, session *Sess
 }
 
 // recordLLMCall 落一筆 LLM 呼叫的審計記錄；err 非 nil 時記失敗（ctx 逾時記 timeout）。
+//
+// 成本在這裡算而不是另外包一層裝飾器：這裡本來就是**所有 Provider 呼叫的必經之處**，
+// 而且 token 用量與成本是同一筆事實的兩種寫法，分開記會多出一個「兩邊對不上」的
+// 可能。也因此 ProviderService 維持單一實作（憲法 2.2、2.3）。
+//
+// **失敗的呼叫一樣計價**：那些 token 已經被 Provider 計費了，錯誤路徑的 resp 也帶回
+// 了用量（見 provider.Service.Chat）。漏算會讓失敗重試的成本在報表上憑空消失。
 func (l *ReActLoop) recordLLMCall(ctx context.Context, profile *Profile, session *Session, started time.Time, resp ChatResponse, err error) {
+	// **沒有用量資訊就不計價。** Provider 在連線失敗、逾時、上游 5xx 這類錯誤下回傳
+	// 的是零值回應，沒有 usage：那次請求可能根本沒送達（因此沒計費），也可能送達了
+	// 而我們不知道用量——兩種都是「未知」，不是「零」。對它計價會算出 0，在報表上
+	// 留下一個具體但錯誤的數字，與本票「沒算不能寫成不用錢」的判準直接抵觸。
+	//
+	// 分界不在成敗：回應不含 choice 那條失敗路徑**帶回了** usage（見
+	// provider.Service.Chat），那些 token 已經被計費，一樣要算。
+	var cost *int64
+	if resp.Usage != (TokenUsage{}) {
+		var why CostUnavailable
+		cost, why = l.prices.CostMicroUSD(profile.Provider.Name, profile.Provider.Model, resp.Usage)
+		// 落警告而不是靜默：成本欄位是空的，管理員得知道為什麼。這是「使用者看不見
+		// 卻在花錢」的降級，與 context_compacted 同一類，所以走同一條路（結構化日誌，
+		// 不是事件流——CLI 上等著看的是執行進度）。
+		//
+		// **原因決定寫哪一則**：三種原因對管理員的處置完全不同，全部記成「缺定價」
+		// 會把後兩種情況的人送去改一份本來就正確的設定檔。
+		switch why {
+		case "":
+			// 算出來了，沒有降級可報。
+		case CostUnavailableNoPricing:
+			l.logger.Warn("llm_cost_not_priced",
+				"profile", profile.Name, "provider", profile.Provider.Name,
+				"model", profile.Provider.Model)
+		default:
+			// 定價在、用量也在，但算不出一個能落庫的數字。帶上原因，管理員才知道
+			// 該去看 Provider 回報的用量，還是去檢查單價是不是多打了幾個零。
+			l.logger.Warn("llm_cost_uncomputable",
+				"profile", profile.Name, "provider", profile.Provider.Name,
+				"model", profile.Provider.Model, "reason", string(why))
+		}
+	}
+	// **只在有用量時判斷原因**：完全沒有 usage 時（連線失敗、逾時）連「算不算得出來」
+	// 都問不了，那不是定價或用量的問題，Provider 的失敗本身已經有自己的錯誤日誌。
 	l.audit.RecordLLMCall(ctx, LLMCall{
-		SessionID:   session.ID,
-		Provider:    profile.Provider.Name,
-		Model:       profile.Provider.Model,
-		Usage:       resp.Usage,
-		Latency:     time.Since(started),
-		Status:      auditStatus(ctx, err != nil),
-		StartedAt:   started,
-		CompletedAt: time.Now(),
+		SessionID:    session.ID,
+		Provider:     profile.Provider.Name,
+		Model:        profile.Provider.Model,
+		Usage:        resp.Usage,
+		Latency:      time.Since(started),
+		Status:       auditStatus(ctx, err != nil),
+		StartedAt:    started,
+		CompletedAt:  time.Now(),
+		CostMicroUSD: cost,
 	})
 }
 

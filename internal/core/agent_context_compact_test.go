@@ -110,7 +110,7 @@ func newCompactAgent(t *testing.T, baseURL string, profile *core.Profile,
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, discardLogger())
 	return core.NewAgentService(profile, svc, exec, newMemory(t, st.sessions()),
-		st.audit, noBootstrap(t), core.NopEventSink{}, logger)
+		st.audit, noBootstrap(t), core.NopEventSink{}, nil, logger)
 }
 
 // sentToolMessages 取出一次 LLM 邊界請求裡**全部**的 tool 訊息內容，依原順序。

@@ -94,7 +94,7 @@ func newEventAgentOn(t *testing.T, baseURL string, sink core.EventSink,
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, discardLogger())
 	return core.NewAgentService(testProfile(), svc, noTools(t), newMemory(t, st.sessions()),
-		st.audit, noBootstrap(t), sink, logger)
+		st.audit, noBootstrap(t), sink, nil, logger)
 }
 
 // newEventToolAgent 組出帶內建 Tool（按 subset 過濾）、事件送進 sink 的 AgentService。
@@ -121,7 +121,7 @@ func newEventToolAgent(t *testing.T, baseURL string, subset, allowed []string,
 	}, discardLogger())
 	st := newStore(t)
 	return core.NewAgentService(testProfile(), svc, exec, newMemory(t, st.sessions()),
-		st.audit, noBootstrap(t), sink, discardLogger())
+		st.audit, noBootstrap(t), sink, nil, discardLogger())
 }
 
 // TestEventKindsComplete 釘住「列舉七種一次定義完整」：#47 播報其中五種、#52 播報

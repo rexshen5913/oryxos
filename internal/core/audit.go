@@ -22,6 +22,13 @@ type TokenUsage struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
+	// CachedPromptTokens 是 PromptTokens 之中**命中提示詞快取的部分**，不是額外的
+	// 用量（ticket #49）。這個包含關係決定了計價要先相減再分別乘上單價，直接兩邊
+	// 各乘一次會把同一批 token 算兩遍——見 PriceList.CostMicroUSD。
+	//
+	// 回應沒帶這個資訊時為 0，語義上等同「沒有命中快取」：兩者對計價的影響一致，
+	// 不需要再多一層可空表達。
+	CachedPromptTokens int
 }
 
 // LLMCall 是一次 LLM 呼叫的審計記錄。
@@ -34,6 +41,13 @@ type LLMCall struct {
 	Status      string
 	StartedAt   time.Time
 	CompletedAt time.Time
+	// CostMicroUSD 是這次呼叫的成本，單位百萬分之一美元；nil 代表**沒算**
+	// （ticket #49）。
+	//
+	// 整數而非浮點：審計欄位是 INTEGER，而單次呼叫常低於一美分，存美元會全部歸零。
+	// 可空而非零值：「沒配置定價所以沒算」與「算出來是零」在報表上必須分得開——
+	// 寫 0 會讓成本報表看起來很省，而真相是沒算。
+	CostMicroUSD *int64
 }
 
 // ToolInvocation 是一次 Tool 呼叫的審計記錄。重試會產生多筆——每次實際執行都是

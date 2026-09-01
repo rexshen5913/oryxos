@@ -100,7 +100,7 @@ func newLoopGuardAgent(t *testing.T, baseURL string, profile *core.Profile,
 		"openai": {APIKey: "test-key", BaseURL: baseURL},
 	}, discardLogger())
 	return core.NewAgentService(profile, svc, exec, newMemory(t, st.sessions()),
-		st.audit, noBootstrap(t), core.NopEventSink{}, logger)
+		st.audit, noBootstrap(t), core.NopEventSink{}, nil, logger)
 }
 
 // loopGuardWorkspace 建一個 notes/ 存在、notes/sub/ 不存在的真實 Workspace，

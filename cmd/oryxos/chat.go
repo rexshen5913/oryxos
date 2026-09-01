@@ -311,6 +311,10 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	for name, pc := range providers {
 		providerConfigs[name] = provider.Config{APIKey: pc.APIKey, BaseURL: pc.BaseURL}
 	}
+	// 定價表攤平給 ReAct 循環算成本（ticket #49）。取自**展開後**的那份是為了與
+	// 憑證同源，不是因為定價需要展開——定價是數字，resolveEnv 那條路徑只服務
+	// api_key 與 base_url。沒有配置定價段時這裡是空表，成本欄位於是落 NULL。
+	prices := config.PriceListOf(providers)
 
 	// 長期記憶、Bootstrap 與 File Tool 的檔案操作都經**同一個** root：越界（含經
 	// 符號連結指到 Workspace 之外）由 os.Root 擋下。這幾份 .md 隨 Workspace 進 git，
@@ -520,7 +524,7 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	}()
 	// Bootstrap 上下文（AGENTS.md／USER.md／SOUL.md）：每個 turn 由 ReAct 循環
 	// 載入一次注入 system prompt，順序與覆蓋語義見 ADR-0003。
-	agent := core.NewAgentService(prof, provider.NewService(providerConfigs, logger), executor, memories, audit, contextLoader, events, logger)
+	agent := core.NewAgentService(prof, provider.NewService(providerConfigs, logger), executor, memories, audit, contextLoader, events, prices, logger)
 	ch := cli.New(agent, session, prof.Identity.AgentName, in, out)
 
 	if opts.message != "" {

@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-cost-plain",
+  "object": "chat.completion",
+  "created": 1722925401,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "第一次回應：沒有命中提示詞快取。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 180,
+    "completion_tokens": 40,
+    "total_tokens": 220
+  }
+}

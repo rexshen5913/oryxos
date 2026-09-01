@@ -25,10 +25,10 @@ type AgentService struct {
 // bootstrap 不得為 nil（Bootstrap 與 Skill 同樣每個 turn 載入一次；沒有檔案時它回
 // 空快照，不是 nil），events 不得為 nil（不關心執行過程的呼叫端傳 NopEventSink），
 // logger 不得為 nil（引擎層的降級要記得下來，見 ReActLoop）。
-func NewAgentService(profile *Profile, provider ProviderService, tools ToolExecutor, memory MemoryService, audit AuditStore, bootstrap ContextLoader, events EventSink, logger *slog.Logger) *AgentService {
+func NewAgentService(profile *Profile, provider ProviderService, tools ToolExecutor, memory MemoryService, audit AuditStore, bootstrap ContextLoader, events EventSink, prices PriceList, logger *slog.Logger) *AgentService {
 	return &AgentService{
 		profile: profile,
-		loop:    NewReActLoop(provider, tools, memory, audit, bootstrap, events, logger),
+		loop:    NewReActLoop(provider, tools, memory, audit, bootstrap, events, prices, logger),
 		memory:  memory,
 		events:  events,
 		logger:  logger,

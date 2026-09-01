@@ -89,6 +89,11 @@ func Open(ctx context.Context, path string) (*DB, error) {
 			return nil, errors.Join(fmt.Errorf("建表（%s）: %w", path, err), fg.Close())
 		}
 	}
+	// 建表之後補既有表缺的欄位。順序不能顛倒：全新的資料庫要先有表，PRAGMA 才問
+	// 得出欄位；既有的資料庫則是建表語句整段沒有作用，全靠這一步。
+	if err := applyMigrations(ctx, fg); err != nil {
+		return nil, errors.Join(fmt.Errorf("套用表結構演進（%s）: %w", path, err), fg.Close())
+	}
 	bg, err := openPool(dsn)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("開啟 SQLite %s（背景）: %w", path, err), fg.Close())

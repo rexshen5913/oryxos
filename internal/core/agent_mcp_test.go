@@ -75,7 +75,7 @@ func newMcpAgentOn(t *testing.T, baseURL string, prof *core.Profile, specs []cor
 	loader := config.NewContextLoader(root)
 	return core.NewAgentService(prof, svc, exec,
 		memory.NewService(st.sessions(), memory.NewLongTermMemory(root, memoryRelPath)),
-		st.audit, loader, core.NopEventSink{}, discardLogger())
+		st.audit, loader, core.NopEventSink{}, nil, discardLogger())
 }
 
 // mcpToolCallFixture 回放「LLM 決定呼叫某個 MCP 工具」的錄製回應。工具名由呼叫端填，

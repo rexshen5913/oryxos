@@ -147,7 +147,7 @@ settings:
 // 配置）與 memory/MEMORY.md，而後續的 write_file 更能改寫它們——**Agent 能改自己的
 // Profile** 是一個不該預設開啟的性質。收益則近乎零：預設 Profile 根本不列 File Tool，
 // 預填的白名單在使用者主動加 Tool 之前完全用不到。
-const workspaceConfigTemplate = `# OryxOS Workspace 設定檔。
+var workspaceConfigTemplate = `# OryxOS Workspace 設定檔。
 # 敏感值一律以 ${ENV_VAR} 佔位，載入時從環境變數解析，不明文落檔。
 providers:
   openrouter:
@@ -157,6 +157,18 @@ providers:
     # 並讓 profiles/default.yaml 的 provider.name 與那個 provider 名一致。
     base_url: https://openrouter.ai/api/v1
 
+    # 各模型的單價，用來把 token 用量換算成成本寫進審計表（llm_calls.cost_micro_usd）。
+    # 三個數字都是「每百萬 token 幾美元」，與各家定價頁上的寫法一致，照抄即可：
+    # input 是未命中快取的輸入、output 是輸出、cached_input 是命中提示詞快取的輸入。
+    # cached_input 省略時那些 token 按 input 計價（沒有快取折扣的 Provider 就是如此）。
+    #
+    # **整段省略即不計價**，成本欄位會是空值而不是零——「沒算」與「不用錢」在報表上
+    # 必須分得開。這裡刻意不預填任何價格：價格會變，填一個沒查證過的數字，成本報表
+    # 會錯得無聲無息，而那比沒有數字更難發現。
+    #
+    # 要啟用就拿掉每行開頭的「# 」，把模型名與價格改成你實際用的：
+    #
+` + commentOut(pricingExample) + `
 http:
   # HTTP Tool（http_get、http_post）只能存取白名單內的域名，預設全部拒絕。
   # 範例： - api.example.com
@@ -252,6 +264,20 @@ var mcpServersTemplate = `# OryxOS 外部 MCP server 宣告檔（Plugin Tool 方
 #
 ` + commentOut(mcpServersExample) + `
 mcp_servers: {}
+`
+
+// pricingExample 是定價段那段範例的**原始 YAML**，與 mcpServersExample 同一個手法：
+// 模板裡註解掉的那段由它逐行加前綴產生，所以「拿掉註解就能用」那句話有測試背書
+// （見 TestInitPricingTemplate）。
+//
+// **刻意帶四個空格的前導縮排**：它住在 providers.<name> 之下，使用者拿掉「# 」之後
+// 得到的正是該有的縮排，不必自己數。模型名加引號則因為 anthropic/claude-sonnet-4
+// 這種帶斜線的字串雖然合法，加了引號才不會在使用者換成含冒號的模型名時突然解析失敗。
+const pricingExample = `    pricing:
+      "anthropic/claude-sonnet-4":
+        input: 3
+        output: 15
+        cached_input: 0.3
 `
 
 // commentOut 把每一行加上 `# ` 前綴（空行只加 `#`，不留尾隨空白）。

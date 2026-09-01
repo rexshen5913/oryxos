@@ -1,0 +1,25 @@
+{
+  "id": "chatcmpl-fixture-cost-cached",
+  "object": "chat.completion",
+  "created": 1722925402,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "第二次回應：大部分提示詞命中快取。"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 1000,
+    "completion_tokens": 50,
+    "total_tokens": 1050,
+    "prompt_tokens_details": {
+      "cached_tokens": 800,
+      "audio_tokens": 0
+    }
+  }
+}

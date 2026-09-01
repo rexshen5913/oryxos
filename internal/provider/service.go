@@ -86,6 +86,14 @@ func (s *Service) Chat(ctx context.Context, req core.ChatRequest) (core.ChatResp
 		CompletionTokens: resp.Usage.CompletionTokens,
 		TotalTokens:      resp.Usage.TotalTokens,
 	}
+	// PromptTokensDetails 是**指標**：回應沒帶這個欄位時為 nil，取值前必須判空。
+	// 不是每個 OpenAI 兼容端點都回報快取明細，漏了這個判斷會讓那些 Provider 的
+	// 每一次呼叫 panic——而 panic 發生在協議轉換層，整條對話直接斷掉。
+	//
+	// nil 時維持零值即可，語義上等同「沒有命中快取」，計價的結果與事實一致。
+	if details := resp.Usage.PromptTokensDetails; details != nil {
+		usage.CachedPromptTokens = details.CachedTokens
+	}
 	if len(resp.Choices) == 0 {
 		return core.ChatResponse{Usage: usage}, fmt.Errorf("Provider %s 回應不含任何 choice", req.Provider)
 	}
