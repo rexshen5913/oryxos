@@ -189,11 +189,31 @@ func RunCase(ctx context.Context, sourceWS, caseRoot string, c Case) (result Run
 	if err := audit.Flush(ctx); err != nil {
 		return RunResult{}, fmt.Errorf("用例 %s: 排空審計佇列: %w", c.Name, err)
 	}
+	// **排空成功不等於全部落庫。** Flush 只保證屏障之前排入的工作都處理完了，處理的
+	// 結果可能是「寫失敗，記了一行日誌」——而評測的指標全部算自審計表，漏記會讓上限
+	// 斷言假通過（完整推導見 CheckAuditComplete）。檢查排在查指標之前：資料已知不可信
+	// 就不必再算了。
+	if err := CheckAuditComplete(audit.LostWrites()); err != nil {
+		return RunResult{}, fmt.Errorf("用例 %s: %w", c.Name, err)
+	}
 	tools, err := store.ToolNamesForSession(ctx, session.ID)
 	if err != nil {
 		return RunResult{}, fmt.Errorf("用例 %s: %w", c.Name, err)
 	}
-	return RunResult{Reply: reply, ToolsCalled: tools}, nil
+	// 指標與 Tool 名同一個來源、同一次排空之後才查（ticket #53）：iteration 數與 Tool
+	// 失敗數都在審計表裡，Session 上沒有、也刻意不加計數器。
+	metrics, err := store.MetricsForSession(ctx, session.ID)
+	if err != nil {
+		return RunResult{}, fmt.Errorf("用例 %s: %w", c.Name, err)
+	}
+	return RunResult{
+		Reply:        reply,
+		ToolsCalled:  tools,
+		Iterations:   metrics.Iterations,
+		ToolFailures: metrics.ToolFailures,
+		TotalTokens:  metrics.TotalTokens,
+		CostMicroUSD: metrics.CostMicroUSD,
+	}, nil
 }
 
 // buildToolRegistry 顯式註冊這個 Workspace 的全部內建 Tool（憲法 2.3）。

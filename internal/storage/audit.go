@@ -93,6 +93,14 @@ type AuditLog struct {
 	db     *sql.DB
 	logger *slog.Logger
 	seq    atomic.Uint64 // 與時間戳一起組出不重複的主鍵
+	// lost 累計**沒有落庫**的審計記錄筆數：佇列滿或已關閉而丟棄的，加上寫入資料庫
+	// 失敗的。
+	//
+	// **它不改變旁路語義，只是讓那個語義的代價問得到。** 丟棄與寫入失敗都照舊只記
+	// 日誌、絕不中斷對話（那是這個介面唯一不能破的規則）；但日誌只有人看得到，而
+	// 「這一場的審計完不完整」是程式要問的問題——評測據此判斷指標可不可信
+	// （ticket #53 外部審查第一輪）。
+	lost atomic.Uint64
 
 	queue chan auditJob
 	// done 在背景 worker 結束時關閉。用 channel 而不是 sync.WaitGroup：等待
@@ -150,6 +158,10 @@ func (l *AuditLog) run() {
 		cancel()
 	}
 	if skipped > 0 {
+		// 這些同樣是沒落庫的記錄，一起計進 lost（見 LostWrites）。發生在關閉之後，
+		// 所以評測那一側的檢查（在 Flush 之後、Close 之前）不會看到它們——那是對的：
+		// 那時 Agent 早已跑完，本輪的指標也早已讀出來了。
+		l.lost.Add(uint64(skipped))
 		// 一行帶數量，不是每筆一行：關閉時噴 256 行錯誤日誌只會淹掉真正的訊息。
 		l.logger.Error("audit_write_dropped",
 			"count", skipped, "reason", "關閉逾期，剩餘記錄未寫入")
@@ -273,6 +285,9 @@ func (l *AuditLog) enqueue(ctx context.Context, table, id string, write func(con
 	logCtx := context.WithoutCancel(ctx)
 	job := func(writeCtx context.Context) {
 		if err := write(writeCtx); err != nil {
+			// 寫失敗的那筆就是沒落庫，與被丟棄的一樣算漏——對「這一場的審計完不
+			// 完整」這個問題來說，兩者的後果完全相同。
+			l.lost.Add(1)
 			l.logger.ErrorContext(logCtx, "audit_write_failed",
 				append([]any{"table", table, "id", id, "error", err.Error()}, attrs...)...)
 		}
@@ -294,9 +309,22 @@ func (l *AuditLog) enqueue(ctx context.Context, table, id string, write func(con
 // report 記一筆審計旁路的結構化錯誤日誌。漏掉的記錄要看得見，否則審計出現破洞
 // 卻沒人知道。
 func (l *AuditLog) report(ctx context.Context, msg, table, id, reason string, attrs []any) {
+	l.lost.Add(1)
 	l.logger.ErrorContext(ctx, msg,
 		append([]any{"table", table, "id", id, "reason", reason}, attrs...)...)
 }
+
+// LostWrites 回報到目前為止有幾筆審計記錄**沒有落庫**：佇列滿或已關閉而丟棄的，
+// 加上寫入資料庫失敗的。
+//
+// **為什麼需要它**：審計是旁路，漏記不會讓任何東西報錯——記錄少了幾筆，據此算出來
+// 的指標就跟著偏低，而偏低配上「不得超過 N」這種上限斷言會直接產生綠燈。評測因此
+// 必須問得到這個數字，才不會拿一份已知不完整的資料去背書（ticket #53 外部審查）。
+//
+// 回累計值而非某段區間：呼叫端（評測）每個用例用一份全新的資料庫與一個全新的
+// AuditLog，所以「這一輪漏了幾筆」就是這個累計值。要在 Flush 之後讀——屏障保證在它
+// 之前排入的工作都處理完了，計數才是穩定的。
+func (l *AuditLog) LostWrites() uint64 { return l.lost.Load() }
 
 // nextID 產生審計記錄的主鍵。時間戳加進程內遞增序號：同一個進程內必不重複，
 // 跨進程要撞上得在同一奈秒送出同一序號，實務上不可能；真撞上也只是主鍵衝突，

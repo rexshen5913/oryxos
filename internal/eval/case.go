@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -22,13 +23,47 @@ const (
 	AssertReplyContains AssertionKind = "reply_contains"
 	// AssertToolCalled 斷言某個 Tool 被呼叫過（不論那次執行成功與否）。
 	AssertToolCalled AssertionKind = "tool_called"
+	// AssertMaxIterations 斷言 iteration 數不超過某個上限。
+	AssertMaxIterations AssertionKind = "max_iterations"
+	// AssertMaxToolFailures 斷言 Tool 失敗次數不超過某個上限。
+	AssertMaxToolFailures AssertionKind = "max_tool_failures"
 )
 
 // knownAssertionKinds 是目前支援的全部斷言種類。
 //
-// 指標型斷言（iteration 數上限、Tool 失敗次數上限）與歷史累積屬下一張票；在那之前
-// 它們在這裡就會被擋下，並在錯誤訊息裡列出目前支援哪些。
-var knownAssertionKinds = []AssertionKind{AssertReplyContains, AssertToolCalled}
+// 前兩種是布林問題（有沒有），後兩種是程度問題（多少）。加後兩種的理由：一次退步的
+// 典型形態是「答案還是對的，只是繞了比較久」——issue #36 那個 10→1 的改善若被改回去，
+// 前兩種斷言一條都不會轉紅（ticket #53）。
+var knownAssertionKinds = []AssertionKind{
+	AssertReplyContains, AssertToolCalled, AssertMaxIterations, AssertMaxToolFailures,
+}
+
+// isMetricKind 回答這一種斷言的值是不是一個數字上限。
+//
+// 這個判斷同時被解析層（校驗值寫得對不對）與判卷層（比對）用到，寫成一處是必要的：
+// 兩邊對「哪些種類是指標型」的認知一旦分岔，一種斷言會在解析時被當文字放行、在判卷
+// 時被當數字比對，而那條用例的結果從輸出完全看不出是這裡出的問題。
+func isMetricKind(kind AssertionKind) bool {
+	return kind == AssertMaxIterations || kind == AssertMaxToolFailures
+}
+
+// parseLimit 把指標型斷言的值解析成上限。
+//
+// **TrimSpace 只用在這裡，不用在文字型斷言的比對上。** 數字的前後空白沒有語義——
+// `value: "3 "` 與 `value: 3` 講的是同一個上限；而文字的前後空白可能是使用者刻意寫的
+// （見 Assertion.validate 那段說明），順手 trim 掉會讓斷言比的東西與他寫的不是同一個。
+func parseLimit(value string) (int, error) {
+	limit, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return 0, fmt.Errorf("上限必須是整數，實際是 %q", value)
+	}
+	// 上限 0 是合法的（「一次 Tool 失敗都不准有」），負數則不是：iteration 數與 Tool
+	// 失敗數都不可能小於 0，這種宣告必然永遠不通過。
+	if limit < 0 {
+		return 0, fmt.Errorf("上限 %d 不得為負（iteration 數與 Tool 失敗數都不可能小於 0，這條斷言永遠不會通過）", limit)
+	}
+	return limit, nil
+}
 
 // Assertion 是用例的一條斷言。
 type Assertion struct {
@@ -163,6 +198,13 @@ func (a Assertion) validate() error {
 	// 而且從輸出完全看不出來。
 	if strings.TrimSpace(a.Value) == "" {
 		return fmt.Errorf("value 必填且不得只有空白（%s 要比對的內容；純空白的斷言幾乎對任何回應都成立，等於沒測）", a.Kind)
+	}
+	// 指標型斷言的值要在**送出任何請求之前**確認是個數字。跑到判卷才發現 `value: 三次`
+	// 比對不了的話，那一次真實 Provider 呼叫的錢已經花了——與其餘欄位同一條理由。
+	if isMetricKind(a.Kind) {
+		if _, err := parseLimit(a.Value); err != nil {
+			return fmt.Errorf("%s: %w", a.Kind, err)
+		}
 	}
 	return nil
 }

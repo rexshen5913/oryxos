@@ -12,14 +12,22 @@ import (
 // 資料庫控制代碼——它只能對這裡的欄位下判斷，所以它必然是純函式，也就必然能表格驅動
 // 測試（ticket #50 的核心結構決策）。
 //
-// 欄位刻意只有本票兩種斷言用得到的兩項。指標型斷言（iteration 數、Tool 失敗次數）屬
-// 下一張票，屆時在這裡加欄位即可，判卷的形狀不必改。
+// 全部欄位的來源都是**審計表**，不是 Session 上的計數器（ticket #50／#53 定案）。
+// 後四項由 ticket #53 加入：前兩項是指標型斷言要判的東西，後兩項不參與判卷，只進
+// 結構化結果與歷史檔案——它們回答的是「這次花了多少」，那與通過與否是兩個問題。
 type RunResult struct {
 	// Reply 是 Agent 這一個 turn 的最終回應。
 	Reply string
 	// ToolsCalled 是這一場 Session 呼叫過的 Tool 名，去重、依首次呼叫的先後排序。
-	// 來源是**審計表**，不是 Session 上的計數器（ticket #50 定案）。
 	ToolsCalled []string
+	// Iterations 是這一輪的 iteration 數，也就是對 Provider 呼叫了幾次。
+	Iterations int
+	// ToolFailures 是失敗的 Tool 呼叫次數（failed 與 timeout 都算）。
+	ToolFailures int
+	// TotalTokens 是這一輪全部 Provider 呼叫的 token 用量加總。
+	TotalTokens int
+	// CostMicroUSD 是成本加總，單位百萬分之一美元；**nil 代表沒算**（ticket #49）。
+	CostMicroUSD *int64
 }
 
 // Verdict 是判卷的結論：通過與否，以及未通過的原因。
@@ -68,10 +76,38 @@ func checkAssertion(a Assertion, result RunResult) string {
 			actual = strings.Join(result.ToolsCalled, "、")
 		}
 		return fmt.Sprintf("%s：未呼叫 %q（實際：%s）", a.Kind, a.Value, actual)
+
+	case AssertMaxIterations:
+		return checkLimit(a, result.Iterations, "iteration 數")
+
+	case AssertMaxToolFailures:
+		return checkLimit(a, result.ToolFailures, "Tool 失敗次數")
 	}
 
 	// 走不到的分支，但**必須存在**：不認得的種類在解析層就被擋下了，然而 Grade 是匯出
 	// 的純函式，下一張票加斷言種類時會直接呼叫它。那時若只改了解析層的白名單而忘了在
 	// 這裡加分支，預設放行會讓評測宣稱一個它根本沒檢查的性質成立——綠燈比紅燈危險。
 	return fmt.Sprintf("不認得的斷言種類 %q，判為不通過（判卷未實作這一種）", a.Kind)
+}
+
+// checkLimit 判一條指標型斷言：實際值不超過上限就通過，通過回空字串。
+//
+// **比較是 <= 而不是 <。** 「max_iterations: 3」宣告的是「3 次以內我可以接受」，寫成
+// < 會讓一條剛好跑滿 3 次的用例被判成退步——而 3 正是它說可以的那個數字。邊界寫反的
+// 評測會製造假的回歸警報，那比沒有指標更消耗人。
+//
+// 未通過的原因同時說出實際值與上限：只說「超出上限」的話，看的人還得自己去翻歷史
+// 檔案才知道退了多少，而那正是這條斷言失敗時要查的事（與 tool_called 列出實際呼叫過
+// 哪些 Tool 是同一條理由）。
+func checkLimit(a Assertion, actual int, label string) string {
+	limit, err := parseLimit(a.Value)
+	if err != nil {
+		// 解析層擋得掉這種宣告，但 Grade 是匯出的純函式，一個繞過解析直接建 Case 的
+		// 呼叫端不該拿到綠燈——綠燈代表「這個性質成立」，而這裡根本沒比對過任何東西。
+		return fmt.Sprintf("%s：%v", a.Kind, err)
+	}
+	if actual <= limit {
+		return ""
+	}
+	return fmt.Sprintf("%s：%s是 %d，超出上限 %d", a.Kind, label, actual, limit)
 }

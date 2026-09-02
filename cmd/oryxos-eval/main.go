@@ -26,10 +26,17 @@ import (
 // 而他唯一會看的地方是終端機。
 const costWarning = "警告：評測會呼叫真實 Provider 並產生費用（每個用例至少一次 LLM 呼叫）。"
 
+// defaultHistoryPath 是歷史檔案的預設位置：與用例放在一起。
+//
+// 不放進 --out-dir：那個目錄每次執行都是新建的，歷史放進去等於每次都從零開始，而
+// 「累積」正是這個檔案唯一的用途。
+const defaultHistoryPath = "evals/history.jsonl"
+
 type options struct {
 	casesPath string
 	workspace string
 	outDir    string
+	history   string
 }
 
 func newRootCmd() *cobra.Command {
@@ -52,6 +59,8 @@ func newRootCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.workspace, "workspace", ".oryxos", "來源 Workspace：config.yaml 與 profiles/ 從這裡複製")
 	cmd.Flags().StringVar(&opts.outDir, "out-dir", "",
 		"每次執行的輸出目錄建在它底下（省略時用系統暫存目錄）。執行後刻意不刪，失敗時要進去翻")
+	cmd.Flags().StringVar(&opts.history, "history", defaultHistoryPath,
+		"指標歷史檔案，一次執行一條用例追加一行 JSON（傳空字串則不寫）")
 	return cmd
 }
 
@@ -80,8 +89,12 @@ func run(ctx context.Context, out io.Writer, opts options) error {
 		return fmt.Errorf("建立評測輸出目錄: %w", err)
 	}
 
-	fmt.Fprintf(out, "%s\n\n來源 Workspace：%s\n用例：%s（%d 條）\n輸出目錄：%s\n\n",
-		costWarning, opts.workspace, opts.casesPath, len(cases), runDir)
+	historyNote := "不寫"
+	if opts.history != "" {
+		historyNote = opts.history
+	}
+	fmt.Fprintf(out, "%s\n\n來源 Workspace：%s\n用例：%s（%d 條）\n輸出目錄：%s\n指標歷史：%s\n\n",
+		costWarning, opts.workspace, opts.casesPath, len(cases), runDir, historyNote)
 
 	passed := 0
 	for i, c := range cases {
@@ -101,12 +114,13 @@ func run(ctx context.Context, out io.Writer, opts options) error {
 		}
 
 		verdict := eval.Grade(c, result)
-		status := "未通過"
 		if verdict.Passed {
-			status = "通過"
 			passed++
 		}
-		fmt.Fprintf(out, "[%d/%d] %s … %s（%s）\n", i+1, len(cases), c.Name, status, elapsed)
+		// 那一行結構化結果的組裝在 internal/eval，不在這裡：這一層沒有自動化測試
+		// （它會呼叫真實 Provider），所以任何有判斷的東西都要搬到測得到的那一側。
+		record := eval.NewRecord(c, verdict, result, elapsed)
+		fmt.Fprintf(out, "[%d/%d] %s\n", i+1, len(cases), record.Summary())
 		for _, reason := range verdict.Failures {
 			fmt.Fprintf(out, "        - %s\n", reason)
 		}
@@ -114,6 +128,15 @@ func run(ctx context.Context, out io.Writer, opts options) error {
 			// 失敗時才印回應與 Tool 軌跡：通過的用例印這些只會淹掉真正要看的那幾條。
 			fmt.Fprintf(out, "        回應：%s\n        呼叫過的 Tool：%v\n        Workspace：%s\n",
 				result.Reply, result.ToolsCalled, caseRoot)
+		}
+
+		if opts.history != "" {
+			// **寫不進去就停**，理由與執行錯誤那條相同：後面每一條用例都會以同樣的
+			// 方式失敗，而每試一條都要花錢——而且花完之後指標一樣沒留下來，那次執行
+			// 等於什麼都沒換到。這一條的結果已經印出來了，不會白跑。
+			if err := eval.AppendRecord(opts.history, record); err != nil {
+				return fmt.Errorf("評測中止於第 %d 條用例的指標寫入: %w", i+1, err)
+			}
 		}
 	}
 

@@ -29,6 +29,12 @@ go.work.sum
 .oryxos/*.db-shm
 .oryxos/*.db-wal
 
+# ── 評測指標歷史（oryxos-eval 每次執行追加）──
+# 與 .oryxos/ 那幾條同一條規則：使用者維護的東西（evals/*.yaml 用例）跟蹤，執行時
+# 生成的狀態不跟蹤。歷史裡的耗時與成本本來就因機器與帳號而異，提交只會讓每個人的
+# 那一份互相蓋來蓋去，而且它只會愈長愈大。
+evals/history.jsonl
+
 # ── 環境變數與密鑰（絕不提交；.env.example 可留作範本）──
 .env
 .env.*

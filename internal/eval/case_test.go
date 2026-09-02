@@ -76,16 +76,97 @@ assert:
 			},
 		},
 		{
+			// 哨兵用一個**永遠不會成真**的種類名（ticket #53）：這格原本寫
+			// `max_iterations`，而本票正好把它落地了——繼續用它會讓這條斷言在種類被
+			// 支援之後安靜地失去意義，測試照樣綠，守的東西卻沒了。
 			name: "未知的斷言種類要明確報錯",
 			yaml: `
-name: 用了下一張票的斷言
+name: 不存在的斷言
+profile: default
+task: 隨便
+assert:
+  - kind: no_such_kind
+    value: "3"
+`,
+			wantErr: "no_such_kind",
+		},
+		{
+			// 四種斷言種類都要解析得出來（ticket #53 驗收條件）。指標型的值在 YAML 裡
+			// 不加引號寫成整數也要收得下——使用者不會想到 `value: 3` 與 `value: "3"`
+			// 有什麼差別，而多數人會寫前者。
+			name: "四種斷言種類都收得下",
+			yaml: `
+name: 四種斷言
+profile: default
+task: 隨便
+assert:
+  - kind: reply_contains
+    value: 牛奶
+  - kind: tool_called
+    value: read_file
+  - kind: max_iterations
+    value: 3
+  - kind: max_tool_failures
+    value: 0
+`,
+			check: func(t *testing.T, got eval.Case) {
+				want := []eval.Assertion{
+					{Kind: eval.AssertReplyContains, Value: "牛奶"},
+					{Kind: eval.AssertToolCalled, Value: "read_file"},
+					{Kind: eval.AssertMaxIterations, Value: "3"},
+					{Kind: eval.AssertMaxToolFailures, Value: "0"},
+				}
+				if len(got.Assert) != len(want) {
+					t.Fatalf("斷言數 = %d，期望 %d", len(got.Assert), len(want))
+				}
+				for i, w := range want {
+					if got.Assert[i] != w {
+						t.Errorf("assert[%d] = %+v，期望 %+v", i, got.Assert[i], w)
+					}
+				}
+			},
+		},
+		{
+			// 指標型斷言的值必須是整數：`value: 三次` 解析得過的話，這條斷言要嘛在
+			// 判卷時安靜失敗、要嘛安靜通過，兩種都是在**花完錢之後**才發現宣告寫錯。
+			// 校驗一律在送出任何請求之前（與其餘欄位同一條理由）。
+			name: "max_iterations 的值不是數字要被拒",
+			yaml: `
+name: 值不是數字
 profile: default
 task: 隨便
 assert:
   - kind: max_iterations
-    value: "3"
+    value: 三次
 `,
-			wantErr: "max_iterations",
+			wantErr: "整數",
+		},
+		{
+			name: "max_tool_failures 的值是小數要被拒",
+			yaml: `
+name: 值是小數
+profile: default
+task: 隨便
+assert:
+  - kind: max_tool_failures
+    value: 1.5
+`,
+			wantErr: "整數",
+		},
+		{
+			// 負的上限沒有任何實際值：Tool 失敗數與 iteration 數都不可能小於 0，這種
+			// 宣告必然永遠不通過。與「值是純空白」相反——那種永遠通過，這種永遠不通過，
+			// 但兩者都代表使用者寫錯了，都該在解析時就說出來。
+			name: "上限是負數要被拒",
+			yaml: `
+name: 負的上限
+profile: default
+task: 隨便
+assert:
+  - kind: max_iterations
+    value: -1
+`,
+			wantErr: "不得為負",
 		},
 		{
 			name: "缺 name",

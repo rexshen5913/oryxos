@@ -12,10 +12,19 @@
 #             的路徑一律拒絕
 #   task:     送給 Agent 的訊息（必填）
 #   assert:   至少一條（必填）
-#     - kind: reply_contains   value: 期望出現在最終回應的文字
-#     - kind: tool_called      value: 期望被呼叫過的 Tool 名（呼叫失敗也算呼叫過）
+#     - kind: reply_contains     value: 期望出現在最終回應的文字
+#     - kind: tool_called        value: 期望被呼叫過的 Tool 名（呼叫失敗也算呼叫過）
+#     - kind: max_iterations     value: iteration 數上限（整數，不加引號即可）
+#     - kind: max_tool_failures  value: Tool 失敗次數上限（整數）
 #
-# 目前只有上面兩種斷言，其餘種類會在解析時就被擋下。
+# 目前只有上面四種斷言，其餘種類會在解析時就被擋下。
+#
+# 前兩種回答「有沒有」，後兩種回答「多少」。後兩種存在的理由：一次退步的典型形態是
+# 「答案還是對的，只是繞了比較久」——issue #36 那個 10→1 的 iteration 數若被改回去，
+# 前兩種斷言一條都不會轉紅。上限是**不得超過**，剛好等於上限算通過。
+#
+# 每次執行會把每條用例的指標追加一行到 evals/history.jsonl（用 --history 換位置，
+# 傳空字串則不寫）。追加而非覆寫，所以同一條用例跨多次執行的 iteration 數比得出來。
 #
 # 一條 tool_called 用例長這樣——它需要那份 Profile 的 tools 列出 read_file，
 # 且 config.yaml 的 file.allowed_paths 含有 notes，所以不預設放進 evals/：
@@ -32,6 +41,10 @@
 #       value: 牛奶
 #     - kind: tool_called
 #       value: read_file
+#     - kind: max_iterations
+#       value: 3
+#     - kind: max_tool_failures
+#       value: 0
 
 name: 最小鏈路：真實 Agent 回得出指定文字
 profile: default
