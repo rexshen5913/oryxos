@@ -204,7 +204,18 @@ func (c *SandboxChecker) CheckHTTPURL(rawURL string) (SandboxDecision, error) {
 			return SandboxAllow, nil
 		}
 	}
-	return SandboxDeny, fmt.Errorf("%w: host %q 不在 http.allowed_domains 白名單", ErrSandboxViolation, host)
+	// 措辭與路徑、命令兩則同一份契約（見 TestWhitelistDenialMessagesShareTheSameContract）：
+	// 指名被拒的那一個、說出要往 config.yaml 的哪一段加、說明白名單的內容不會列出，
+	// 且不洩漏其餘條目。
+	//
+	// **這一則原本三項只有一項**（issue #58 落地前）：只說「host X 不在
+	// http.allowed_domains 白名單」——段名出現了，卻沒有一個字叫人去改設定檔，也沒有
+	// 擋住「白名單是空的」那個推論。它比路徑那則更缺，只是驗收沒涵蓋 HTTP Tool
+	// （那個 Workspace 的 allowed_domains 是空的）所以沒被真實模型量到。三則各寫各的、
+	// 沒有東西比對它們，正是這種漂移的成因。
+	return SandboxDeny, fmt.Errorf("%w: host %q 不在 http.allowed_domains 白名單（要允許它請把這個網域加進 Workspace config.yaml 的 http.allowed_domains）。"+
+		"白名單的內容不會在這裡列出，所以**看不到允許的網域不代表白名單是空的**",
+		ErrSandboxViolation, host)
 }
 
 // matchDomain 比對單條白名單：`*.example.com` 匹配任意層級子域名（不含裸域名
@@ -260,8 +271,20 @@ func (c *SandboxChecker) CheckFilePath(rawPath string) (SandboxDecision, string,
 		}
 	}
 	// 訊息只提被拒的那條路徑與該改哪一段設定：它會落日誌、也會回填給 LLM，把白名單
-	// 其餘條目一起倒出來等於交出這個 Workspace 還允許哪些路徑。
-	return SandboxDeny, "", fmt.Errorf("%w: 路徑 %q 不在 file.allowed_paths 白名單（請把它所在的目錄加進 Workspace config.yaml 的 file.allowed_paths）",
+	// 其餘條目一起倒出來等於交出這個 Workspace 還允許哪些路徑（issue #33 定案）。
+	//
+	// **末句擋的是「資訊的缺席被讀成資訊」**（issue #58）。上一段那條不洩漏規則是對的，
+	// 但它讓訊息完全不提白名單裡有什麼，而模型把這個沉默讀成了「白名單是空的」：真實
+	// 驗收裡 file.allowed_paths 明明是 [notes]，模型卻告訴使用者「未設定任何允許路徑」。
+	// 那句話不會讓任何指標轉紅（收斂正常、iteration 與失敗數都在上限內），它只是**一個
+	// 聽起來合理的錯誤事實**——使用者可能因此把一個過寬的路徑加進設定，而其實只要加對
+	// 一個目錄。
+	//
+	// **只搬 shell 那則的這半句，不搬它的「不要逐一嘗試」**（issue #58 明訂）：那句話
+	// 治的是候選近乎無限時逐一猜名字的形態，而路徑被拒時模型本來就會 2 次後轉向使用者
+	// （#34 與本次驗收都是），加防猜是修沒壞的東西。
+	return SandboxDeny, "", fmt.Errorf("%w: 路徑 %q 不在 file.allowed_paths 白名單（請把它所在的目錄加進 Workspace config.yaml 的 file.allowed_paths）。"+
+		"白名單的內容不會在這裡列出，所以**看不到允許的路徑不代表白名單是空的**",
 		ErrSandboxViolation, rawPath)
 }
 
