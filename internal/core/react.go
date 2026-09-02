@@ -15,6 +15,19 @@ const (
 	// toolRetryBaseDelay 是指數退避的起始等待（100ms→200ms→400ms）：
 	// 針對瞬時網路故障，重試耗盡的額外延遲控制在一秒內。
 	toolRetryBaseDelay = 100 * time.Millisecond
+	// maxEmptyResponses 是一個 turn 內**連續**空回應的容忍上限（issue #60）。
+	//
+	// 為什麼是「再問一次」而不是「立刻放棄」：真實驗收量到的發生率約 1/8，而同一份
+	// 提示詞平常答得好好的——那是 Provider 側的暫時性抖動，不是模型答不出來。為了
+	// 一次抖動就結束 turn，對使用者是更差的交換。
+	//
+	// 為什麼有界：沒有界就是「Provider 持續故障時把 max_iterations 全部燒掉」，而
+	// 每一次都是真的付費呼叫。3 與 maxToolRetries、defaultMaxRepeatedToolFailures
+	// 取同一個數字，本專案「重試幾次算夠」的答案維持一致。
+	//
+	// **是 package 常數而不是 Profile 欄位**：這是引擎對一個 Provider 故障形態的
+	// 韌性下限，不是使用者該調的旋鈕；issue 也沒有要求可配置（憲法 3.1）。
+	maxEmptyResponses = 3
 )
 
 // ReActLoop 是 Agent 的核心工作機制：呼叫 LLM、視回應決定呼叫 Tool 或給出
@@ -127,6 +140,11 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 	maxContextRunes := profile.Settings.effectiveMaxContextRunes()
 
 	var lastContent string // 最後一輪 LLM 內容，強制終止時作為已知進度附上
+	// emptyResponses 是**連續**的空回應數（issue #60）。與 loopGuard 同一條理由用
+	// 區域變數而不是 ReActLoop 的欄位：計數只活在這一次 Run 之內，這條性質因此由
+	// 語言本身保證——不必靠誰記得在 turn 結尾清空，也不會有兩個併發的 turn 共用
+	// 同一份計數（憲法 5.2）。
+	var emptyResponses int
 	for i := range maxIterations {
 		// 播報在呼叫**之前**：這則事件的用途是讓等待中的使用者看到「它還在跑、
 		// 現在是第幾輪」，等呼叫回來才播報就晚了整整一次 LLM 往返。
@@ -156,6 +174,52 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 		if err != nil {
 			return "", fmt.Errorf("呼叫 LLM: %w", err)
 		}
+		// **一則既沒有內容也沒有 tool call 的 assistant 訊息不構成最終回應**
+		// （issue #60）。原本的判定只看有沒有 tool call，於是 Provider 回一則空訊息
+		// 時，那個空字串被當成答案收下、寫進歷史、回傳給呼叫端——使用者在 oryxos chat
+		// 上看到一片空白，沒有任何跡象顯示出了問題。
+		//
+		// **兩個條件都要，缺一不可。** 只判 content 為空會把每一次 Tool 呼叫都誤判
+		// 掉：要呼叫 Tool 的那一輪 content 本來就是空字串（那是協議的正常形狀），
+		// 誤判的後果是整個 ReAct 循環壞掉。
+		//
+		// **不寫進歷史**：一則空的 assistant 訊息對後續推理沒有任何貢獻，留著只會在
+		// 之後每個 turn 被原樣重送給 Provider（issue #60 列的第二項代價）。這不破壞
+		// 「Tool 呼叫與結果成對出現」——這條路徑上本來就沒有 tool call。
+		//
+		// **消耗一次 iteration 而不是在本輪內偷偷重試**：CONTEXT.md 定義 iteration
+		// 就是「一個 turn 之內 ReAct 循環的一次 LLM 呼叫」，再打一次依定義就是下一個
+		// iteration。偷偷重試會製造出「有 llm_calls 記錄、循環卻不知道」的呼叫，而
+		// 評測的 max_iterations 斷言讀的正是 llm_calls 的筆數（internal/eval）——
+		// 那會讓評測因為一個看不見的原因轉紅，正是本 issue 在抱怨的失敗形態。
+		if resp.Content == "" && len(resp.ToolCalls) == 0 {
+			emptyResponses++
+			// 落警告日誌而不是播事件：事件種類是 spec #5 一次定義完整的對外契約
+			// （見 EventKind），多一種就是一次線路上的破壞。降級訊號走結構化日誌，
+			// 與 context_compacted、tool_loop_guard_tripped 同一條路。
+			l.logger.Warn("provider_empty_response",
+				"session_id", session.ID, "profile", profile.Name,
+				"provider", profile.Provider.Name, "model", profile.Provider.Model,
+				"iteration", i+1, "consecutive", emptyResponses, "threshold", maxEmptyResponses)
+			if emptyResponses >= maxEmptyResponses {
+				// 與「已達最大迭代次數」同一類的告知：**不是錯誤**，是一則說得出
+				// 原因的回覆，已執行的 Tool 結果照樣留在歷史（ticket #6 定案的處置）。
+				// 措辭要讓使用者看出這不是模型答不出來，否則他只會覺得 Agent 壞了。
+				reply := fmt.Sprintf("Provider 連續 %d 次回傳空回應（既沒有內容也沒有工具呼叫），"+
+					"已停止本輪。這不是模型答不出來——請稍後再試，或改用其他 Provider／模型。",
+					maxEmptyResponses)
+				if lastContent != "" {
+					reply += "最後一輪進度：" + lastContent
+				}
+				session.Append(Message{Role: RoleAssistant, Content: reply})
+				return reply, nil
+			}
+			continue
+		}
+		// 歸零的語義與 loopGuard 的「任一次成功清空整張表」一致：要偵測的是
+		// 「Provider 現在卡住了」，那本來就是個連續性質。一次抖動、中間幾輪正常
+		// 工作、之後又抖一次——那不是卡住，不該被累計成放棄的理由。
+		emptyResponses = 0
 		session.Append(Message{Role: RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls})
 		// 只有 tool_calls、content 為空的那一輪不播報：這則事件說的是「LLM 產出了
 		// 文字」，空字串不是產出，播出去只會在 CLI 上多一行空白。
@@ -202,6 +266,14 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 	// 強制終止不是錯誤：固定提示語＋已知進度回覆使用者並留在歷史，
 	// 已執行的 Tool 結果不因終止而被 rollback 丟棄（ticket #6 已定案）。
 	reply := fmt.Sprintf("已達最大迭代次數 %d，仍未完成任務，已強制終止。", maxIterations)
+	// 空回應也可能把迭代耗到這裡：連續數還沒到 maxEmptyResponses、迭代先用完了
+	// （例如 max_iterations 設得比門檻小，或前面幾輪做過 Tool 工作）。不說出來的話
+	// 使用者只會讀到「仍未完成任務」——那把原因指向了模型，而真相是 Provider 回的
+	// 是空的（issue #60）。**只在真的發生過時才附加**，沒有空回應的既有路徑一個字
+	// 都不變。
+	if emptyResponses > 0 {
+		reply += fmt.Sprintf("（其中最後 %d 次 Provider 回的是空回應。）", emptyResponses)
+	}
 	if lastContent != "" {
 		reply += "最後一輪進度：" + lastContent
 	}
