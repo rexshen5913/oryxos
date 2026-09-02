@@ -1,0 +1,19 @@
+# 涵蓋 issue #34 驗收清單第一項：read_file 被 LLM 正確呼叫。
+name: read_file 讀出檔案內容並回答
+profile: eval
+setup:
+  files:
+    notes/todo.md: |
+      買牛奶
+      寫週報
+      訂機票
+task: 讀 notes/todo.md，告訴我裡面第一項待辦是什麼
+assert:
+  - kind: reply_contains
+    value: 牛奶
+  - kind: tool_called
+    value: read_file
+  - kind: max_iterations
+    value: 3
+  - kind: max_tool_failures
+    value: 0

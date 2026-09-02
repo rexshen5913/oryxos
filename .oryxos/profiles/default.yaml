@@ -1,0 +1,19 @@
+# OryxOS 預設 Profile。Agent 由 Profile 配置出來，一個 Profile 對應一個 Agent。
+# 敏感值（API key 等）不寫在這裡，統一放 config.yaml 並以環境變數佔位。
+name: default
+description: OryxOS 預設 Agent
+identity:
+  agent_name: Oryx
+  prompt: 你是 Oryx，一個樂於助人的通用助理。回答力求精確、直接。
+provider:
+  name: openrouter                   # 引用 config.yaml providers 段的 provider name
+  model: deepseek/deepseek-v4-flash  # 模板預設值；可改為 OpenRouter 上任何模型，或改 config.yaml 的 base_url 接別的 OpenAI 兼容端點
+  temperature: 0.7
+tools:
+  - http_get
+  - http_post
+  - save_memory       # 長期記憶：Agent 自主把值得記住的偏好或事實寫進 memory/MEMORY.md
+  - recall_memory     # 長期記憶：以關鍵詞檢索 memory/MEMORY.md，取回匹配的記憶行
+settings:
+  max_iterations: 10      # ReAct 循環最大迭代次數
+  max_history_turns: 20   # 對話歷史保留的近期輪數

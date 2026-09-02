@@ -1,0 +1,19 @@
+# 涵蓋 issue #34 驗收清單第二項：list_dir 被 LLM 正確呼叫。
+name: list_dir 列出目錄內容
+profile: eval
+setup:
+  files:
+    notes/todo.md: |
+      買牛奶
+    notes/readme.md: |
+      這是筆記目錄
+task: 用 list_dir 列出 notes 目錄底下有哪些檔案，把檔名告訴我
+assert:
+  - kind: reply_contains
+    value: todo.md
+  - kind: tool_called
+    value: list_dir
+  - kind: max_iterations
+    value: 3
+  - kind: max_tool_failures
+    value: 0

@@ -28,6 +28,10 @@ go.work.sum
 .oryxos/*.db
 .oryxos/*.db-shm
 .oryxos/*.db-wal
+# notes/ 是 config.yaml 的 file.allowed_paths 唯一放行的目錄，也就是 Agent 用
+# write_file 寫東西的地方（ticket #55）。跟蹤它的話，每跑一次 demo 對話 git status
+# 就會多出幾個檔案——那是執行時狀態，與上面那幾條同一條規則。
+.oryxos/notes/
 
 # ── 評測指標歷史（oryxos-eval 每次執行追加）──
 # 與 .oryxos/ 那幾條同一條規則：使用者維護的東西（evals/*.yaml 用例）跟蹤，執行時

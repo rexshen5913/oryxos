@@ -1,0 +1,22 @@
+# 涵蓋 issue #34 驗收清單第三項：write_file 被 LLM 正確呼叫。
+#
+# 任務刻意要求先讀再寫：只寫不讀的話，write_file 的內容完全由 LLM 自己編，
+# 驗不到「它拿得到 Workspace 裡的真實資料再寫回去」這條鏈路。
+name: write_file 讀完摘要後寫回檔案
+profile: eval
+setup:
+  files:
+    notes/todo.md: |
+      買牛奶
+      寫週報
+      訂機票
+task: 讀 notes/todo.md，把三項待辦濃縮成一句話寫進 notes/summary.md，寫完之後回覆「已寫入」
+assert:
+  - kind: reply_contains
+    value: 已寫入
+  - kind: tool_called
+    value: write_file
+  - kind: max_iterations
+    value: 4
+  - kind: max_tool_failures
+    value: 0

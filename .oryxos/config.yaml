@@ -1,0 +1,94 @@
+# OryxOS Workspace 設定檔。
+# 敏感值一律以 ${ENV_VAR} 佔位，載入時從環境變數解析，不明文落檔。
+providers:
+  openrouter:
+    api_key: ${OPENROUTER_API_KEY}
+    # OpenRouter 的 OpenAI 兼容端點。改接 DeepSeek、Kimi 等其他端點時要一起改
+    # 三處：上面的 provider 名（openrouter:）、api_key、以及這行 base_url，
+    # 並讓 profiles/default.yaml 的 provider.name 與那個 provider 名一致。
+    base_url: https://openrouter.ai/api/v1
+
+    # 各模型的單價，用來把 token 用量換算成成本寫進審計表（llm_calls.cost_micro_usd）。
+    # 三個數字都是「每百萬 token 幾美元」，與各家定價頁上的寫法一致，照抄即可：
+    # input 是未命中快取的輸入、output 是輸出、cached_input 是命中提示詞快取的輸入。
+    # cached_input 省略時那些 token 按 input 計價（沒有快取折扣的 Provider 就是如此）。
+    #
+    # **整段省略即不計價**，成本欄位會是空值而不是零——「沒算」與「不用錢」在報表上
+    # 必須分得開。這裡刻意不預填任何價格：價格會變，填一個沒查證過的數字，成本報表
+    # 會錯得無聲無息，而那比沒有數字更難發現。
+    #
+    # 要啟用就拿掉每行開頭的「# 」，把模型名與價格改成你實際用的：
+    #
+    # 下面的數字取自 OpenRouter 的公開模型端點（GET /api/v1/models 的 pricing
+    # 欄位，單位是「每 token 幾美元」），查詢日 2026-09-02，已乘 1e6 換算成本檔
+    # 要求的「每百萬 token 幾美元」：
+    #   prompt 0.000000088606  → input        0.088606
+    #   completion 0.000000177212 → output     0.177212
+    #   input_cache_read 0.0000000177212 → cached_input 0.0177212
+    # 價格會變。對不上帳單時重查一次那個端點，不要憑印象改這裡。
+    pricing:
+      "deepseek/deepseek-v4-flash":
+        input: 0.088606
+        output: 0.177212
+        cached_input: 0.0177212
+      # deepseek-v4-pro（同一端點、同一查詢日）：prompt 0.00000104226、
+      # completion 0.00000208452、input_cache_read 0.000000086855，同樣乘 1e6。
+      "deepseek/deepseek-v4-pro":
+        input: 1.04226
+        output: 2.08452
+        cached_input: 0.086855
+
+http:
+  # HTTP Tool（http_get、http_post）只能存取白名單內的域名，預設全部拒絕。
+  # 範例： - api.example.com
+  allowed_domains: []
+
+file:
+  # File Tool（read_file、write_file、list_dir）只能存取白名單內的路徑，預設全部拒絕。
+  #
+  # 每條都是**相對這個 Workspace（.oryxos/）根**的路徑，不是相對你執行 oryxos 的目錄
+  # ——同一份設定在哪裡跑，允許範圍都一樣。標準化後必須落在其中一條的子樹之內：
+  # 白名單寫 work 不會放行 workspace-secrets。
+  #
+  # 一律拒絕的三種：絕對路徑、用 ../ 穿越出白名單或 Workspace、路徑上任何一段是
+  # 符號連結（不跟隨，也不解析後比對）。能力界定在 Workspace 之內。
+  #
+  # write_file 會**覆寫**目標檔案的全部內容（不是追加），父目錄不存在時報錯而不自動
+  # 建立；新建的檔案一律不含執行位，覆寫既有檔案則不改變它原有的權限。
+  #
+  # list_dir 只列出一層（不遞迴），每個項目給名稱、是否為目錄與大小；條目過多時截斷。
+  #
+  # 範例： - notes
+  allowed_paths:
+    - notes
+
+shell:
+  # shell Tool 只能執行白名單內的程式，預設全部拒絕。比對的是**程式名的字面完全
+  # 匹配**（寫 git，不是 /usr/bin/git，也不做萬用字元）。
+  #
+  # 執行的是**單一程式加參數**，不經 shell 直譯器：沒有管線、沒有重導向、沒有命令
+  # 替換，參數裡的 | ; && $() 只是普通字元。要組合多個命令請讓 Agent 分多次呼叫，
+  # 要把輸出寫進檔案請用 write_file。
+  #
+  # 讀這一段之前，先讀懂這五句——它們是這層防護的**實際**邊界：
+  #
+  # 1. 這一層擋的是「LLM 選錯程式」，不是惡意使用者。核心階段沒有進程級隔離，
+  #    不要拿它跑不受信任的內容。
+  # 2. 白名單決定 OryxOS **直接啟動哪個程式**，不決定那個程式接下來做什麼。被列入的
+  #    程式可以依它自己的參數或配置啟動清單外的程式——find -exec、xargs、git -c、
+  #    make 的 recipe 都做得到，而**它們都不是直譯器**。這裡只舉例，不試圖窮舉。
+  # 3. 白名單管的是「跑哪個程式」，不是「那個程式能碰什麼」：cat 讀得到任何路徑、
+  #    tee 寫得到任何路徑。
+  # 4. **file.allowed_paths 不約束 shell。** 上面那段管的是 OryxOS 自己開檔，對子進程
+  #    完全無效。要真隔離，把 oryxos 跑在容器裡。
+  # 5. **PATH 上的目錄不要與 file.allowed_paths 重疊。** 重疊時 write_file 等於「能新增
+  #    或改掉 shell 跑得到的程式」，兩個分開看都合理的授權合起來就是提權。啟動時會就
+  #    此印一行警告。
+  #
+  # 範例： - git
+  allowed_commands:
+    - wc
+    - ls
+
+  # 單次命令的超時上限（秒）。省略、填 0 或負數都回退預設的 30 秒。
+  timeout_seconds: 30

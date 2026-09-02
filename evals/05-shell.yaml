@@ -1,0 +1,22 @@
+# 涵蓋 issue #34 驗收清單第四項：shell 被 LLM 正確呼叫。
+#
+# 用 wc 而不是 ls：wc 要帶參數（-l 與檔名），驗得到參數陣列真的傳對了；
+# 而 config.yaml 的 shell.allowed_commands 正好只放行 wc 與 ls 兩個。
+name: shell 執行單一命令算出行數
+profile: eval
+setup:
+  files:
+    notes/todo.md: |
+      買牛奶
+      寫週報
+      訂機票
+task: 用 shell 執行 wc 算出 notes/todo.md 有幾行，把行數告訴我
+assert:
+  - kind: reply_contains
+    value: "3"
+  - kind: tool_called
+    value: shell
+  - kind: max_iterations
+    value: 3
+  - kind: max_tool_failures
+    value: 0

@@ -1,0 +1,24 @@
+# OryxOS 外部 MCP server 宣告檔（Plugin Tool 方式二）。
+# 這裡宣告的是「這個 Workspace 有哪些 server 可用」；某個 Agent 要接哪幾個，由它的
+# Profile 以 mcp_servers 欄位引用（沒被引用的宣告不會被連線、也不會起子進程）。
+#
+# 工具會以 <server>__<tool>（雙底線）註冊，Profile 的 tools 欄位就用這個名字引用。
+# 例如下面的 github 宣告了 search_pr 工具，Profile 要寫 github__search_pr。
+#
+# 不知道某台 server 提供哪些 <tool>？宣告好之後執行 oryxos tools：它會連上 Profile
+# 引用的 server、把工具名與用途列出來，直接照抄進 tools 欄位即可。
+#
+# 敏感值一律以 ${ENV_VAR} 佔位，載入時從環境變數解析，不明文落檔。
+# 核心階段只支援 transport: stdio。
+#
+# 範例（拿掉每行開頭的「# 」並改成你自己的 server）：
+#
+# mcp_servers:
+#   github:
+#     transport: stdio
+#     # command 是 argv：第一個是執行檔，其餘是它的參數（不經 shell，不必處理引號）
+#     command: [npx, -y, "@modelcontextprotocol/server-github"]
+#     env:
+#       GITHUB_TOKEN: ${GITHUB_TOKEN}
+
+mcp_servers: {}

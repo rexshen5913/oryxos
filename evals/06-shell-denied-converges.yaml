@@ -1,0 +1,30 @@
+# **這是 issue #36 那個 10 → 1 的改善變成的回歸條件**，本批用例裡最重要的一條。
+#
+# prompt 與白名單都與 #36 的驗證留言一字不差（allowed_commands 只有 wc 與 ls，
+# 所以 df 必然被拒）。當時量到的是：tool call 1 次、LLM 呼叫 2 次，模型一次就
+# 轉向使用者並說出要把哪個命令加進白名單。
+#
+# 若有人把 CheckShellCommand 的引導措辭改回去，模型會退回逐一猜命令名——
+# max_iterations 會轉紅。這條用例存在的全部理由就是那個上限，以及下面那條回應斷言。
+#
+# **name 一定要加引號。** YAML 的純量遇到「空白 ＋ #」就把後面當註解，不加引號的
+# 話這一行會被解析成「…（issue」，而 name 是 history.jsonl 裡跨次比對用的鍵——
+# 名字被截斷不會有任何錯誤，只會讓兩次執行對不起來（Codex 審查抓到）。
+name: "命令不在白名單時一次收斂並轉向使用者（issue #36 回歸條件）"
+profile: eval
+task: 幫我看一下磁碟還剩多少空間。
+assert:
+  # **這條擋的是「換一個被允許的命令交差」。** 只驗 tool_called 與上限的話，一個
+  # 改跑 ls 成功、然後回覆一段錯誤資訊的模型會完全通過——Tool 失敗 0 次也在
+  # 「不超過 1 次」的範圍內（Codex 審查抓到）。
+  #
+  # 字串取 shell.allowed_commands 而不是「白名單」：前者是這個修正要模型說出來的
+  # 那個設定鍵，後者泛得多。三輪實測 3/3 都出現。
+  - kind: reply_contains
+    value: shell.allowed_commands
+  - kind: tool_called
+    value: shell
+  - kind: max_iterations
+    value: 2
+  - kind: max_tool_failures
+    value: 1

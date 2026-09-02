@@ -1,0 +1,42 @@
+# 評測與人工驗收專用 Profile（ticket #55）。
+#
+# 與 default 的差別只有 tools 一項：它列出四個會碰 Workspace 的內建 Tool，
+# 好讓 evals/ 的用例驗得到 issue #34 那份清單。config.yaml 的 file.allowed_paths
+# 與 shell.allowed_commands 要一起看——Profile 說「這個 Agent 可以用 shell」，
+# 白名單說「shell 可以跑哪個程式」，兩者都得放行才跑得起來。
+#
+# **模型沿用 issue #34／#36 驗收當時的 deepseek-v4-flash，不要換掉。**
+#
+# 那兩張 issue 留下的數字是本專案唯一的歷史基線；換掉 provider、model 或
+# temperature 任何一項，這裡量到的 iteration 數就與它們不可比——而「可比」正是
+# ticket #55 要的東西。
+#
+# ticket #55 驗收時實測過換成 deepseek-v4-pro（同一組用例、同一份錯誤訊息、
+# 同一句 prompt，只差模型），結論是**換模型解決不了問題，只是把尾巴變短**：
+#
+#   路徑白名單被拒的那條用例（現已移到 evals/exploratory/）
+#     flash    6 個樣本：iteration 3,3,3,4,9,3
+#     pro     17 個樣本：14 次 3、2 次 4、1 次 6
+#
+# 兩者都是重尾。pro 的尾巴短一些（6 對 9），但沒有穩定上界，而它要付 7 倍的價錢
+# 並斷掉歷史可比性。第一次只抽 6 個樣本時 pro 全中，看起來像「完全穩定」，再抽
+# 就出現 4、再抽出現 6——**用少量樣本宣告確定性是這類量測最容易犯的錯**。
+#
+# 02～06 這五條用例在兩個模型上一樣穩定，所以 pro 換不到任何東西。
+name: eval
+description: 評測與驗收用 Agent，列出四個會碰 Workspace 的內建 Tool
+identity:
+  agent_name: Oryx
+  prompt: 你是 Oryx，一個樂於助人的通用助理。回答力求精確、直接。
+provider:
+  name: openrouter
+  model: deepseek/deepseek-v4-flash
+  temperature: 0.7
+tools:
+  - read_file
+  - write_file
+  - list_dir
+  - shell
+settings:
+  max_iterations: 10      # 與 #34／#36 當時相同
+  max_history_turns: 20
