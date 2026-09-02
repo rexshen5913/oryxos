@@ -36,9 +36,40 @@ CREATE TABLE IF NOT EXISTS llm_calls (
 	completed_at      TEXT NOT NULL
 );`
 
+// legacyLLMCallsSchemaWithCost 是 ticket #49 之後、#56 之前的建表語句，逐字保留當時
+// 的十二個欄位。刻意寫死的理由同 legacyLLMCallsSchema。
+//
+// **為什麼兩份舊 schema 都要留著**：使用者硬碟上的資料庫可能停在任何一個版本，而
+// 這兩份代表的是兩種不同的缺口——前者缺兩個欄位，後者只缺一個。ticket #56 的實測
+// 就是在一個已經有 cost_micro_usd 的 Workspace 上量到的，那正是後者的形狀。
+const legacyLLMCallsSchemaWithCost = `
+CREATE TABLE IF NOT EXISTS llm_calls (
+	call_id           TEXT PRIMARY KEY,
+	session_id        TEXT NOT NULL,
+	provider          TEXT NOT NULL,
+	model             TEXT NOT NULL,
+	prompt_tokens     INTEGER NOT NULL,
+	completion_tokens INTEGER NOT NULL,
+	total_tokens      INTEGER NOT NULL,
+	latency_ms        INTEGER NOT NULL,
+	status            TEXT NOT NULL,
+	started_at        TEXT NOT NULL,
+	completed_at      TEXT NOT NULL,
+	cost_micro_usd    INTEGER
+);`
+
 // writeLegacyDB 在 path 造一個「上一個版本留下的」資料庫：llm_calls 是舊的十一欄，
 // 並帶一行既有資料。回傳那行的 call_id。
 func writeLegacyDB(t *testing.T, path string) string {
+	t.Helper()
+	return writeLegacyDBWith(t, path, legacyLLMCallsSchema)
+}
+
+// writeLegacyDBWith 同上，但由呼叫端指定是哪一個舊版本的建表語句。
+//
+// 那行既有資料只寫十一個共通欄位：兩份舊 schema 都有它們，而較新那份多出來的
+// cost_micro_usd 留 NULL 也正確——那一列本來就代表「當時沒算成本」。
+func writeLegacyDBWith(t *testing.T, path, schema string) string {
 	t.Helper()
 	dsn, err := dataSourceName(path)
 	if err != nil {
@@ -53,7 +84,7 @@ func writeLegacyDB(t *testing.T, path string) string {
 			t.Errorf("關閉舊版資料庫: %v", err)
 		}
 	}()
-	if _, err := db.Exec(legacyLLMCallsSchema); err != nil {
+	if _, err := db.Exec(schema); err != nil {
 		t.Fatalf("建立舊版 llm_calls: %v", err)
 	}
 	const id = "llm-legacy-1"
@@ -190,5 +221,65 @@ func TestOpenMigrationIsConcurrencySafe(t *testing.T) {
 		if err != nil {
 			t.Errorf("並行首次升級時有人失敗: %v", err)
 		}
+	}
+}
+
+// TestOpenAddsCachedPromptTokensColumnToLegacyTable 驗既有 Workspace 打開後補上
+// cached_prompt_tokens，且舊資料列在該欄位留 NULL（ticket #56）。
+//
+// **舊列為什麼必須是 NULL 而不是 0**：那些呼叫發生時 OryxOS 根本沒有記下這個資訊，
+// 補 0 會讓「沒記錄」看起來像「沒有命中快取」——而後者是一句具體的事實陳述，稽核者
+// 會據此相信那幾筆的成本可以覆算，然後算出對不上的數字。這與 ticket #49 對 NULL 與
+// 0 的區分是同一條規則。ALTER TABLE ADD COLUMN 不帶 DEFAULT 時舊列正是 NULL，語義
+// 免費拿到，這一格是在防有人日後「順手」補一個 DEFAULT 0。
+//
+// 兩種舊版本都測：使用者的資料庫可能停在 #49 之前（缺兩欄）或之間（只缺這一欄），
+// 而 ticket #56 的實測正是在後者上量到的。
+func TestOpenAddsCachedPromptTokensColumnToLegacyTable(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema string
+	}{
+		{name: "ticket #49 之前的十一欄", schema: legacyLLMCallsSchema},
+		{name: "ticket #49 之後、#56 之前的十二欄", schema: legacyLLMCallsSchemaWithCost},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "oryxos.db")
+			legacyID := writeLegacyDBWith(t, dbPath, tt.schema)
+
+			db, err := Open(context.Background(), dbPath)
+			if err != nil {
+				t.Fatalf("開啟既有 Workspace 的資料庫: %v", err)
+			}
+			defer func() {
+				if err := db.Close(); err != nil {
+					t.Errorf("關閉資料庫: %v", err)
+				}
+			}()
+
+			if !hasColumn(t, db, "llm_calls", "cached_prompt_tokens") {
+				t.Fatal("既有 Workspace 的 llm_calls 沒有補上 cached_prompt_tokens，" +
+					"之後每一筆審計都會寫失敗")
+			}
+
+			var (
+				gotID  string
+				cached *int64
+			)
+			if err := db.fg.QueryRowContext(context.Background(),
+				`SELECT call_id, cached_prompt_tokens FROM llm_calls WHERE call_id = ?`, legacyID).
+				Scan(&gotID, &cached); err != nil {
+				t.Fatalf("遷移後讀不回舊資料: %v", err)
+			}
+			if gotID != legacyID {
+				t.Errorf("call_id = %q, 期望 %q", gotID, legacyID)
+			}
+			if cached != nil {
+				t.Errorf("舊資料的 cached_prompt_tokens = %d, 期望空值——"+
+					"那次呼叫當時沒有記下快取資訊，寫 0 會謊稱它沒命中快取", *cached)
+			}
+		})
 	}
 }

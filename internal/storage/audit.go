@@ -36,32 +36,47 @@ const (
 // llm_calls 沒有 error 欄位：需求文檔第 10 章的欄位清單裡就沒有，失敗以 status
 // 記錄，訊息由既有的結構化日誌承載。不自行擴充欄位。
 //
-// cost_micro_usd 是唯一的例外，它由 ticket #49 加入：需求文檔第 10 章的清單裡同樣
-// 沒有，但 spec #5 的使用者故事 30-34 明確要求「查得到這個 Agent 花了多少錢」，
-// 而 tool_invocations.token_cost 不是它的位置（那個欄位的歸因口徑不成立，見下方
-// RecordToolInvocation）。可空是語義的一部分：NULL 代表沒算，不是不用錢。
+// 需求文檔第 10 章的清單之外只多兩欄，兩欄都是為了同一件事——讓成本站得住：
+//
+// cost_micro_usd 由 ticket #49 加入。spec #5 的使用者故事 30-34 明確要求「查得到這個
+// Agent 花了多少錢」，而 tool_invocations.token_cost 不是它的位置（那個欄位的歸因
+// 口徑不成立，見下方 RecordToolInvocation）。可空是語義的一部分：NULL 代表沒算，
+// 不是不用錢。
+//
+// cached_prompt_tokens 由 ticket #56 加入，補的是**上一欄的輸入**。計價會先把命中
+// 快取的 token 從輸入扣掉、再按較低的 cached_input 單價另算（core.PriceList
+// .CostMicroUSD），少了這一欄，拿這張表覆算不出它自己的 cost_micro_usd——真實驗收
+// 量到的落差是 38–42%，而成本欄位其實是對的。稽核者算不平帳會去懷疑一個正確的
+// 數字，那比沒有數字更害。
+//
+// **這一欄可空的意思與 cost_micro_usd 不同，別套過去。** 它是 Provider 回報的用量
+// 計數，與 prompt_tokens 那三欄同一個家族；新寫入的每一列都是具體整數（回應沒帶
+// 快取明細時就是 0，那正是被餵進計價公式的值，寫 0 才覆算得回來）。NULL 在這一欄
+// 只承載一個意思：**這一列早於本欄位存在**，當時根本沒記。所以 ALTER TABLE 不給
+// DEFAULT 是刻意的（見 migrate.go），別「順手」補一個 DEFAULT 0。
 //
 // **加欄位對既有 Workspace 不會自動生效**，CREATE TABLE IF NOT EXISTS 對已存在的表
 // 什麼都不做——補欄位由 applyMigrations 負責（見 migrate.go）。
 //
-// 因此這一行與 migrate.go 的 ADD COLUMN **互為備份**：全新資料庫走這裡一次到位，
-// 既有資料庫走那裡補上。突變測試證實拿掉這一行行為不變（遷移會補），差別只在新
+// 因此上面那兩個可空欄位與 migrate.go 的 ADD COLUMN **互為備份**：全新資料庫走這裡
+// 一次到位，既有資料庫走那裡補上。突變測試證實拿掉它們行為不變（遷移會補），差別只在新
 // 資料庫要多跑一次 ALTER。保留它是為了讓建表語句本身就是完整的表定義——讀 schema
 // 的人不必再翻 migrate.go 才知道這張表長什麼樣。
 const auditSchema = `
 CREATE TABLE IF NOT EXISTS llm_calls (
-	call_id           TEXT PRIMARY KEY,
-	session_id        TEXT NOT NULL,
-	provider          TEXT NOT NULL,
-	model             TEXT NOT NULL,
-	prompt_tokens     INTEGER NOT NULL,
-	completion_tokens INTEGER NOT NULL,
-	total_tokens      INTEGER NOT NULL,
-	latency_ms        INTEGER NOT NULL,
-	status            TEXT NOT NULL,
-	started_at        TEXT NOT NULL,
-	completed_at      TEXT NOT NULL,
-	cost_micro_usd    INTEGER
+	call_id              TEXT PRIMARY KEY,
+	session_id           TEXT NOT NULL,
+	provider             TEXT NOT NULL,
+	model                TEXT NOT NULL,
+	prompt_tokens        INTEGER NOT NULL,
+	completion_tokens    INTEGER NOT NULL,
+	total_tokens         INTEGER NOT NULL,
+	latency_ms           INTEGER NOT NULL,
+	status               TEXT NOT NULL,
+	started_at           TEXT NOT NULL,
+	completed_at         TEXT NOT NULL,
+	cost_micro_usd       INTEGER,
+	cached_prompt_tokens INTEGER
 );
 CREATE TABLE IF NOT EXISTS tool_invocations (
 	invocation_id TEXT PRIMARY KEY,
@@ -246,15 +261,21 @@ func (l *AuditLog) RecordLLMCall(ctx context.Context, call core.LLMCall) {
 		_, err := l.db.ExecContext(writeCtx,
 			`INSERT INTO llm_calls
 			     (call_id, session_id, provider, model, prompt_tokens, completion_tokens,
-			      total_tokens, latency_ms, status, started_at, completed_at, cost_micro_usd)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			      total_tokens, latency_ms, status, started_at, completed_at, cost_micro_usd,
+			      cached_prompt_tokens)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, call.SessionID, call.Provider, call.Model,
 			call.Usage.PromptTokens, call.Usage.CompletionTokens, call.Usage.TotalTokens,
 			call.Latency.Milliseconds(), call.Status,
 			formatTimestamp(call.StartedAt), formatTimestamp(call.CompletedAt),
 			// nil 原樣落成 SQL NULL——「沒配置定價所以沒算」與「算出來是零」在
 			// 報表上是兩件事，driver 的可空整數剛好表達得出這個差別。
-			call.CostMicroUSD)
+			call.CostMicroUSD,
+			// **原樣寫入，不判空。** 這是 int 不是指標，所以每一列都落一個具體整數
+			// ——包括回應沒帶快取明細時的 0。那個 0 不是猜的，它正是上一欄計價時被
+			// 餵進公式的值（core.TokenUsage.CachedPromptTokens 的註解），寫下來這張
+			// 表才覆算得回自己的成本（ticket #56）。
+			call.Usage.CachedPromptTokens)
 		return err
 	}, "session_id", call.SessionID, "provider", call.Provider)
 }

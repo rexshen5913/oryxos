@@ -25,13 +25,29 @@ type columnMigration struct {
 //
 // **為什麼不引入 goose／golang-migrate**：技術方案 §9.2 警告的是「依賴任何**自動**
 // 遷移」——ORM 看到 struct 變了就自行下 DDL 那一類，你無法預測它會做什麼。這裡是
-// 手寫、讀得懂、冪等的顯式 DDL，正是它要求的「顯式管理」。為一個可空欄位背上一套
+// 手寫、讀得懂、冪等的顯式 DDL，正是它要求的「顯式管理」。為兩個可空欄位背上一套
 // 遷移框架與其版本表，違反憲法 3.1（YAGNI）與 1.4（不引入非必需的重框架）。
+//
+// **順序即歷史，只准往後追加。** 一個使用者的資料庫可能停在任何一個過去的版本，
+// 從頭跑一遍是它追上來的唯一途徑；插隊或改寫既有項目，等於改寫那些人已經走過的路。
 var auditMigrations = []columnMigration{
 	{
 		table:  "llm_calls",
 		column: "cost_micro_usd",
 		stmt:   `ALTER TABLE llm_calls ADD COLUMN cost_micro_usd INTEGER`,
+	},
+	{
+		// ticket #56：成本欄位的輸入之一。少了它，拿 llm_calls 覆算不出它自己的
+		// cost_micro_usd（真實驗收量到 38–42% 落差，而成本其實算對了）。
+		//
+		// **刻意不給 DEFAULT 0。** 不帶 DEFAULT 時既有資料列是 NULL，那正是要的：
+		// 那些呼叫發生時 OryxOS 沒有記下快取資訊，補 0 會讓「沒記錄」看起來像
+		// 「沒有命中快取」——後者是一句具體的事實陳述，稽核者會據此相信那幾筆覆算
+		// 得出來，然後算出對不上的數字。新寫入的每一列則一律是具體整數（見
+		// audit.go 的 RecordLLMCall），所以 NULL 在這一欄只有這一個意思。
+		table:  "llm_calls",
+		column: "cached_prompt_tokens",
+		stmt:   `ALTER TABLE llm_calls ADD COLUMN cached_prompt_tokens INTEGER`,
 	},
 }
 
