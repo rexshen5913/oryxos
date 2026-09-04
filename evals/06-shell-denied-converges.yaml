@@ -12,6 +12,12 @@
 # 名字被截斷不會有任何錯誤，只會讓兩次執行對不起來（Codex 審查抓到）。
 name: "命令不在白名單時一次收斂並轉向使用者（issue #36 回歸條件）"
 profile: eval
+# **只宣告得出正向的一半。** 這條用例真正的前置條件是「df **不在**
+# shell.allowed_commands」——有人把 df 加進白名單，它會以「回應不含
+# shell.allowed_commands」的形態失敗，而那段輸出一樣不指向原因。反向前置條件
+# 目前表達不出來（issue #59 定案：這次只做正向），另開票追蹤。
+requires:
+  tools: [shell]
 task: 幫我看一下磁碟還剩多少空間。
 assert:
   # **這條擋的是「換一個被允許的命令交差」。** 只驗 tool_called 與上限的話，一個

@@ -4,6 +4,11 @@
 # 驗不到「它拿得到 Workspace 裡的真實資料再寫回去」這條鏈路。
 name: write_file 讀完摘要後寫回檔案
 profile: eval
+# 兩個檔案都要宣告：read_file 讀 todo.md、write_file 寫 summary.md，兩者各自要
+# 過白名單。與 02 同一條理由——宣告的是實際存取的路徑，不是它們所在的目錄。
+requires:
+  tools: [read_file, write_file]
+  paths: [notes/todo.md, notes/summary.md]
 setup:
   files:
     notes/todo.md: |

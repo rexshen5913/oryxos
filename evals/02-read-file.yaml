@@ -1,6 +1,14 @@
 # 涵蓋 issue #34 驗收清單第一項：read_file 被 LLM 正確呼叫。
 name: read_file 讀出檔案內容並回答
 profile: eval
+# **宣告的是 Tool 實際存取的那個檔案，不是它所在的目錄。**
+#
+# 白名單比對是子樹涵蓋：放行 notes 就放行 notes/todo.md，但反過來不成立。宣告成
+# notes 的話，一份精確放行 notes/todo.md 的 config.yaml 會讓 Tool 跑得起來、
+# requires 卻攔下——那是假陽性（Codex 審查抓到）。
+requires:
+  tools: [read_file]
+  paths: [notes/todo.md]
 setup:
   files:
     notes/todo.md: |

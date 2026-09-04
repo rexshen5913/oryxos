@@ -4,6 +4,21 @@
 # 而 config.yaml 的 shell.allowed_commands 正好只放行 wc 與 ls 兩個。
 name: shell 執行單一命令算出行數
 profile: eval
+# **刻意不宣告 paths**，即使任務讀的是 notes/todo.md。
+#
+# shell 跑的是子進程，**完全不受 file.allowed_paths 約束**——那段白名單管的是 OryxOS
+# 自己開檔（os.Root），對子進程沒有任何作用（見 internal/tool/shell.go 的說明與
+# config.yaml 註解第 4 條）。把 notes 從 allowed_paths 拿掉，這條用例照樣跑得過。
+#
+# 補上 paths 會製造一個**假陽性**：requires 攔下一個本來能通過的執行。那與
+# CheckRequires 力求避免的「校驗放行、執行時被拒」是同一個原則的反面——
+# **校驗說不行，就必須真的不行**（Codex 審查抓到）。
+#
+# setup.files 的佈置不需要 allowed_paths：PrepareWorkspace 是 harness 自己寫檔，
+# 不經過 File Tool。
+requires:
+  tools: [shell]
+  commands: [wc]
 setup:
   files:
     notes/todo.md: |

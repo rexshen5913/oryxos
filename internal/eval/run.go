@@ -70,6 +70,22 @@ func RunCase(ctx context.Context, sourceWS, caseRoot string, c Case) (result Run
 		return RunResult{}, fmt.Errorf("用例 %s: Profile %s 引用的 Provider %q 未在 config.yaml 的 providers 段配置",
 			c.Name, prof.Name, prof.Provider.Name)
 	}
+	// **前置條件校驗放在這裡，早於憑證展開與日誌檔建立**（issue #59）。它只看純資料，
+	// 是所有校驗裡最輕的一道，而它擋下的正是「Workspace 配置漂掉、失敗形態卻完全不指向
+	// 原因」那類執行——越早擋越接近該 issue 要的「在送出任何請求之前」。
+	//
+	// 判斷邏輯全在 CheckRequires（純函式，測得到）；這裡只有組裝與傳遞，沒有分支。
+	// ProfileName 傳的是用例宣告的 c.Profile 而不是 prof.Name：錯誤訊息要說得出該去改
+	// 哪一個檔案，而檔名對應的是前者。
+	if err := CheckRequires(c.Requires, Environment{
+		ProfileName:     c.Profile,
+		ProfileTools:    prof.Tools,
+		AllowedPaths:    cfg.File.AllowedPaths,
+		AllowedCommands: cfg.Shell.AllowedCommands,
+	}); err != nil {
+		return RunResult{}, fmt.Errorf("用例 %s: %w", c.Name, err)
+	}
+
 	// MCP 不在本票範圍。**明白擋下而不是讓它自己壞**：不接的話，Profile 引用的 MCP
 	// 工具會在 Registry.Subset 那一層被判成「Tool 未註冊」，使用者看到的是一句與 MCP
 	// 毫無關聯的錯誤訊息（憲法 5.1 要求錯誤被顯式處理，一個誤導性的錯誤不算被處理）。

@@ -1,7 +1,10 @@
 package eval
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -94,12 +97,25 @@ type Setup struct {
 
 // Case 是一份評測用例的宣告，一個 YAML 檔一份。
 type Case struct {
-	Name    string      `yaml:"name"`
-	Profile string      `yaml:"profile"`
-	Setup   Setup       `yaml:"setup"`
-	Task    string      `yaml:"task"`
-	Assert  []Assertion `yaml:"assert"`
+	Name    string `yaml:"name"`
+	Profile string `yaml:"profile"`
+	// Requires 是對 Workspace 環境的前置條件，**選填**（issue #59）。
+	//
+	// 欄位位置緊接 Profile，因為它校驗的正是 Profile 的 tools 與 config.yaml 的兩份
+	// 白名單。**這不是執行順序**（Codex 審查抓到原本的說法與接線不符）：RunCase 先
+	// PrepareWorkspace——連同 Setup.Files 的佈置——才校驗 requires。這樣接是因為校驗
+	// 需要的 cfg 與 Profile 都從**複製後**的 Workspace 載入，而複製檔案不花錢；
+	// issue #59 要的那條線是「在送出任何請求之前」，它在更後面。
+	Requires Requires    `yaml:"requires"`
+	Setup    Setup       `yaml:"setup"`
+	Task     string      `yaml:"task"`
+	Assert   []Assertion `yaml:"assert"`
 }
+
+// caseFields 是用例支援的全部頂層欄位，**與 Case 的 yaml tag 一一對應**，只用於錯誤
+// 訊息。實際的把關由 KnownFields 做，這裡漏列只會讓訊息少一項、不會放行任何東西
+// ——與 requiresFields 那份（漏列會擋下合法欄位）的風險方向不同。
+var caseFields = []string{"name", "profile", "requires", "setup", "task", "assert"}
 
 // ParseCase 解析並校驗一份用例宣告。source 只用於錯誤訊息——用例目錄裡放十份 YAML
 // 時，一句沒有檔名的「缺 task」等於要人一份一份翻。
@@ -108,8 +124,31 @@ type Case struct {
 // 之前**就被擋下。跑到一半才發現斷言種類不認得，那次真實 Provider 呼叫的錢已經花了。
 func ParseCase(data []byte, source string) (Case, error) {
 	var c Case
-	if err := yaml.Unmarshal(data, &c); err != nil {
-		return Case{}, fmt.Errorf("解析用例 %s: %w", source, err)
+	// **頂層欄位也是封閉白名單**（Codex 審查抓到）。yaml.Unmarshal 對不認得的欄位一律
+	// 靜默忽略，於是 `require:`（少一個 s）會被當成整段省略——requires 的內層白名單
+	// 一個字都攔不到。**那是同一個 fail-open，只是往上一層**：修內層而不修頂層，等於
+	// 修了症狀沒修根。
+	//
+	// KnownFields 對整棵樹生效，所以 assert 的欄位拼錯也一併擋得住。它與 AssertionKind、
+	// requiresFields 是同一條規則：被安靜忽略的宣告會讓評測宣稱一個它根本沒檢查的性質
+	// 成立，而報表上是綠的。
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&c); err != nil {
+		// **空輸入回 io.EOF，那不是語法錯誤**：yaml.Unmarshal 對空輸入是回 nil 加一個
+		// 零值，行為要保持一致。讓它往下走到 validate，由「name 必填」給出對使用者更
+		// 有意義的訊息——一句「EOF」不會告訴任何人該補什麼。
+		if !errors.Is(err, io.EOF) {
+			// KnownFields 的拒絕是 *yaml.TypeError。它說得出行號與欄位名，但夾著
+			// 「type eval.Case」這種 Go 型別名——對寫 YAML 的人是實作細節——而且不說
+			// 支援哪些欄位。補一句，與 requires 那一層的訊息品質看齊。
+			var typeErr *yaml.TypeError
+			if errors.As(err, &typeErr) {
+				return Case{}, fmt.Errorf("解析用例 %s: %w\n        用例支援的欄位：%s（拼錯的欄位會被靜默忽略，所以一律擋下）",
+					source, err, strings.Join(caseFields, "、"))
+			}
+			return Case{}, fmt.Errorf("解析用例 %s: %w", source, err)
+		}
 	}
 	if err := c.validate(); err != nil {
 		return Case{}, fmt.Errorf("用例 %s 校驗失敗: %w", source, err)
@@ -175,6 +214,9 @@ func (c Case) validate() error {
 		return fmt.Errorf("name 必填（用例名會出現在輸出裡，用來指認是哪一條）")
 	}
 	if err := validateProfileName(c.Profile); err != nil {
+		return err
+	}
+	if err := c.Requires.validate(); err != nil {
 		return err
 	}
 	if strings.TrimSpace(c.Task) == "" {

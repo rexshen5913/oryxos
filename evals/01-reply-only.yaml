@@ -6,6 +6,10 @@
 #
 #   name:     用例名，出現在輸出裡用來指認是哪一條（必填）
 #   profile:  用哪份 Profile 跑，對應 .oryxos/profiles/<name>.yaml（必填）
+#   requires: 這條用例對 Workspace 環境的前置條件（選填）
+#     tools:    Profile 的 tools 要涵蓋的 Tool 名
+#     paths:    file.allowed_paths 要涵蓋的路徑（子樹涵蓋，不是字面相等）
+#     commands: shell.allowed_commands 要涵蓋的程式名（字面完全相等）
 #   setup:
 #     files:  路徑 → 內容，建立在**乾淨的 Workspace** 裡（選填）
 #             路徑相對 Workspace 根，父目錄自動建立；絕對路徑與穿越出 Workspace
@@ -28,6 +32,14 @@
 # 「答案還是對的，只是繞了比較久」——issue #36 那個 10→1 的 iteration 數若被改回去，
 # **ticket #53 落地當時僅有的兩種布林斷言**（reply_contains 與 tool_called）一條都不
 # 會轉紅。上限是**不得超過**，剛好等於上限算通過。
+#
+# requires 在**送出任何請求之前**校驗，不滿足就中止並指名是哪一項、該改哪個檔案的哪
+# 一段（issue #59）。沒有它的話，有人把 notes 從 file.allowed_paths 拿掉之後跑評測，
+# 看到的是「未呼叫 read_file」「回應不含牛奶」——那段輸出完全不提白名單，而真正的原因
+# 是一行配置。這條用例本身不碰 Tool，所以整段省略；**選填的意思就是省略要能跑**。
+#
+# **目前只表達得了正向（「要有」）。** 06 那條測「命令不在白名單時收斂」的用例，需要的
+# 是「df **不能**在白名單」，這裡宣告不出來——反向前置條件另開票。
 #
 # 每次執行會把每條用例的指標追加一行到 evals/history.jsonl（用 --history 換位置，
 # 傳空字串則不寫）。追加而非覆寫，所以同一條用例跨多次執行的 iteration 數比得出來。

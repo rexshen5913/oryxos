@@ -1,6 +1,12 @@
 # 涵蓋 issue #34 驗收清單第二項：list_dir 被 LLM 正確呼叫。
 name: list_dir 列出目錄內容
 profile: eval
+# **這裡宣告目錄是對的**：list_dir 存取的就是 notes 這個目錄本身，不是底下某個檔案。
+# 02 與 04 宣告的是檔案，因為 read_file／write_file 存取的是檔案——判準一律是
+# 「Tool 實際會把哪個路徑交給 Sandbox」。
+requires:
+  tools: [list_dir]
+  paths: [notes]
 setup:
   files:
     notes/todo.md: |

@@ -91,6 +91,256 @@ assert:
 			wantErr: "no_such_kind",
 		},
 		{
+			// requires 是選填的（issue #59 定案）：宣告了就在送出任何請求之前校驗，
+			// 沒宣告的用例照原本的方式跑。
+			//
+			// 解析層做兩件事：收下宣告，並校驗**宣告本身**寫得合不合法（見下面四格）。
+			// 它不碰 Workspace 的實際配置——「這個 Workspace 放行了嗎」是 CheckRequires
+			// 的事，那支是純函式，測得到。
+			name: "requires 能解析（issue #59）",
+			yaml: `
+name: 讀檔案並回答
+profile: eval
+requires:
+  tools: [read_file]
+  paths: [notes]
+  commands: [wc]
+task: 讀 notes/todo.md
+assert:
+  - kind: reply_contains
+    value: 牛奶
+`,
+			check: func(t *testing.T, got eval.Case) {
+				if len(got.Requires.Tools) != 1 || got.Requires.Tools[0] != "read_file" {
+					t.Errorf("Requires.Tools = %v，期望 [read_file]", got.Requires.Tools)
+				}
+				if len(got.Requires.Paths) != 1 || got.Requires.Paths[0] != "notes" {
+					t.Errorf("Requires.Paths = %v，期望 [notes]", got.Requires.Paths)
+				}
+				if len(got.Requires.Commands) != 1 || got.Requires.Commands[0] != "wc" {
+					t.Errorf("Requires.Commands = %v，期望 [wc]", got.Requires.Commands)
+				}
+				if got.Requires.IsZero() {
+					t.Error("宣告了三段卻回報 IsZero")
+				}
+			},
+		},
+		{
+			// **頂層欄位拼錯是同一個 fail-open，只是往上一層**（Codex 審查抓到）：
+			// `require:` 少一個 s 不會進入 Requires.UnmarshalYAML，而是被當成整段省略
+			// ——內層白名單一個字都攔不到，整個前置條件靜默消失。
+			//
+			// 修內層而不修頂層，等於修了症狀沒修根。
+			// 訊息要說得出支援哪些欄位——yaml 原生的訊息只說「field require not found
+			// in type eval.Case」，夾著 Go 型別名而且不列可用欄位。
+			name: "頂層 require 拼錯要被拒（少一個 s）",
+			yaml: `
+name: 頂層欄位拼錯
+profile: eval
+require:
+  tools: [read_file]
+task: 隨便
+assert:
+  - kind: reply_contains
+    value: 好
+`,
+			wantErr: "用例支援的欄位",
+		},
+		{
+			name: "頂層不認得的欄位要被拒",
+			yaml: `
+name: 不認得的頂層欄位
+profile: eval
+requirements:
+  tools: [read_file]
+task: 隨便
+assert:
+  - kind: reply_contains
+    value: 好
+`,
+			wantErr: "requirements",
+		},
+		{
+			// assert 的欄位也一併受惠：KnownFields 對整棵樹生效。
+			name: "assert 的欄位拼錯要被拒",
+			yaml: `
+name: 斷言欄位拼錯
+profile: eval
+task: 隨便
+assert:
+  - kind: reply_contains
+    values: 好
+`,
+			wantErr: "values",
+		},
+		{
+			// **拼錯的欄位被靜默忽略，是這個功能最糟的失敗形態**（Codex 審查抓到）：
+			// requires.path 少一個 s，YAML 收不下、三段都空、IsZero() 為真，整個校驗
+			// 被跳過——而寫的人以為有保護。那正是 issue #59 要防的「花完錢才看到一個
+			// 不指向原因的失敗」，只是這次連校驗都沒發生。
+			//
+			// 斷言種類那一側早就是封閉白名單（「一個被安靜忽略的斷言，會讓評測宣稱一個
+			// 它根本沒檢查的性質成立」），requires 的欄位是同一條理由。
+			name: "requires.path 拼錯要被拒（不得靜默忽略）",
+			yaml: `
+name: 拼錯的欄位
+profile: eval
+requires:
+  path: [notes]
+task: 隨便
+assert:
+  - kind: reply_contains
+    value: 好
+`,
+			wantErr: "requires",
+		},
+		{
+			name: "requires.tool 拼錯要被拒",
+			yaml: `
+name: 拼錯的欄位
+profile: eval
+requires:
+  tool: [read_file]
+task: 隨便
+assert:
+  - kind: reply_contains
+    value: 好
+`,
+			wantErr: "requires",
+		},
+		{
+			name: "requires.command 拼錯要被拒",
+			yaml: `
+name: 拼錯的欄位
+profile: eval
+requires:
+  command: [wc]
+task: 隨便
+assert:
+  - kind: reply_contains
+    value: 好
+`,
+			wantErr: "requires",
+		},
+		{
+			// 加了欄位白名單之後，**空的 requires: 仍要解析得過**——它與整段省略是同
+			// 一件事。這一格擋的是白名單把 null 節點也一起拒掉的回歸。
+			name: "requires 寫了但沒有內容仍要解析得過",
+			yaml: `
+name: 空的 requires 段
+profile: default
+requires:
+task: 隨便
+assert:
+  - kind: reply_contains
+    value: 好
+`,
+			check: func(t *testing.T, got eval.Case) {
+				if !got.Requires.IsZero() {
+					t.Errorf("空的 requires 段卻不是空宣告: %+v", got.Requires)
+				}
+			},
+		},
+		{
+			// **一份寫壞的用例應該在送出任何請求之前被擋下**——與斷言種類、setup.files
+			// 路徑同一條規則。CheckRequires 那一側雖然也擋得住並給出正確方向的訊息，
+			// 但那要等到 RunCase；解析層更早，也更接近「寫壞」的語義。
+			name: "requires.paths 是絕對路徑要被拒",
+			yaml: `
+name: 絕對路徑的前置條件
+profile: eval
+requires:
+  paths: ["/etc/passwd"]
+task: 隨便
+assert:
+  - kind: reply_contains
+    value: 好
+`,
+			wantErr: "requires.paths",
+		},
+		{
+			name: "requires.paths 穿越出 Workspace 要被拒",
+			yaml: `
+name: 穿越的前置條件
+profile: eval
+requires:
+  paths: ["../outside"]
+task: 隨便
+assert:
+  - kind: reply_contains
+    value: 好
+`,
+			wantErr: "requires.paths",
+		},
+		{
+			// 白名單比對的是程式名，config.yaml 的註解明訂「寫 git，不是 /usr/bin/git」。
+			// 一份寫了路徑的 requires.commands 不論 Workspace 怎麼配置都不會滿足。
+			name: "requires.commands 含路徑分隔符要被拒",
+			yaml: `
+name: 帶路徑的程式名
+profile: eval
+requires:
+  commands: ["/usr/bin/wc"]
+task: 隨便
+assert:
+  - kind: reply_contains
+    value: 好
+`,
+			wantErr: "requires.commands",
+		},
+		{
+			name: "requires.tools 的條目是空白要被拒",
+			yaml: `
+name: 空白的 Tool 名
+profile: eval
+requires:
+  tools: ["  "]
+task: 隨便
+assert:
+  - kind: reply_contains
+    value: 好
+`,
+			wantErr: "requires.tools",
+		},
+		{
+			// **省略整段要解析得過**，這是「選填」的實際意思。既有六條用例落地時全都
+			// 沒有這一段，若省略會報錯，這個欄位就變成必填了。
+			name: "省略 requires 時是空宣告（選填）",
+			yaml: `
+name: 不碰 Tool 的用例
+profile: default
+task: 請只回覆四個字
+assert:
+  - kind: reply_contains
+    value: 評測通過
+`,
+			check: func(t *testing.T, got eval.Case) {
+				if !got.Requires.IsZero() {
+					t.Errorf("省略 requires 卻不是空宣告: %+v", got.Requires)
+				}
+			},
+		},
+		{
+			// 寫了 requires: 但三段都空，與整段沒寫是同一件事——IsZero 要一致，否則
+			// CheckRequires 會對一份什麼都沒宣告的 requires 走完整條比對路徑。
+			name: "requires 三段皆空等同沒寫",
+			yaml: `
+name: 空的 requires
+profile: default
+requires:
+  tools: []
+task: 隨便
+assert:
+  - kind: reply_contains
+    value: 好
+`,
+			check: func(t *testing.T, got eval.Case) {
+				if !got.Requires.IsZero() {
+					t.Errorf("三段皆空卻不是空宣告: %+v", got.Requires)
+				}
+			},
+		},
+		{
 			// 全部斷言種類都要解析得出來（ticket #53 驗收條件）。指標型的值在 YAML 裡
 			// 不加引號寫成整數也要收得下——使用者不會想到 `value: 3` 與 `value: "3"`
 			// 有什麼差別，而多數人會寫前者。
