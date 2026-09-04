@@ -63,6 +63,24 @@ func checkAssertion(a Assertion, result RunResult) string {
 		// 「少了什麼」，讓失敗清單維持一行一條、掃得動。
 		return fmt.Sprintf("%s：最終回應不含 %q", a.Kind, a.Value)
 
+	case AssertReplyNotContains:
+		// **它不是 reply_contains 取反那麼單純，用途不同。** reply_contains 問的是
+		// 「該說的說了沒」，這一種問的是「不該說的說了沒」——後者治的缺陷是回應同時
+		// 滿足前者：issue #58 那句謊稱正好提到了 file.allowed_paths，所以既有斷言
+		// 對它全綠（2026-09-04 的 A／B 取樣：兩組各 3 輪判卷通過但同時在謊稱）。
+		//
+		// 比對用**連續子字串**而不是正則，這是量測出來的決定而非省事：同一批 24 段
+		// 真實回應上，「沒有允許任何」抓得到謊稱句「白名單沒有允許任何路徑」，卻不會
+		// 誤傷準確句「沒有允許我執行任何可用來搜尋或讀取檔案的命令」——後者中間隔了
+		// 字。寫成正則 `沒有允許.*任何` 反而會把準確的那句一起判紅。
+		if !strings.Contains(result.Reply, a.Value) {
+			return ""
+		}
+		// 與 reply_contains 同一條理由，原因裡不夾整段回應。但這一種要說出**命中了
+		// 什麼**：呼叫端只在未通過時印回應，而一段幾百字的回應裡，看的人得知道是哪
+		// 一句話讓它轉紅。
+		return fmt.Sprintf("%s：最終回應含有不該出現的 %q", a.Kind, a.Value)
+
 	case AssertToolCalled:
 		// 完全相等而非前綴：read 不得因為 read_file 被呼叫過就算通過，否則一個手誤
 		// 的斷言會安靜地一直綠燈。

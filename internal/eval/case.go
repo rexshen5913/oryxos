@@ -21,6 +21,11 @@ type AssertionKind string
 const (
 	// AssertReplyContains 斷言最終回應含有某段文字。
 	AssertReplyContains AssertionKind = "reply_contains"
+	// AssertReplyNotContains 斷言最終回應**不含**某段文字。
+	//
+	// 它治的是 reply_contains 治不了的一類缺陷：回應說了該說的、指標也全在上限內，
+	// 但裡面夾著一句錯誤的事實陳述（issue #58）。那種回應對既有四種斷言全綠。
+	AssertReplyNotContains AssertionKind = "reply_not_contains"
 	// AssertToolCalled 斷言某個 Tool 被呼叫過（不論那次執行成功與否）。
 	AssertToolCalled AssertionKind = "tool_called"
 	// AssertMaxIterations 斷言 iteration 數不超過某個上限。
@@ -31,11 +36,17 @@ const (
 
 // knownAssertionKinds 是目前支援的全部斷言種類。
 //
-// 前兩種是布林問題（有沒有），後兩種是程度問題（多少）。加後兩種的理由：一次退步的
-// 典型形態是「答案還是對的，只是繞了比較久」——issue #36 那個 10→1 的改善若被改回去，
-// 前兩種斷言一條都不會轉紅（ticket #53）。
+// **前三種是布林問題（有沒有），後兩種是程度問題（多少）。**
+//
+// 後兩種由 ticket #53 加入，理由是一次退步的典型形態是「答案還是對的，只是繞了比較
+// 久」——issue #36 那個 10→1 的改善若被改回去，當時僅有的兩種布林斷言一條都不會轉紅。
+//
+// reply_not_contains 是第三種布林斷言，理由是另一種同樣不轉紅的形態：**答案的形狀
+// 對、指標也在上限內，但裡面夾著一句錯誤的事實陳述**（issue #58）。它與 reply_contains
+// 不是互為反面而已——2026-09-04 的 A／B 取樣量到兩組各 3 輪「判卷通過但同時在謊稱」，
+// 那些回應正是因為提到了正確的欄位名而滿足 reply_contains。
 var knownAssertionKinds = []AssertionKind{
-	AssertReplyContains, AssertToolCalled, AssertMaxIterations, AssertMaxToolFailures,
+	AssertReplyContains, AssertReplyNotContains, AssertToolCalled, AssertMaxIterations, AssertMaxToolFailures,
 }
 
 // isMetricKind 回答這一種斷言的值是不是一個數字上限。
@@ -189,15 +200,25 @@ func (a Assertion) validate() error {
 	}
 	// **判空用 TrimSpace，比對用原值**，這兩件事要分開（Codex 審查抓到）。
 	//
-	// 判空這一面：`value: " "` 配 reply_contains 幾乎對任何回應都成立——一條什麼都沒
-	// 檢查的斷言會一直綠燈，而報表上看不出差別。這與 name、profile、task 與
-	// setup.files 的路徑是同一條規則，那四處本來就這樣寫，只有這裡漏掉了。
+	// 判空這一面：純空白比對不到任何實質內容，而它**壞的方向隨斷言而相反**——
+	// `value: " "` 配 reply_contains 幾乎永遠成立（假綠燈），配 reply_not_contains
+	// 則幾乎永遠不成立（假紅燈）。`value: ""` 更極端：strings.Contains 對空字串恆真，
+	// 前者恆過、後者恆敗。
+	//
+	// **所以診斷不能寫成任何一個方向**（Codex 審查抓到）。它也不能退一步描述「取決於
+	// 回應裡有沒有空白字元」——那對兩種輸入都不成立：`""` 的結果與任何字元無關，
+	// `"  "` 取決於的是**精確的連續空白**而非「有沒有空白」（Codex 第二輪抓到）。
+	//
+	// 唯一對所有種類、所有空白值都成立的說法是「這個值不表達有效的比對條件，結果與
+	// 想檢查的性質無關」，訊息只講這一點。TestParseCase 的三格空白案例（正向一格、
+	// 負向兩格）都斷言這句中性片段，方向寫回去任何一邊都會轉紅。這與 name、profile、
+	// task 與 setup.files 的路徑是同一條規則，那四處本來就這樣寫。
 	//
 	// 比對那一面：**這裡不動 a.Value**。使用者寫的前後空白可能是刻意的（回應裡
 	// 「答案： 42」的那個空格），解析時順手 trim 掉會讓斷言比的東西與他寫的不是同一個，
 	// 而且從輸出完全看不出來。
 	if strings.TrimSpace(a.Value) == "" {
-		return fmt.Errorf("value 必填且不得只有空白（%s 要比對的內容；純空白的斷言幾乎對任何回應都成立，等於沒測）", a.Kind)
+		return fmt.Errorf("value 必填且不得只有空白（%s 要比對的內容；空白值不表達有效的比對條件，判卷結果與想檢查的性質無關，等於沒測）", a.Kind)
 	}
 	// 指標型斷言的值要在**送出任何請求之前**確認是個數字。跑到判卷才發現 `value: 三次`
 	// 比對不了的話，那一次真實 Provider 呼叫的錢已經花了——與其餘欄位同一條理由。

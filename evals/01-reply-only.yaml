@@ -13,15 +13,21 @@
 #   task:     送給 Agent 的訊息（必填）
 #   assert:   至少一條（必填）
 #     - kind: reply_contains     value: 期望出現在最終回應的文字
+#     - kind: reply_not_contains value: **不**該出現在最終回應的文字
 #     - kind: tool_called        value: 期望被呼叫過的 Tool 名（呼叫失敗也算呼叫過）
 #     - kind: max_iterations     value: iteration 數上限（整數，不加引號即可）
 #     - kind: max_tool_failures  value: Tool 失敗次數上限（整數）
 #
-# 目前只有上面四種斷言，其餘種類會在解析時就被擋下。
+# 目前只有上面五種斷言，其餘種類會在解析時就被擋下。
 #
-# 前兩種回答「有沒有」，後兩種回答「多少」。後兩種存在的理由：一次退步的典型形態是
+# reply_not_contains 治的是 reply_contains 治不了的一類缺陷：回應說了該說的、指標
+# 也全在上限內，但裡面夾著一句錯誤的事實陳述（issue #58）。比對與 reply_contains
+# 一樣是**連續子字串**，用法見 evals/exploratory/07-path-denied-converges.yaml。
+#
+# 前三種回答「有沒有」，後兩種回答「多少」。後兩種存在的理由：一次退步的典型形態是
 # 「答案還是對的，只是繞了比較久」——issue #36 那個 10→1 的 iteration 數若被改回去，
-# 前兩種斷言一條都不會轉紅。上限是**不得超過**，剛好等於上限算通過。
+# **ticket #53 落地當時僅有的兩種布林斷言**（reply_contains 與 tool_called）一條都不
+# 會轉紅。上限是**不得超過**，剛好等於上限算通過。
 #
 # 每次執行會把每條用例的指標追加一行到 evals/history.jsonl（用 --history 換位置，
 # 傳空字串則不寫）。追加而非覆寫，所以同一條用例跨多次執行的 iteration 數比得出來。

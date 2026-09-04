@@ -10,8 +10,18 @@ import (
 // TestGrade 是本票的主要測試面：判卷吃「用例宣告 ＋ 一次執行的結果摘要」，吐「通過
 // 與否 ＋ 未通過原因」，**完全不碰 Provider**。
 //
-// 兩種斷言各自涵蓋通過與失敗。斷言對象是判卷的回傳值，不是它內部怎麼比對——把
-// strings.Contains 換成別的比法而語義不變時，這張表該保持綠色。
+// **三種布林斷言**（reply_contains、reply_not_contains、tool_called）各自涵蓋通過與
+// 失敗；兩種指標型斷言在 TestGradeMetricAssertions。斷言對象是判卷的回傳值，不是它
+// 內部怎麼比對——把 strings.Contains 換成別的比法而語義不變時，這張表該保持綠色。
+//
+// **加斷言種類時這段敘述要一起改。** 它宣告了這張表涵蓋多少種，落後時看不出缺口。
+//
+// reply_not_contains 落地過程中，同類的數量敘述漂移過的位置有：01-reply-only.yaml 的
+// schema 列表與分類段、case.go 的白名單註解、case_test.go 的涵蓋表名稱、implement.md
+// 的範圍與驗收條件，以及這裡——外部審查逐輪抓出來的。
+//
+// **這份清單刻意不寫總數。** 上一版寫了「四個地方」，而括號裡實際列了五個——一個
+// 統計自己漂移的敘述又漂移了一次。可變的計數只要寫死就會過期，能列舉時就列舉。
 func TestGrade(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -95,6 +105,76 @@ func TestGrade(t *testing.T) {
 			wantPassed:  false,
 			wantReasons: []string{"read"},
 		},
+
+		// ── reply_not_contains（issue #58 的量測缺口）──
+		//
+		// 它是 reply_contains 的反面，但兩者的邊界不對稱，所以各自都要有格：同一個
+		// 空回應，reply_contains 必定失敗、reply_not_contains 必定通過。
+		{
+			name:       "reply_not_contains 沒出現禁語時通過",
+			asserts:    []eval.Assertion{{Kind: eval.AssertReplyNotContains, Value: "沒有允許任何"}},
+			result:     eval.RunResult{Reply: "config.yaml 不在 file.allowed_paths 白名單中。"},
+			wantPassed: true,
+		},
+		{
+			name:        "reply_not_contains 出現禁語時不通過",
+			asserts:     []eval.Assertion{{Kind: eval.AssertReplyNotContains, Value: "沒有允許任何"}},
+			result:      eval.RunResult{Reply: "白名單沒有允許任何路徑。"},
+			wantPassed:  false,
+			wantReasons: []string{"沒有允許任何"},
+		},
+		{
+			// **空回應讓這條斷言通過，這是對的，但要寫下來。** 一個什麼都沒說的回應
+			// 確實沒說禁語，可是它本身正是 issue #60 那個缺陷的形態。這條斷言不負責
+			// 抓空回應，別讓後來的人以為它涵蓋了。
+			name:       "reply_not_contains 對空回應通過（它不負責抓空回應）",
+			asserts:    []eval.Assertion{{Kind: eval.AssertReplyNotContains, Value: "沒有允許任何"}},
+			result:     eval.RunResult{Reply: ""},
+			wantPassed: true,
+		},
+		{
+			name: "多條 reply_not_contains 各自獨立判，命中幾條就列幾條",
+			asserts: []eval.Assertion{
+				{Kind: eval.AssertReplyNotContains, Value: "沒有設定任何"},
+				{Kind: eval.AssertReplyNotContains, Value: "沒有允許任何"},
+			},
+			result:      eval.RunResult{Reply: "白名單沒有允許任何路徑。"},
+			wantPassed:  false,
+			wantReasons: []string{"沒有允許任何"},
+		},
+		{
+			// 與 reply_contains 同一條理由：比的是子字串而非整段相等。禁語是一句話
+			// 裡的片語，本來就不會單獨構成整個回應。
+			name:        "reply_not_contains 比對是子字串，不是完全相等",
+			asserts:     []eval.Assertion{{Kind: eval.AssertReplyNotContains, Value: "沒有允許任何"}},
+			result:      eval.RunResult{Reply: "很抱歉，白名單沒有允許任何路徑，因此無法讀取。"},
+			wantPassed:  false,
+			wantReasons: []string{"沒有允許任何"},
+		},
+		{
+			name: "reply_contains 與 reply_not_contains 併用：說了該說的、也沒說禁語",
+			asserts: []eval.Assertion{
+				{Kind: eval.AssertReplyContains, Value: "file.allowed_paths"},
+				{Kind: eval.AssertReplyNotContains, Value: "沒有允許任何"},
+			},
+			result:     eval.RunResult{Reply: "config.yaml 不在 file.allowed_paths 白名單中。"},
+			wantPassed: true,
+		},
+		{
+			// **這一格是 issue #58 的實際形態，也是新增這種斷言的理由。**
+			//
+			// 謊稱句本身就滿足 reply_contains（它確實提到了 file.allowed_paths），
+			// 所以在只有既有四種斷言的世界裡，這段回應是綠的——2026-09-04 的 A／B
+			// 取樣量到兩組各 3 輪「判卷通過但同時在謊稱」。擋得下它的只有這一種。
+			name: "issue #58 形態：謊稱句滿足 reply_contains，要靠 reply_not_contains 才擋得下",
+			asserts: []eval.Assertion{
+				{Kind: eval.AssertReplyContains, Value: "file.allowed_paths"},
+				{Kind: eval.AssertReplyNotContains, Value: "沒有允許任何"},
+			},
+			result:      eval.RunResult{Reply: "file.allowed_paths 白名單沒有允許任何路徑。"},
+			wantPassed:  false,
+			wantReasons: []string{"沒有允許任何"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -115,6 +195,50 @@ func TestGrade(t *testing.T) {
 			// 「原因」會讓一個通過的用例看起來像失敗。
 			if got.Passed && len(got.Failures) != 0 {
 				t.Errorf("通過卻帶了未通過原因: %v", got.Failures)
+			}
+		})
+	}
+}
+
+// TestGradeEmptyValueIsVacuous 從判卷這一側證明「value 是空字串」為什麼非在解析層
+// 擋下不可：strings.Contains 對空字串恆為真，於是 reply_contains **恆過**、
+// reply_not_contains **恆敗**——兩條都與回應內容完全無關，而那正是「等於沒測」。
+//
+// **這支的存在理由是診斷訊息不能只講一個方向**（Codex 審查抓到）。原本的訊息寫
+// 「純空白的斷言幾乎對任何回應都成立」，那對 reply_contains 為真、對
+// reply_not_contains 恰好相反；加第三種斷言時若照著同一個方向再寫一次，訊息會第二
+// 次講反。表格裡三段回應差異極大（空的、謊稱的、準確的），判卷結果卻一模一樣，
+// 這就是「與內容無關」最直接的證據。
+//
+// 與 case_test.go 那三格空白案例是一組：那邊釘「被擋掉了」，這邊釘「為什麼非擋不可」。分開
+// 寫的理由是問的問題不同——解析層的規則哪天放寬了，這裡量到的語義也不會變。
+func TestGradeEmptyValueIsVacuous(t *testing.T) {
+	replies := []struct {
+		name  string
+		reply string
+	}{
+		{"空回應", ""},
+		{"謊稱句", "file.allowed_paths 白名單沒有允許任何路徑。"},
+		{"準確句", "config.yaml 不在 file.allowed_paths 白名單中。"},
+	}
+	for _, r := range replies {
+		t.Run(r.name, func(t *testing.T) {
+			result := eval.RunResult{Reply: r.reply}
+
+			pos := eval.Grade(eval.Case{
+				Name:   "測試用例",
+				Assert: []eval.Assertion{{Kind: eval.AssertReplyContains, Value: ""}},
+			}, result)
+			if !pos.Passed {
+				t.Errorf("reply_contains 配空字串應恆過，卻不通過: %v", pos.Failures)
+			}
+
+			neg := eval.Grade(eval.Case{
+				Name:   "測試用例",
+				Assert: []eval.Assertion{{Kind: eval.AssertReplyNotContains, Value: ""}},
+			}, result)
+			if neg.Passed {
+				t.Error("reply_not_contains 配空字串應恆敗，卻通過了")
 			}
 		})
 	}

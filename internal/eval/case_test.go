@@ -91,17 +91,23 @@ assert:
 			wantErr: "no_such_kind",
 		},
 		{
-			// 四種斷言種類都要解析得出來（ticket #53 驗收條件）。指標型的值在 YAML 裡
+			// 全部斷言種類都要解析得出來（ticket #53 驗收條件）。指標型的值在 YAML 裡
 			// 不加引號寫成整數也要收得下——使用者不會想到 `value: 3` 與 `value: "3"`
 			// 有什麼差別，而多數人會寫前者。
-			name: "四種斷言種類都收得下",
+			//
+			// **加斷言種類時這一格要一起加。** 它宣稱涵蓋全部種類，漏一種的話缺口
+			// 看不出來——reply_not_contains 落地時這格就落後過一次，而同類的數量敘述
+			// 在其他幾處也各漂移過一次（位置列在 grade_test.go 的 TestGrade 註解）。
+			name: "五種斷言種類都收得下",
 			yaml: `
-name: 四種斷言
+name: 五種斷言
 profile: default
 task: 隨便
 assert:
   - kind: reply_contains
     value: 牛奶
+  - kind: reply_not_contains
+    value: 沒有允許任何
   - kind: tool_called
     value: read_file
   - kind: max_iterations
@@ -112,6 +118,7 @@ assert:
 			check: func(t *testing.T, got eval.Case) {
 				want := []eval.Assertion{
 					{Kind: eval.AssertReplyContains, Value: "牛奶"},
+					{Kind: eval.AssertReplyNotContains, Value: "沒有允許任何"},
 					{Kind: eval.AssertToolCalled, Value: "read_file"},
 					{Kind: eval.AssertMaxIterations, Value: "3"},
 					{Kind: eval.AssertMaxToolFailures, Value: "0"},
@@ -234,7 +241,15 @@ assert:
   - kind: reply_contains
     value: "   "
 `,
-			wantErr: "value",
+			// **斷言的是中性語義片段，不是「value」這個欄位名**（Codex 第二輪抓到）。
+			//
+			// 這則診斷曾經寫成「純空白的斷言幾乎對任何回應都成立」——那只對正向斷言
+			// 為真，負向的恰好相反。改成中性說法之後若沒有測試守著，同一個錯可以再犯
+			// 一次，而 TestGradeEmptyValueIsVacuous 守的是判卷語義、守不到診斷文字。
+			//
+			// 正向這格與下面兩格負向的斷言**同一個片段**：診斷若被寫回任何一個方向，
+			// 三格會一起轉紅。
+			wantErr: "與想檢查的性質無關",
 		},
 		{
 			name: "tool_called 的 value 是純空白要被拒",
@@ -247,6 +262,65 @@ assert:
     value: "\t"
 `,
 			wantErr: "value",
+		},
+		{
+			name: "reply_not_contains 能解析（issue #58 的量測缺口）",
+			yaml: `
+name: 被拒之後不得謊稱白名單是空的
+profile: eval
+task: 讀 config.yaml
+assert:
+  - kind: reply_contains
+    value: file.allowed_paths
+  - kind: reply_not_contains
+    value: 沒有允許任何
+`,
+			check: func(t *testing.T, got eval.Case) {
+				if len(got.Assert) != 2 {
+					t.Fatalf("斷言數 = %d，期望 2", len(got.Assert))
+				}
+				if got.Assert[1].Kind != eval.AssertReplyNotContains {
+					t.Errorf("Assert[1].Kind = %q，期望 %q", got.Assert[1].Kind, eval.AssertReplyNotContains)
+				}
+				if got.Assert[1].Value != "沒有允許任何" {
+					t.Errorf("Assert[1].Value = %q", got.Assert[1].Value)
+				}
+			},
+		},
+		{
+			// **空字串是這條規則最極端的一格，兩個方向的壞法在這裡都到頂。**
+			//
+			// strings.Contains(任何字串, "") 恆為真，所以 reply_contains 恆過、
+			// reply_not_contains 恆敗——兩條都完全不取決於回應內容（Codex 審查抓到
+			// 原本的診斷只描述了前者）。TestGradeEmptyValueIsVacuous 從判卷那一側
+			// 把這個語義釘住，說明這裡為什麼非擋不可。
+			name: "reply_not_contains 的 value 是空字串要被拒",
+			yaml: `
+name: 空字串禁語
+profile: default
+task: 隨便
+assert:
+  - kind: reply_not_contains
+    value: ""
+`,
+			wantErr: "與想檢查的性質無關",
+		},
+		{
+			// **同一條判空規則，擋的是方向相反的兩種壞宣告。**
+			//
+			// reply_contains 配純空白幾乎永遠通過（回應大多含空白）——假綠燈；
+			// reply_not_contains 配純空白幾乎永遠不通過——假紅燈。兩者都是「什麼都
+			// 沒檢查」，所以都要在送出任何請求之前擋掉。
+			name: "reply_not_contains 的 value 是純空白要被拒",
+			yaml: `
+name: 空白禁語
+profile: default
+task: 隨便
+assert:
+  - kind: reply_not_contains
+    value: "  "
+`,
+			wantErr: "與想檢查的性質無關",
 		},
 		{
 			// **判空用 TrimSpace，比對用原值**，這兩件事必須分開。使用者寫的前後空白
