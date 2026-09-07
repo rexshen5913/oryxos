@@ -554,16 +554,43 @@ func TestEffectiveAllowedCommands(t *testing.T) {
 // 突變測試只試了「整段刪掉」，沒試「只留前半句」）。
 const whitelistNoListingMark = "不會在這裡列出"
 
+// whitelistHandoffMark 是三則白名單拒絕訊息共同要帶的**行動指示**：轉向使用者、說出
+// 你需要哪一個。
+//
+// **它與 whitelistNoListingMark 的差別是「禁令」與「指令」的差別，而那個差別是量出來的。**
+//
+// issue #36 在 shell 那則補的是指令（「不要逐一嘗試——請直接告訴使用者你需要哪一個
+// 命令」），真實 API 上 10 次 iteration 變 1 次。issue #58 在路徑那則補的是禁令
+// （「看不到允許的路徑不代表白名單是空的」），2026-09-04 的受控 A／B（24 輪、同批次、
+// 同模型、同用例，唯一的變數就是這則措辭）量到謊稱率 **4/12 對 4/12，Fisher exact
+// 雙尾 p = 1.000**——不是差異小，是兩組相同。
+//
+// 機制上說得通：模型走到最後一個 iteration 時必須**生出一段話**交代為什麼辦不到。
+// 禁令只告訴它「有一句話不能說」，沒有給它一句可以說的話，於是它照樣自己編一個解釋
+// 出來。同一批 A／B 另有一個未達顯著的反向訊號（走到第 3 次 Tool 呼叫 3/12 → 7/12，
+// p = 0.214）：「白名單可能有東西」對模型而言同時是「那再試試」。
+//
+// 所以第 6 項不是「再加一句話」，是**把下半句從一句陳述補成一個出口**。它同時是
+// core.ToolErrorSandbox 維護契約要求的東西——那一類的 Guidance() 刻意回空字串，下一步
+// 由每一則訊息自己帶，而路徑與 HTTP 兩則在這之前一步都沒帶。
+//
+// **標記取「告訴使用者你需要哪一個」而不是「告訴使用者」**：後者鬆到一句「請告訴使用者
+// 這件事辦不到」就矇混得過去，而那句話不構成任何出口——模型仍然得自己決定要說什麼，
+// 正是這個 bug 的成因。
+//
+// **它只是出口的下半，不能單獨存在**——上半是第 7 項的換路分支，見 wantRouting 欄。
+const whitelistHandoffMark = "告訴使用者你需要哪一個"
+
 // TestWhitelistDenialMessagesShareTheSameContract 是三則白名單拒絕訊息的**共同契約**
 // （issue #58）。
 //
 // **為什麼要一張橫跨三則的表，而不是各自補一支測試**：這個 bug 的根因不是某一則訊息
 // 寫錯了，是三則各寫各的、沒有任何東西在比對它們，於是它們漂成了三種品質——shell 那則
 // （issue #36 改過）三項齊備、路徑那則缺反推論句、HTTP 那則連「該往哪加」都沒有。
-// 逐則補測試修得掉這一次的症狀，修不掉「下一則又漂掉」的成因。表格驅動讓五項契約在
-// 三則上一次成立，日後新增第四種白名單時，加一列就得同時滿足全部五項。
+// 逐則補測試修得掉這一次的症狀，修不掉「下一則又漂掉」的成因。表格驅動讓七項契約在
+// 三則上一次成立，日後新增第四種白名單時，加一列就得同時滿足全部七項。
 //
-// 五項契約：
+// 七項契約：
 //
 //  1. **指名被拒的那一個**——沒有它，使用者不知道是什麼被擋了
 //  2. **說出要往 config.yaml 的哪一段加**——沒有它，使用者知道被擋了卻不知道怎麼放行
@@ -571,6 +598,10 @@ const whitelistNoListingMark = "不會在這裡列出"
 //  4. **那句話必須接上「所以⋯⋯」**（每列的 wantConsequence，措辭各自不同）
 //  5. **不洩漏白名單其餘條目**（issue #33 定案，不得回退）——訊息會落日誌、也會回填
 //     給 LLM，把其餘條目倒出來等於交出這個 Workspace 還允許什麼
+//  6. **那個「所以⋯⋯」必須是一道指令，不能只是一句禁令**——說出轉向使用者、指名你
+//     需要哪一個（whitelistHandoffMark），且同樣排在 no-listing 之後
+//  7. **轉向使用者之前要先回答「還能不能換一條路」**（每列的 wantRouting，措辭各自
+//     不同），且排在 whitelistHandoffMark 之前
 //
 // 第 3、4 項與第 5 項是**同一個張力的兩端**：不揭露內容（5）正是模型無從得知白名單
 // 狀態的原因，所以必須明說「看不到不等於沒有」（3），並說出因此該怎麼辦（4）。少了
@@ -588,8 +619,14 @@ const whitelistNoListingMark = "不會在這裡列出"
 // 但它們問的是不同的問題。
 //
 // 這也是 issue #58「只把『內容不會列出』搬進路徑那則、不搬防猜句」的正確讀法：不搬的
-// 是**措辭**，因為路徑那條路上模型本來就會 2 次後轉向使用者，加防猜是修沒壞的東西；
-// 但「要有下半句」這個結構是三則共有的，路徑那則的下半句是反推論句，不是防猜句。
+// 是**防猜的措辭**（「不要逐一嘗試其他命令名」），因為那句治的是候選近乎無限時逐一猜
+// 名字的形態；但「要有下半句」這個結構是三則共有的，而第 6 項進一步要求那個下半句得
+// 是一個**出口**。
+//
+// **第 6 項是 A／B 之後才長出來的，它推翻的是第 4 項當時的隱含假設**：第 4 項只要求
+// 「有下半句」，於是路徑與 HTTP 兩則各拿一句禁令就滿足了它，而受控 A／B 量到那種形狀
+// 對謊稱率 p = 1.000。第 4 項因此仍然成立、一個斷言都沒改，只是它不夠——推導見
+// whitelistHandoffMark。
 func TestWhitelistDenialMessagesShareTheSameContract(t *testing.T) {
 	tests := []struct {
 		name string
@@ -610,6 +647,26 @@ func TestWhitelistDenialMessagesShareTheSameContract(t *testing.T) {
 		// 回答同一個問題：「既然我看不到清單，那我該怎麼辦」。少了它，前半句只是一句
 		// 沒有出口的陳述，而模型會自己補一個出口出來。
 		wantConsequence string
+		// wantRouting 是「這次該做什麼」那半句的關鍵字，排在 wantHandoff 之前。
+		//
+		// **為什麼它必須存在，而且必須是每列各自的措辭**：core.ToolErrorKind.Guidance()
+		// 的措辭規則明訂每一段要回答兩件事——「這次該做什麼」與「什麼時候該停下來問人」
+		// ——而既有的每一段都是那個形狀（not_found：「用確認過的確切名字呼叫一次；沒有
+		// 辦法確認⋯⋯就直接告訴使用者」；timeout、upstream 同樣是「先換做法，或告訴
+		// 使用者」）。少了這半句，訊息就成了無條件的「去問人」。
+		//
+		// **無條件的「去問人」會與既有的恢復契約矛盾**：
+		// TestProcessReadFileSandboxRejectionRecovers 與
+		// TestProcessListDirSandboxRejectionRecovers 都把「被拒後改走已知可用的那條」
+		// 列為恢復行為。那兩支走固定回放，訊息措辭再怎麼改它們都綠——**所以這個矛盾
+		// 不會有任何測試轉紅，只會在真實模型上發生**（外部審查抓到，本輪第一版就是
+		// 無條件的）。
+		//
+		// **三則的答案不同，這正是它要按列宣告的原因**：路徑與 HTTP 有可換的路（條件是
+		// 「已經確認可用」），shell 沒有——#36 量到命令白名單被拒時候選近乎無限，
+		// 逐一猜就是那個病，所以它的答案是「不要逐一嘗試」。同一個問題，兩種合法的
+		// 回答，但**不回答不行**。
+		wantRouting string
 	}{
 		{
 			name: "檔案路徑",
@@ -623,6 +680,7 @@ func TestWhitelistDenialMessagesShareTheSameContract(t *testing.T) {
 			wantSetting:     "file.allowed_paths",
 			otherEntry:      "internal/private-notes",
 			wantConsequence: "不代表白名單是空的",
+			wantRouting:     "已經確認可用的路徑",
 		},
 		{
 			name: "shell 命令",
@@ -639,6 +697,10 @@ func TestWhitelistDenialMessagesShareTheSameContract(t *testing.T) {
 			// TestSandboxShellCommandErrorIsActionable 另有專屬斷言；這裡收的是
 			// 「no-listing 那句話必須有下半句」這個共通性質，不是 #36 的措辭本身。
 			wantConsequence: "不要逐一嘗試",
+			// shell 的換路答案與它的 consequence 是同一句，**這不是重複而是它的答案本身**：
+			// 命令白名單被拒時沒有「已經確認可用的替代命令」這種東西可換（#36 量到候選
+			// 近乎無限），所以它對「還能不能換一條路」的回答就是「不要逐一嘗試」。
+			wantRouting: "不要逐一嘗試",
 		},
 		{
 			name: "HTTP 域名",
@@ -652,6 +714,7 @@ func TestWhitelistDenialMessagesShareTheSameContract(t *testing.T) {
 			wantSetting:     "http.allowed_domains",
 			otherEntry:      "internal.example.org",
 			wantConsequence: "不代表白名單是空的",
+			wantRouting:     "已經確認可用的網域",
 		},
 	}
 
@@ -697,6 +760,34 @@ func TestWhitelistDenialMessagesShareTheSameContract(t *testing.T) {
 				t.Errorf("訊息 %q 的 %q 出現在 %q **之前**——"+
 					"下半句是結論子句，排到前面就不成話",
 					msg, tt.wantConsequence, whitelistNoListingMark)
+			}
+			// **第 7 項：轉向使用者之前要先回答「還能不能換一條路」。** 推導見
+			// wantRouting 欄。它與第 6 項是一句話的兩半，所以順序也要查——換路的
+			// 判斷排在轉向使用者之後就不成話，而且那個順序正好是「先做什麼、
+			// 什麼時候停」的順序。
+			atRouting := strings.Index(msg, tt.wantRouting)
+			if atRouting < 0 {
+				t.Errorf("訊息 %q 沒有回答「還能不能換一條路」（期望 %q）——"+
+					"無條件叫模型去問人，會與 TestProcessReadFileSandboxRejectionRecovers "+
+					"那一類「被拒後改走已知可用的那條」的恢復契約矛盾，而那些測試走固定回放、"+
+					"抓不到這個矛盾", msg, tt.wantRouting)
+			}
+
+			// **第 6 項：那個出口要是一道指令，不只是一句禁令。** 推導與量測見
+			// whitelistHandoffMark。順序同樣要查——它回答的是「所以你該做什麼」，
+			// 排到 no-listing 之前一樣不成話。
+			atHandoff := strings.Index(msg, whitelistHandoffMark)
+			if atHandoff < 0 {
+				t.Errorf("訊息 %q 沒有給出口 %q——只告訴模型不能怎麼推論，它到了最後一個 "+
+					"iteration 仍然得自己編一段話交代給使用者（issue #58 的 A／B：純禁令 p=1.000）",
+					msg, whitelistHandoffMark)
+			} else if atNoListing := strings.Index(msg, whitelistNoListingMark); atHandoff < atNoListing {
+				t.Errorf("訊息 %q 的 %q 出現在 %q **之前**——出口是結論子句，排到前面就不成話",
+					msg, whitelistHandoffMark, whitelistNoListingMark)
+			} else if atRouting >= 0 && atHandoff < atRouting {
+				t.Errorf("訊息 %q 的 %q 出現在 %q **之前**——"+
+					"「什麼時候停下來問人」排到「這次該做什麼」前面，等於那個條件從沒被提出過",
+					msg, whitelistHandoffMark, tt.wantRouting)
 			}
 			if strings.Contains(msg, tt.otherEntry) {
 				t.Errorf("訊息 %q 洩漏了白名單的其他條目 %q（issue #33 定案不得回退）",
