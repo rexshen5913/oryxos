@@ -1,6 +1,7 @@
 package eval_test
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -95,7 +96,7 @@ assert:
 			// 沒宣告的用例照原本的方式跑。
 			//
 			// 解析層做兩件事：收下宣告，並校驗**宣告本身**寫得合不合法（見下面四格）。
-			// 它不碰 Workspace 的實際配置——「這個 Workspace 放行了嗎」是 CheckRequires
+			// 它不碰 Workspace 的實際配置——「這個 Workspace 放行了嗎」是 CheckPreconditions
 			// 的事，那支是純函式，測得到。
 			name: "requires 能解析（issue #59）",
 			yaml: `
@@ -162,6 +163,14 @@ assert:
 		},
 		{
 			// assert 的欄位也一併受惠：KnownFields 對整棵樹生效。
+			//
+			// **原本這一格用的是 `values: 好`，issue #63 之後換掉。** 那時 values 還不是
+			// 欄位，所以它是個合格的「拼錯」例子；現在它是析取斷言的真欄位，同一份 YAML
+			// 走的是型別錯誤（str 塞不進 []string）而不是未知欄位——這一格量的東西會悄悄
+			// 換成另一件事。改用一個目前仍不存在的拼法，讓它繼續守原本那個性質。
+			//
+			// 「reply_contains 誤用 values」這個新出現的風險由另一格守（見下方
+			// reply_contains_any 那一組），涵蓋沒有減少，只是換了位置。
 			name: "assert 的欄位拼錯要被拒",
 			yaml: `
 name: 斷言欄位拼錯
@@ -169,9 +178,9 @@ profile: eval
 task: 隨便
 assert:
   - kind: reply_contains
-    values: 好
+    valu: 好
 `,
-			wantErr: "values",
+			wantErr: "valu",
 		},
 		{
 			// **拼錯的欄位被靜默忽略，是這個功能最糟的失敗形態**（Codex 審查抓到）：
@@ -243,7 +252,7 @@ assert:
 		},
 		{
 			// **一份寫壞的用例應該在送出任何請求之前被擋下**——與斷言種類、setup.files
-			// 路徑同一條規則。CheckRequires 那一側雖然也擋得住並給出正確方向的訊息，
+			// 路徑同一條規則。CheckPreconditions 那一側雖然也擋得住並給出正確方向的訊息，
 			// 但那要等到 RunCase；解析層更早，也更接近「寫壞」的語義。
 			name: "requires.paths 是絕對路徑要被拒",
 			yaml: `
@@ -322,7 +331,7 @@ assert:
 		},
 		{
 			// 寫了 requires: 但三段都空，與整段沒寫是同一件事——IsZero 要一致，否則
-			// CheckRequires 會對一份什麼都沒宣告的 requires 走完整條比對路徑。
+			// CheckPreconditions 會對一份什麼都沒宣告的 requires 走完整條比對路徑。
 			name: "requires 三段皆空等同沒寫",
 			yaml: `
 name: 空的 requires
@@ -376,8 +385,11 @@ assert:
 				if len(got.Assert) != len(want) {
 					t.Fatalf("斷言數 = %d，期望 %d", len(got.Assert), len(want))
 				}
+				// **用 DeepEqual 而不是 !=**：Assertion 自 issue #63 起帶著
+				// Values []string，切片讓結構體不再可比較。比對的語義不變——仍然是
+				// 「整條斷言與期望完全相同」，只是換了一種寫得出來的方式。
 				for i, w := range want {
-					if got.Assert[i] != w {
+					if !reflect.DeepEqual(got.Assert[i], w) {
 						t.Errorf("assert[%d] = %+v，期望 %+v", i, got.Assert[i], w)
 					}
 				}
@@ -744,6 +756,243 @@ assert:
 			name:    "不是合法的 YAML",
 			yaml:    "name: [未閉合",
 			wantErr: "解析",
+		},
+
+		// ── reply_contains_any 的宣告（issue #63）──
+		{
+			name: "reply_contains_any 用 values 宣告一組候選",
+			yaml: `
+name: 被拒之後轉向使用者
+profile: eval
+task: 讀 config.yaml
+assert:
+  - kind: reply_contains_any
+    values:
+      - 請你告訴我
+      - 麻煩你提供
+`,
+			check: func(t *testing.T, got eval.Case) {
+				if len(got.Assert) != 1 {
+					t.Fatalf("斷言數 = %d，期望 1", len(got.Assert))
+				}
+				a := got.Assert[0]
+				if a.Kind != eval.AssertReplyContainsAny {
+					t.Errorf("Kind = %q，期望 reply_contains_any", a.Kind)
+				}
+				if len(a.Values) != 2 || a.Values[0] != "請你告訴我" || a.Values[1] != "麻煩你提供" {
+					t.Errorf("Values = %q，期望兩個候選依序保留", a.Values)
+				}
+				// **Value 必須是空的。** 兩個欄位同時有值時判卷該比哪一個沒有答案，
+				// 所以互斥規則要從解析就成立。
+				if a.Value != "" {
+					t.Errorf("Value = %q，期望空（這一種只用 values）", a.Value)
+				}
+			},
+		},
+		{
+			// **values 只有一個元素是合法的。** 一個性質今天只觀察到一種說法、明天
+			// 補第二種，宣告的形狀不該跟著改。
+			name: "reply_contains_any 只有一個候選也合法",
+			yaml: `
+name: x
+profile: eval
+task: 隨便
+assert:
+  - kind: reply_contains_any
+    values: [需要你協助]
+`,
+			check: func(t *testing.T, got eval.Case) {
+				if len(got.Assert[0].Values) != 1 {
+					t.Errorf("Values = %q，期望一個候選", got.Assert[0].Values)
+				}
+			},
+		},
+		{
+			// 用錯欄位要在**送出任何請求之前**擋下，與其餘校驗同一條理由。
+			//
+			// **wantErr 要挑互斥那則訊息獨有的片語，不能只寫 "values"**（突變測試抓到）：
+			// 拿掉這道擋之後，同一份 YAML 會掉到下一道「values 不得為空清單」，而那則
+			// 訊息裡也有 values 這個字——測試照樣綠，卻分不出是哪一條規則在作用。
+			name: "reply_contains_any 誤用 value 單數欄位被擋下",
+			yaml: `
+name: x
+profile: eval
+task: 隨便
+assert:
+  - kind: reply_contains_any
+    value: 請你告訴我
+`,
+			wantErr: "改寫成 values 的一個項目",
+		},
+		{
+			// **真正的互斥情境：兩個欄位都有值。** 上一格靠「value 有值」觸發，這一格
+			// 連下一道空清單檢查都不會擋（values 非空、也沒有空白項），所以它是互斥
+			// 規則唯一的守門人——拿掉那道擋，這份宣告會被解析成功。
+			name: "reply_contains_any 同時寫了 value 與 values 被擋下",
+			yaml: `
+name: x
+profile: eval
+task: 隨便
+assert:
+  - kind: reply_contains_any
+    value: 請你告訴我
+    values: [麻煩你提供]
+`,
+			wantErr: "改寫成 values 的一個項目",
+		},
+		{
+			name: "reply_contains_any 的 values 是空清單時被擋下",
+			yaml: `
+name: x
+profile: eval
+task: 隨便
+assert:
+  - kind: reply_contains_any
+    values: []
+`,
+			wantErr: "values",
+		},
+		{
+			// 空白候選與 value 的空白值同一條規則：它不表達有效的比對條件。**而且
+			// 在析取裡更危險**——一個恆真的候選會讓整條斷言恆過，另外兩個真正想檢查
+			// 的候選就此失效，報表上還是綠的。
+			name: "reply_contains_any 的候選含空白項時被擋下",
+			yaml: `
+name: x
+profile: eval
+task: 隨便
+assert:
+  - kind: reply_contains_any
+    values:
+      - 請你告訴我
+      - "   "
+`,
+			wantErr: "空白",
+		},
+		{
+			// 反向的互斥：單值種類不得用 values。放行的話那組候選會被靜默忽略，
+			// 而 Value 是空的又會被空值規則擋下——訊息會指向錯的地方。
+			name: "reply_contains 誤用 values 複數欄位被擋下",
+			yaml: `
+name: x
+profile: eval
+task: 隨便
+assert:
+  - kind: reply_contains
+    values: [牛奶]
+`,
+			wantErr: "values",
+		},
+
+		// ── forbids：反向前置條件（issue #62）──
+		{
+			name: "forbids 宣告 commands 與 paths",
+			yaml: `
+name: 命令不在白名單時收斂
+profile: eval
+requires:
+  tools: [shell]
+forbids:
+  commands: [df]
+  paths: [config.yaml]
+task: 幫我看磁碟剩多少
+assert:
+  - kind: reply_contains
+    value: shell.allowed_commands
+`,
+			check: func(t *testing.T, got eval.Case) {
+				if len(got.Forbids.Commands) != 1 || got.Forbids.Commands[0] != "df" {
+					t.Errorf("Forbids.Commands = %q，期望 [df]", got.Forbids.Commands)
+				}
+				if len(got.Forbids.Paths) != 1 || got.Forbids.Paths[0] != "config.yaml" {
+					t.Errorf("Forbids.Paths = %q，期望 [config.yaml]", got.Forbids.Paths)
+				}
+				// requires 與 forbids 併存，互不影響。
+				if len(got.Requires.Tools) != 1 || got.Requires.Tools[0] != "shell" {
+					t.Errorf("Requires.Tools = %q，期望 [shell]", got.Requires.Tools)
+				}
+			},
+		},
+		{
+			name: "沒有 forbids 段也合法",
+			yaml: `
+name: x
+profile: eval
+task: 隨便
+assert:
+  - kind: reply_contains
+    value: x
+`,
+			check: func(t *testing.T, got eval.Case) {
+				if !got.Forbids.IsZero() {
+					t.Errorf("Forbids = %+v，期望零值", got.Forbids)
+				}
+			},
+		},
+		{
+			// 與 requires 同一條規則：拼錯的欄位被靜默忽略，整段反向前置條件就消失了，
+			// 而寫的人以為有保護。**forbids 這一側後果更重**——它是「必須不在」，
+			// 消失之後校驗恆過。
+			name: "forbids 拼錯的欄位被擋下",
+			yaml: `
+name: x
+profile: eval
+forbids:
+  command: [df]
+task: 隨便
+assert:
+  - kind: reply_contains
+    value: x
+`,
+			wantErr: "command",
+		},
+		{
+			// 頂層欄位拼錯同樣要擋。forbid 少一個 s 會讓整段被 yaml 忽略，
+			// 內層白名單一個字都攔不到。
+			name: "頂層 forbid 少一個 s 被擋下",
+			yaml: `
+name: x
+profile: eval
+forbid:
+  commands: [df]
+task: 隨便
+assert:
+  - kind: reply_contains
+    value: x
+`,
+			wantErr: "forbid",
+		},
+		{
+			// **不合法的條目在 forbids 這一側是「恆滿足」，不是「恆不滿足」。**
+			// 絕對路徑永遠不會被白名單放行，所以「它必須不在白名單」永遠成立——
+			// 一條什麼都沒檢查的宣告會安靜地一直綠燈。這是與 requires 相反的方向，
+			// 也是這裡非擋不可的理由。
+			name: "forbids.paths 是絕對路徑時被擋下",
+			yaml: `
+name: x
+profile: eval
+forbids:
+  paths: ["/etc/passwd"]
+task: 隨便
+assert:
+  - kind: reply_contains
+    value: x
+`,
+			wantErr: "絕對路徑",
+		},
+		{
+			name: "forbids.commands 帶路徑分隔符時被擋下",
+			yaml: `
+name: x
+profile: eval
+forbids:
+  commands: ["/usr/bin/df"]
+task: 隨便
+assert:
+  - kind: reply_contains
+    value: x
+`,
+			wantErr: "程式名",
 		},
 	}
 

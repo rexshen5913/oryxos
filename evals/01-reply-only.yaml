@@ -10,6 +10,9 @@
 #     tools:    Profile 的 tools 要涵蓋的 Tool 名
 #     paths:    file.allowed_paths 要涵蓋的路徑（子樹涵蓋，不是字面相等）
 #     commands: shell.allowed_commands 要涵蓋的程式名（字面完全相等）
+#   forbids:  **反向**前置條件，宣告什麼必須不在白名單（選填）
+#     paths:    file.allowed_paths 不得涵蓋的路徑（子樹涵蓋）
+#     commands: shell.allowed_commands 不得含有的程式名（字面完全相等）
 #   setup:
 #     files:  路徑 → 內容，建立在**乾淨的 Workspace** 裡（選填）
 #             路徑相對 Workspace 根，父目錄自動建立；絕對路徑與穿越出 Workspace
@@ -18,17 +21,25 @@
 #   assert:   至少一條（必填）
 #     - kind: reply_contains     value: 期望出現在最終回應的文字
 #     - kind: reply_not_contains value: **不**該出現在最終回應的文字
+#     - kind: reply_contains_any values: 一組候選，最終回應含**任一個**即通過
 #     - kind: tool_called        value: 期望被呼叫過的 Tool 名（呼叫失敗也算呼叫過）
 #     - kind: max_iterations     value: iteration 數上限（整數，不加引號即可）
 #     - kind: max_tool_failures  value: Tool 失敗次數上限（整數）
 #
-# 目前只有上面五種斷言，其餘種類會在解析時就被擋下。
+# 目前只有上面六種斷言，其餘種類會在解析時就被擋下。
+#
+# **reply_contains_any 用 values（複數），其餘五種用 value（單數），兩者互斥。**
 #
 # reply_not_contains 治的是 reply_contains 治不了的一類缺陷：回應說了該說的、指標
 # 也全在上限內，但裡面夾著一句錯誤的事實陳述（issue #58）。比對與 reply_contains
 # 一樣是**連續子字串**，用法見 evals/exploratory/07-path-denied-converges.yaml。
 #
-# 前三種回答「有沒有」，後兩種回答「多少」。後兩種存在的理由：一次退步的典型形態是
+# reply_contains_any 補的不是一種新的缺陷形態，而是一種**既有斷言表達不出來的性質形狀**：
+# 一個性質有多種可接受的說法。「向使用者索取下一步」就是這種——「請你告訴我」「麻煩你
+# 提供」「可以告訴我嗎」都算，而多條 reply_contains 是 AND 不是 OR，寫成那樣會要求每一
+# 種說法都出現（issue #63）。
+#
+# 前四種回答「有沒有」，後兩種回答「多少」。後兩種存在的理由：一次退步的典型形態是
 # 「答案還是對的，只是繞了比較久」——issue #36 那個 10→1 的 iteration 數若被改回去，
 # **ticket #53 落地當時僅有的兩種布林斷言**（reply_contains 與 tool_called）一條都不
 # 會轉紅。上限是**不得超過**，剛好等於上限算通過。
@@ -38,8 +49,10 @@
 # 看到的是「未呼叫 read_file」「回應不含牛奶」——那段輸出完全不提白名單，而真正的原因
 # 是一行配置。這條用例本身不碰 Tool，所以整段省略；**選填的意思就是省略要能跑**。
 #
-# **目前只表達得了正向（「要有」）。** 06 那條測「命令不在白名單時收斂」的用例，需要的
-# 是「df **不能**在白名單」，這裡宣告不出來——反向前置條件另開票。
+# **反向由 forbids 表達**（issue #62）：06 那條測「命令不在白名單時收斂」的用例，需要的
+# 是「df **不能**在白名單」。失敗形態與正向相同、方向相反——有人把 df 加進白名單之後跑
+# 評測，shell 執行成功、回應自然不提白名單，一切看起來都正常，只是這條用例量的東西已經
+# 不存在了。兩個方向的落差一次說完，不必修一項、再跑一次、才看到第二項。
 #
 # 每次執行會把每條用例的指標追加一行到 evals/history.jsonl（用 --history 換位置，
 # 傳空字串則不寫）。追加而非覆寫，所以同一條用例跨多次執行的 iteration 數比得出來。

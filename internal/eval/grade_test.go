@@ -10,9 +10,10 @@ import (
 // TestGrade 是本票的主要測試面：判卷吃「用例宣告 ＋ 一次執行的結果摘要」，吐「通過
 // 與否 ＋ 未通過原因」，**完全不碰 Provider**。
 //
-// **三種布林斷言**（reply_contains、reply_not_contains、tool_called）各自涵蓋通過與
-// 失敗；兩種指標型斷言在 TestGradeMetricAssertions。斷言對象是判卷的回傳值，不是它
-// 內部怎麼比對——把 strings.Contains 換成別的比法而語義不變時，這張表該保持綠色。
+// **四種布林斷言**（reply_contains、reply_not_contains、reply_contains_any、
+// tool_called）各自涵蓋通過與失敗；兩種指標型斷言在 TestGradeMetricAssertions。
+// 斷言對象是判卷的回傳值，不是它內部怎麼比對——把 strings.Contains 換成別的比法而
+// 語義不變時，這張表該保持綠色。
 //
 // **加斷言種類時這段敘述要一起改。** 它宣告了這張表涵蓋多少種，落後時看不出缺口。
 //
@@ -175,6 +176,79 @@ func TestGrade(t *testing.T) {
 			wantPassed:  false,
 			wantReasons: []string{"沒有允許任何"},
 		},
+
+		// ── reply_contains_any（issue #63 的析取缺口）──
+		//
+		// 它治的是 reply_contains 表達不了的一類性質：**一個性質有多種可接受的說法**。
+		// 「向使用者索取下一步」就是這種——「請你告訴我」「麻煩你提供」「可以告訴我嗎」
+		// 都算，而多條 reply_contains 是 AND 不是 OR，只會更嚴格。
+		{
+			name: "reply_contains_any 命中第一個候選即通過",
+			asserts: []eval.Assertion{{
+				Kind:   eval.AssertReplyContainsAny,
+				Values: []string{"請你告訴我", "麻煩你提供"},
+			}},
+			result:     eval.RunResult{Reply: "請你告訴我要讀哪一個路徑。"},
+			wantPassed: true,
+		},
+		{
+			// **命中最後一個候選也要通過。** 只驗第一個的話，一個「找到就回傳」寫成
+			// 「只看 Values[0]」的實作會通過測試——那是這種斷言最容易寫錯的地方。
+			name: "reply_contains_any 命中最後一個候選即通過",
+			asserts: []eval.Assertion{{
+				Kind:   eval.AssertReplyContainsAny,
+				Values: []string{"請你告訴我", "麻煩你提供", "需要你協助"},
+			}},
+			result:     eval.RunResult{Reply: "我看不到白名單的內容，所以需要你協助。"},
+			wantPassed: true,
+		},
+		{
+			name: "reply_contains_any 全部候選都落空時不通過",
+			asserts: []eval.Assertion{{
+				Kind:   eval.AssertReplyContainsAny,
+				Values: []string{"請你告訴我", "麻煩你提供"},
+			}},
+			result:     eval.RunResult{Reply: "config.yaml 不在白名單中。"},
+			wantPassed: false,
+			// 這張表的 wantReasons 是「一條失敗對一個片段」，所以這裡只列一個。
+			// **全部候選都要出現在訊息裡**由 TestGradeReplyContainsAnyListsEveryCandidate
+			// 守——那是另一個性質，分開量。
+			wantReasons: []string{"請你告訴我"},
+		},
+		{
+			// 單一候選時它與 reply_contains 等價。留這一格是因為 values 只有一個元素
+			// 是合法宣告，而「至少命中一個」在 n=1 時的邊界最容易被實作漏掉。
+			name: "reply_contains_any 單一候選時等同 reply_contains",
+			asserts: []eval.Assertion{{
+				Kind:   eval.AssertReplyContainsAny,
+				Values: []string{"需要你協助"},
+			}},
+			result:     eval.RunResult{Reply: "需要你協助。"},
+			wantPassed: true,
+		},
+		{
+			// **空回應必須不通過。** 這與 reply_not_contains 那一格恰好相反，理由也
+			// 相反：那一種問「不該說的說了沒」，空回應確實沒說；這一種問「該說的說了
+			// 沒」，空回應什麼都沒說。它因此是一條地板斷言（issue #60 的形態擋得下）。
+			name: "reply_contains_any 對空回應不通過",
+			asserts: []eval.Assertion{{
+				Kind:   eval.AssertReplyContainsAny,
+				Values: []string{"請你告訴我"},
+			}},
+			result:      eval.RunResult{Reply: ""},
+			wantPassed:  false,
+			wantReasons: []string{"請你告訴我"},
+		},
+		{
+			// 比對與另外兩種文字斷言同源：連續子字串，不是整段相等。
+			name: "reply_contains_any 比對是子字串，不是完全相等",
+			asserts: []eval.Assertion{{
+				Kind:   eval.AssertReplyContainsAny,
+				Values: []string{"需要你協助"},
+			}},
+			result:     eval.RunResult{Reply: "白名單看不到，因此需要你協助決定下一步。"},
+			wantPassed: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -197,6 +271,79 @@ func TestGrade(t *testing.T) {
 				t.Errorf("通過卻帶了未通過原因: %v", got.Failures)
 			}
 		})
+	}
+}
+
+// TestGradeReplyContainsAnyIsDisjunction 釘住 issue #63 的核心語義：**這一種是 OR，
+// 而多條 reply_contains 是 AND**。
+//
+// 這支的存在理由是那個缺口本來的形狀：用例想驗「向使用者索取下一步」，但那個性質有
+// 多種說法。用兩條 reply_contains 表達會變成「兩種說法都要出現」——一段只用其中一種
+// 說法的正確回應會被判紅。同一份回應在兩種寫法下結果相反，這是最直接的證據。
+func TestGradeReplyContainsAnyIsDisjunction(t *testing.T) {
+	reply := eval.RunResult{Reply: "請你告訴我要讀哪一個路徑。"}
+	values := []string{"請你告訴我", "麻煩你提供"}
+
+	anyOf := eval.Grade(eval.Case{
+		Name:   "測試用例",
+		Assert: []eval.Assertion{{Kind: eval.AssertReplyContainsAny, Values: values}},
+	}, reply)
+	if !anyOf.Passed {
+		t.Errorf("reply_contains_any 應通過（命中其中一個），卻不通過: %v", anyOf.Failures)
+	}
+
+	// 同一份回應、同一組字面，寫成多條 reply_contains 就變成 AND。
+	andOf := eval.Grade(eval.Case{
+		Name: "測試用例",
+		Assert: []eval.Assertion{
+			{Kind: eval.AssertReplyContains, Value: values[0]},
+			{Kind: eval.AssertReplyContains, Value: values[1]},
+		},
+	}, reply)
+	if andOf.Passed {
+		t.Error("多條 reply_contains 應為 AND（第二條落空就不該通過），卻通過了")
+	}
+}
+
+// TestGradeReplyContainsAnyListsEveryCandidate 釘住失敗訊息的可用性：要說出**全部**
+// 候選，不是只說第一個。
+//
+// 與 tool_called 列出實際呼叫過哪些 Tool 是同一條理由。這一種更需要：一條斷言承載
+// 一組字面，看的人若只看到其中一個，會以為用例只接受那一種說法，而去改一個不需要改
+// 的地方。
+func TestGradeReplyContainsAnyListsEveryCandidate(t *testing.T) {
+	values := []string{"請你告訴我", "麻煩你提供", "需要你協助"}
+	got := eval.Grade(eval.Case{
+		Name:   "測試用例",
+		Assert: []eval.Assertion{{Kind: eval.AssertReplyContainsAny, Values: values}},
+	}, eval.RunResult{Reply: "config.yaml 不在白名單中。"})
+	if got.Passed {
+		t.Fatal("期望不通過")
+	}
+	for _, want := range values {
+		if !strings.Contains(got.Failures[0], want) {
+			t.Errorf("未通過原因 = %q，期望列出候選 %q", got.Failures[0], want)
+		}
+	}
+}
+
+// TestGradeReplyContainsAnyWithNoCandidatesFails 守住零候選的**方向**：判為不通過。
+//
+// 解析層擋得掉空的 values，但 Grade 是匯出的純函式，繞過解析直接建 Case 的呼叫端不該
+// 拿到綠燈——「至少命中一個」在零個候選上本來就不成立。
+//
+// **這一格量的是預設方向，不是那條解析規則。** 它與 TestGradeEmptyValueIsVacuous 成對：
+// 那邊證明 reply_contains 配空字串**恆過**（危險的方向，所以非在解析層擋下不可），
+// 這邊證明本種類的預設落在安全的那一邊。兩種斷言的預設方向相反，各自都要有證據。
+func TestGradeReplyContainsAnyWithNoCandidatesFails(t *testing.T) {
+	for _, reply := range []string{"", "請你告訴我要讀哪一個路徑。", "config.yaml 不在白名單中。"} {
+		got := eval.Grade(eval.Case{
+			Name:   "測試用例",
+			Assert: []eval.Assertion{{Kind: eval.AssertReplyContainsAny}},
+		}, eval.RunResult{Reply: reply})
+		if got.Passed {
+			t.Errorf("零候選對回應 %q 應判為不通過，卻通過了", reply)
+		}
 	}
 }
 

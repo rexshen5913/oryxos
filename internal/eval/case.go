@@ -29,6 +29,12 @@ const (
 	// 它治的是 reply_contains 治不了的一類缺陷：回應說了該說的、指標也全在上限內，
 	// 但裡面夾著一句錯誤的事實陳述（issue #58）。那種回應對既有四種斷言全綠。
 	AssertReplyNotContains AssertionKind = "reply_not_contains"
+	// AssertReplyContainsAny 斷言最終回應含有一組候選字面中的**至少一個**（issue #63）。
+	//
+	// 它治的是 reply_contains 表達不了的一類性質：**一個性質有多種可接受的說法**。
+	// 「向使用者索取下一步」就是這種——多條 reply_contains 是 AND 不是 OR，寫成那樣
+	// 會要求每一種說法都出現，一段只用其中一種說法的正確回應反而被判紅。
+	AssertReplyContainsAny AssertionKind = "reply_contains_any"
 	// AssertToolCalled 斷言某個 Tool 被呼叫過（不論那次執行成功與否）。
 	AssertToolCalled AssertionKind = "tool_called"
 	// AssertMaxIterations 斷言 iteration 數不超過某個上限。
@@ -39,7 +45,7 @@ const (
 
 // knownAssertionKinds 是目前支援的全部斷言種類。
 //
-// **前三種是布林問題（有沒有），後兩種是程度問題（多少）。**
+// **前四種是布林問題（有沒有），後兩種是程度問題（多少）。**
 //
 // 後兩種由 ticket #53 加入，理由是一次退步的典型形態是「答案還是對的，只是繞了比較
 // 久」——issue #36 那個 10→1 的改善若被改回去，當時僅有的兩種布林斷言一條都不會轉紅。
@@ -48,8 +54,17 @@ const (
 // 對、指標也在上限內，但裡面夾著一句錯誤的事實陳述**（issue #58）。它與 reply_contains
 // 不是互為反面而已——2026-09-04 的 A／B 取樣量到兩組各 3 輪「判卷通過但同時在謊稱」，
 // 那些回應正是因為提到了正確的欄位名而滿足 reply_contains。
+// reply_contains_any 是第四種布林斷言（issue #63），它補的不是一種新的缺陷形態，而是
+// **一種既有斷言表達不出來的性質形狀**：一個性質有多種可接受的說法。用例 07 的名字是
+// 「路徑不在白名單時停下來**告知使用者**」，而它的斷言驗證不了後半句——「請你告訴我」
+// 「麻煩你提供」「可以告訴我嗎」都算 handoff，多條 reply_contains 卻是 AND。
+//
+// 落地前試過用單一字面當代理，兩次都被一句反例打穿（外部審查）：`reply_contains: 請你`
+// 被「請你注意：config.yaml 不在白名單中」打穿，退到 `請` 一樣。代理因此移除而非再換
+// 一個更長的字——留著一個守不住的斷言比沒有更糟，理由就是上面 AssertionKind 那段。
 var knownAssertionKinds = []AssertionKind{
-	AssertReplyContains, AssertReplyNotContains, AssertToolCalled, AssertMaxIterations, AssertMaxToolFailures,
+	AssertReplyContains, AssertReplyNotContains, AssertReplyContainsAny,
+	AssertToolCalled, AssertMaxIterations, AssertMaxToolFailures,
 }
 
 // isMetricKind 回答這一種斷言的值是不是一個數字上限。
@@ -80,9 +95,16 @@ func parseLimit(value string) (int, error) {
 }
 
 // Assertion 是用例的一條斷言。
+//
+// **Value 與 Values 互斥**：單值種類用前者，析取種類（reply_contains_any）用後者。
+// 兩個欄位而不是一個 []string 吃下所有種類，是為了讓宣告的形狀說出斷言的語義——
+// `value: 牛奶` 與 `values: [牛奶]` 讀起來是兩件事，前者說「就是這個字」，後者說
+// 「這幾個之中任一個」。互斥規則在 validate() 落實。
 type Assertion struct {
 	Kind  AssertionKind `yaml:"kind"`
 	Value string        `yaml:"value"`
+	// Values 是析取型斷言的候選字面，至少命中一個即通過。
+	Values []string `yaml:"values"`
 }
 
 // Setup 是執行前要在乾淨的 Workspace 裡佈置的初始狀態。
@@ -106,16 +128,20 @@ type Case struct {
 	// PrepareWorkspace——連同 Setup.Files 的佈置——才校驗 requires。這樣接是因為校驗
 	// 需要的 cfg 與 Profile 都從**複製後**的 Workspace 載入，而複製檔案不花錢；
 	// issue #59 要的那條線是「在送出任何請求之前」，它在更後面。
-	Requires Requires    `yaml:"requires"`
-	Setup    Setup       `yaml:"setup"`
-	Task     string      `yaml:"task"`
-	Assert   []Assertion `yaml:"assert"`
+	Requires Requires `yaml:"requires"`
+	// Forbids 是對 Workspace 環境的**反向**前置條件，選填（issue #62）。
+	//
+	// 緊接 Requires，因為兩者是同一件事的兩個方向、由同一支函式一起校驗。
+	Forbids Forbids     `yaml:"forbids"`
+	Setup   Setup       `yaml:"setup"`
+	Task    string      `yaml:"task"`
+	Assert  []Assertion `yaml:"assert"`
 }
 
 // caseFields 是用例支援的全部頂層欄位，**與 Case 的 yaml tag 一一對應**，只用於錯誤
 // 訊息。實際的把關由 KnownFields 做，這裡漏列只會讓訊息少一項、不會放行任何東西
 // ——與 requiresFields 那份（漏列會擋下合法欄位）的風險方向不同。
-var caseFields = []string{"name", "profile", "requires", "setup", "task", "assert"}
+var caseFields = []string{"name", "profile", "requires", "forbids", "setup", "task", "assert"}
 
 // ParseCase 解析並校驗一份用例宣告。source 只用於錯誤訊息——用例目錄裡放十份 YAML
 // 時，一句沒有檔名的「缺 task」等於要人一份一份翻。
@@ -219,6 +245,9 @@ func (c Case) validate() error {
 	if err := c.Requires.validate(); err != nil {
 		return err
 	}
+	if err := c.Forbids.validate(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.Task) == "" {
 		return fmt.Errorf("task 必填（送給 Agent 的訊息）")
 	}
@@ -239,6 +268,32 @@ func (a Assertion) validate() error {
 	}
 	if !isKnownKind(a.Kind) {
 		return fmt.Errorf("不認得的斷言種類 %q（目前支援 %s）", a.Kind, joinKinds())
+	}
+	// **Value 與 Values 互斥，兩個方向都要擋。**
+	//
+	// 兩個欄位同時有值時，判卷該比哪一個沒有答案；而只要有一個方向沒擋，被忽略的那個
+	// 欄位就是一段「寫了卻沒有作用」的宣告——與拼錯欄位被靜默忽略是同一種失敗。
+	if a.Kind == AssertReplyContainsAny {
+		if a.Value != "" {
+			return fmt.Errorf("%s 用 values（複數）宣告一組候選，不用 value；把 %q 改寫成 values 的一個項目",
+				a.Kind, a.Value)
+		}
+		if len(a.Values) == 0 {
+			return fmt.Errorf("%s 的 values 必填且至少要有一個候選（零個候選時「至少命中一個」恆不成立，這條用例會永遠紅燈，而原因從輸出看不出來）", a.Kind)
+		}
+		// 空白候選與單值那一側同一條規則（判空用 TrimSpace，比對用原值），**但在析取
+		// 裡後果更重**：strings.Contains 對空字串恆真，一個空白候選會讓整條斷言恆過，
+		// 旁邊那些真正想檢查的候選就此全部失效——而報表上是綠的。
+		for i, v := range a.Values {
+			if strings.TrimSpace(v) == "" {
+				return fmt.Errorf("%s 的 values[%d] 不得為空白（空白候選不表達有效的比對條件，而在「至少命中一個」裡它會讓整條斷言恆過，其餘候選等於沒測）", a.Kind, i)
+			}
+		}
+		return nil
+	}
+	if len(a.Values) != 0 {
+		return fmt.Errorf("%s 用 value（單數）宣告要比對的內容，不吃 values；需要「多選一」請改用 %s",
+			a.Kind, AssertReplyContainsAny)
 	}
 	// **判空用 TrimSpace，比對用原值**，這兩件事要分開（Codex 審查抓到）。
 	//

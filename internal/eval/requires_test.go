@@ -9,18 +9,25 @@ import (
 	"github.com/rexshen5913/oryxos/internal/eval"
 )
 
-// TestCheckRequires 是前置條件校驗的主要測試面（issue #59）。
+// TestCheckPreconditions 是前置條件校驗的主要測試面（issue #59 的 requires ＋
+// issue #62 的 forbids）。
 //
 // **它是純函式，這是刻意的。** 校驗的時機在 RunCase 裡——而 run.go 沒有自動化測試
 // （憲法 4.4，它會呼叫真實 Provider）。判斷邏輯全部搬到這一側，那邊只剩一行沒有分支
 // 的呼叫，與 ticket #50 把判卷切成純函式是同一條理由。
 //
+// **兩個方向合在同一支函式而不是各自一支**，也是為了這條理由：兩類落差要一次說完，
+// 而合併的邏輯若放進 run.go 就落在測不到的那一側。函式因此改名——它不再只檢查
+// requires。
+//
 // 三類前置條件的比對語義刻意不同，各自有格：tools 與 commands 是字面完全相等，
-// paths 是**子樹涵蓋**——見「allowed_paths 是 . 時涵蓋一切」那一格。
-func TestCheckRequires(t *testing.T) {
+// paths 是**子樹涵蓋**——見「allowed_paths 是 . 時涵蓋一切」那一格。反向的 paths
+// 尤其需要子樹涵蓋，見「forbids.paths 被 . 涵蓋」那一格。
+func TestCheckPreconditions(t *testing.T) {
 	tests := []struct {
 		name     string
 		req      eval.Requires
+		forb     eval.Forbids
 		env      eval.Environment
 		wantErr  bool
 		wantMsgs []string // 錯誤訊息裡都該出現的片段
@@ -181,11 +188,105 @@ func TestCheckRequires(t *testing.T) {
 			wantErr:  true,
 			wantMsgs: []string{"notes"},
 		},
+
+		// ── forbids：反向前置條件（issue #62）──
+		//
+		// 它治的是與 requires 相同形態、方向相反的失敗：測「被拒之後怎麼收斂」的用例，
+		// 在白名單被**放寬**時會安靜地量錯東西——Tool 成功了、回應自然不提白名單，
+		// 一切看起來都正常，只是這條用例量的東西已經不存在了。
+		{
+			name:    "沒有宣告任何 forbids 時通過",
+			forb:    eval.Forbids{},
+			env:     eval.Environment{ProfileName: "eval", AllowedCommands: []string{"df"}},
+			wantErr: false,
+		},
+		{
+			name: "commands 不在白名單時通過（這正是用例要的前提）",
+			forb: eval.Forbids{Commands: []string{"df"}},
+			env: eval.Environment{
+				ProfileName:     "eval",
+				AllowedCommands: []string{"wc", "ls"},
+			},
+			wantErr: false,
+		},
+		{
+			// 錯誤要指名**是哪一項、在哪個檔案的哪一段、以及該往哪個方向改**。
+			// 反向這一側的修法是「移除」而不是「加進」，訊息不能沿用正向那句。
+			name: "commands 出現在白名單時指名該從哪裡移除",
+			forb: eval.Forbids{Commands: []string{"df"}},
+			env: eval.Environment{
+				ProfileName:     "eval",
+				AllowedCommands: []string{"wc", "df"},
+			},
+			wantErr:  true,
+			wantMsgs: []string{"df", "shell.allowed_commands", "移除"},
+		},
+		{
+			name: "paths 不在白名單涵蓋範圍時通過",
+			forb: eval.Forbids{Paths: []string{"config.yaml"}},
+			env: eval.Environment{
+				ProfileName:  "eval",
+				AllowedPaths: []string{"notes"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "paths 字面出現在白名單時不通過",
+			forb: eval.Forbids{Paths: []string{"config.yaml"}},
+			env: eval.Environment{
+				ProfileName:  "eval",
+				AllowedPaths: []string{"notes", "config.yaml"},
+			},
+			wantErr:  true,
+			wantMsgs: []string{"config.yaml", "file.allowed_paths", "移除"},
+		},
+		{
+			// **這一格是 forbids.paths 非走子樹涵蓋不可的理由。**
+			//
+			// 白名單寫 `["."]` 時 config.yaml 是被放行的，但字面比對看不出來——
+			// 清單裡沒有 "config.yaml" 這個字串。字面比對會判成「不在白名單，前提
+			// 成立」，而那條用例接著會量到一個**成功讀到檔案**的執行，判卷全紅卻不
+			// 指向原因。這正是 issue #62 要擋的形態。
+			name: "paths 被 allowed_paths 的 . 涵蓋時不通過（字面比對看不出來）",
+			forb: eval.Forbids{Paths: []string{"config.yaml"}},
+			env: eval.Environment{
+				ProfileName:  "eval",
+				AllowedPaths: []string{"."},
+			},
+			wantErr:  true,
+			wantMsgs: []string{"config.yaml", "file.allowed_paths"},
+		},
+		{
+			// 上層目錄被放行也算涵蓋，與 requires.paths 的子樹語義同源。
+			name: "paths 的上層目錄在白名單時不通過",
+			forb: eval.Forbids{Paths: []string{"notes/todo.md"}},
+			env: eval.Environment{
+				ProfileName:  "eval",
+				AllowedPaths: []string{"notes"},
+			},
+			wantErr:  true,
+			wantMsgs: []string{"notes/todo.md"},
+		},
+		{
+			// **兩個方向的落差要一次說完**（與「每一項都檢查」同一條理由）。分兩支
+			// 函式各自回錯誤的話，使用者修完 requires、再跑一次、才看到 forbids ——
+			// 而這個校驗存在的目的正是省下那一次。
+			name: "requires 與 forbids 同時不滿足時一次列出兩者",
+			req:  eval.Requires{Tools: []string{"shell"}},
+			forb: eval.Forbids{Commands: []string{"df"}},
+			env: eval.Environment{
+				ProfileName:     "eval",
+				ProfileTools:    []string{"read_file"},
+				AllowedCommands: []string{"df"},
+			},
+			wantErr:  true,
+			wantMsgs: []string{"shell", "df", "requires.tools", "forbids.commands"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := eval.CheckRequires(tt.req, tt.env)
+			err := eval.CheckPreconditions(tt.req, tt.forb, tt.env)
 			if tt.wantErr && err == nil {
 				t.Fatalf("期望錯誤含 %v，卻通過了", tt.wantMsgs)
 			}
@@ -204,7 +305,7 @@ func TestCheckRequires(t *testing.T) {
 	}
 }
 
-// TestCheckRequiresImpossibleDeclarationPointsAtTheCase 守的是診斷的**方向**。
+// TestCheckPreconditionsImpossibleDeclarationPointsAtTheCase 守的是診斷的**方向**。
 //
 // 一個本身就不合法的 requires 條目——空值、絕對路徑、穿越出 Workspace 的路徑、含路徑
 // 分隔符的程式名——**永遠不會被任何 Workspace 配置滿足**。診斷若說「請加進
@@ -214,10 +315,11 @@ func TestCheckRequires(t *testing.T) {
 // **每一格的 env 都給到最寬鬆**：allowed_paths 是 `["."]`（涵蓋整個 Workspace）、
 // allowed_commands 直接含著宣告的那一項。連這樣都不通過，就證明問題不在配置——這是
 // 「無法收斂」最直接的證據，也是這支測試選擇這種 env 的理由。
-func TestCheckRequiresImpossibleDeclarationPointsAtTheCase(t *testing.T) {
+func TestCheckPreconditionsImpossibleDeclarationPointsAtTheCase(t *testing.T) {
 	tests := []struct {
 		name string
 		req  eval.Requires
+		forb eval.Forbids
 		env  eval.Environment
 	}{
 		{
@@ -258,10 +360,44 @@ func TestCheckRequiresImpossibleDeclarationPointsAtTheCase(t *testing.T) {
 			req:  eval.Requires{Commands: []string{"   "}},
 			env:  eval.Environment{ProfileName: "eval", AllowedCommands: []string{"   "}},
 		},
+
+		// ── forbids 這一側：不合法條目的後果是**恆滿足**，方向與 requires 相反 ──
+		//
+		// requires 的不合法條目永遠不被滿足，失敗是大聲的；forbids 的不合法條目永遠
+		// 滿足（絕對路徑本來就不會被白名單放行），於是一條什麼都沒檢查的宣告會安靜
+		// 地一直綠燈。**這一側更需要在解析層擋下**，理由比正向那側強。
+		//
+		// 每一格的 env 一樣給到最寬鬆：allowed_paths 是 `["."]`、allowed_commands
+		// 直接含著宣告的那一項——連這樣都要判成宣告有問題，才證明它與配置無關。
+		{
+			name: "forbids.paths 是絕對路徑",
+			forb: eval.Forbids{Paths: []string{"/etc/passwd"}},
+			env:  eval.Environment{ProfileName: "eval", AllowedPaths: []string{"."}},
+		},
+		{
+			name: "forbids.paths 穿越出 Workspace",
+			forb: eval.Forbids{Paths: []string{"../outside"}},
+			env:  eval.Environment{ProfileName: "eval", AllowedPaths: []string{"."}},
+		},
+		{
+			name: "forbids.paths 是空字串",
+			forb: eval.Forbids{Paths: []string{""}},
+			env:  eval.Environment{ProfileName: "eval", AllowedPaths: []string{"."}},
+		},
+		{
+			name: "forbids.commands 含路徑分隔符",
+			forb: eval.Forbids{Commands: []string{"/usr/bin/df"}},
+			env:  eval.Environment{ProfileName: "eval", AllowedCommands: []string{"/usr/bin/df"}},
+		},
+		{
+			name: "forbids.commands 是純空白",
+			forb: eval.Forbids{Commands: []string{"   "}},
+			env:  eval.Environment{ProfileName: "eval", AllowedCommands: []string{"   "}},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := eval.CheckRequires(tt.req, tt.env)
+			err := eval.CheckPreconditions(tt.req, tt.forb, tt.env)
 			if err == nil {
 				t.Fatal("期望不通過，卻通過了")
 			}
@@ -327,6 +463,38 @@ func TestRequiresUnmarshalNullNode(t *testing.T) {
 		Paths:    []string{"notes"},
 		Commands: []string{"wc"},
 	}
+	if err := stale.UnmarshalYAML(node.Content[0]); err != nil {
+		t.Fatalf("null 節點應等同沒寫，卻回錯誤: %v", err)
+	}
+	if !stale.IsZero() {
+		t.Errorf("null 節點應清空 receiver，卻殘留 %+v", stale)
+	}
+}
+
+// TestForbidsUnmarshalNullNode 守住 Forbids 對 null 節點的處理：等同沒寫。
+//
+// 理由與 TestRequiresUnmarshalNullNode 完全相同（那支的說明是這條規則的完整推導），
+// 這裡不重複。**但後果在這一側更重**：null 若沒有清空 receiver，殘留的反向條件會
+// 讓校驗去檢查一份不屬於這份用例的宣告——而 forbids 的滿足態是「不在白名單」，
+// 一份殘留的宣告很容易剛好滿足，於是靜默放行。
+func TestForbidsUnmarshalNullNode(t *testing.T) {
+	var node yaml.Node
+	if err := yaml.Unmarshal([]byte("null"), &node); err != nil {
+		t.Fatalf("準備 null 節點: %v", err)
+	}
+	if len(node.Content) != 1 {
+		t.Fatalf("期望一個內容節點，得到 %d", len(node.Content))
+	}
+
+	var forb eval.Forbids
+	if err := forb.UnmarshalYAML(node.Content[0]); err != nil {
+		t.Fatalf("null 節點應等同沒寫，卻回錯誤: %v", err)
+	}
+	if !forb.IsZero() {
+		t.Errorf("null 節點應解出空宣告，得到 %+v", forb)
+	}
+
+	stale := eval.Forbids{Paths: []string{"config.yaml"}, Commands: []string{"df"}}
 	if err := stale.UnmarshalYAML(node.Content[0]); err != nil {
 		t.Fatalf("null 節點應等同沒寫，卻回錯誤: %v", err)
 	}

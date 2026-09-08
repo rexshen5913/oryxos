@@ -81,6 +81,26 @@ func checkAssertion(a Assertion, result RunResult) string {
 		// 一句話讓它轉紅。
 		return fmt.Sprintf("%s：最終回應含有不該出現的 %q", a.Kind, a.Value)
 
+	case AssertReplyContainsAny:
+		// **至少命中一個就通過**——這一種是 OR，而多條 reply_contains 是 AND。
+		// 它治的是一個性質有多種說法的情形：用兩條 reply_contains 表達「向使用者索取
+		// 下一步」，會變成要求每一種說法都出現，一段只用其中一種說法的正確回應反而
+		// 被判紅（issue #63）。
+		for _, v := range a.Values {
+			if strings.Contains(result.Reply, v) {
+				return ""
+			}
+		}
+		// **零個候選落在這裡，判為不通過，這是刻意的。** 解析層擋得掉空的 values，但
+		// Grade 是匯出的純函式，繞過解析直接建 Case 的呼叫端不該拿到綠燈——而「至少命中
+		// 一個」在零個候選上本來就不成立。方向與 reply_contains 配空字串恰好相反（那一種
+		// 恆過，所以非在解析層擋下不可），這一種的預設方向是安全的那一邊。
+		//
+		// 原因要列出**全部**候選：一條斷言承載一組字面，只說其中一個會讓看的人以為
+		// 用例只接受那一種說法，而去改一個不需要改的地方（與 tool_called 列出實際
+		// 呼叫過哪些 Tool 同一條理由）。
+		return fmt.Sprintf("%s：最終回應不含以下任何一個 %q", a.Kind, a.Values)
+
 	case AssertToolCalled:
 		// 完全相等而非前綴：read 不得因為 read_file 被呼叫過就算通過，否則一個手誤
 		// 的斷言會安靜地一直綠燈。

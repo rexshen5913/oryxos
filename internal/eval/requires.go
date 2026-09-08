@@ -97,8 +97,8 @@ func (r Requires) IsZero() bool {
 // 程式名。這些條目**不論 Workspace 怎麼配置都不會滿足**，所以在解析層就該擋下，與斷言
 // 種類、setup.files 路徑同一條規則（一份寫壞的用例應該在送出任何請求之前被擋下）。
 //
-// CheckRequires 那一側對同樣的輸入也會給出方向正確的訊息。**兩層不互相取代**：解析層
-// 讓正常使用永遠碰不到那種訊息，CheckRequires 那一道則是為了繞過解析直接呼叫的情形
+// CheckPreconditions 那一側對同樣的輸入也會給出方向正確的訊息。**兩層不互相取代**：解析
+// 層讓正常使用永遠碰不到那種訊息，CheckPreconditions 那一道則是為了繞過解析直接呼叫的情形
 // ——與 checkLimit 對 parseLimit 的處理同一條理由。
 func (r Requires) validate() error {
 	for i, name := range r.Tools {
@@ -106,7 +106,7 @@ func (r Requires) validate() error {
 			return fmt.Errorf("requires.tools[%d] 不得為空白（Tool 名要與 Profile 的 tools 字面相符）", i)
 		}
 	}
-	// 判準與 CheckRequires 同源：連涵蓋整個 Workspace 的白名單都放行不了，問題就在
+	// 判準與 CheckPreconditions 同源：連涵蓋整個 Workspace 的白名單都放行不了，問題就在
 	// 這個宣告本身。CheckFilePath 對三種不合法輸入的訊息已經說得出原因與修法。
 	permissive := tool.NewSandboxChecker(tool.SandboxConfig{AllowedPaths: []string{"."}})
 	for i, path := range r.Paths {
@@ -117,6 +117,94 @@ func (r Requires) validate() error {
 	for i, name := range r.Commands {
 		if len(tool.EffectiveAllowedCommands([]string{name})) == 0 {
 			return fmt.Errorf("requires.commands[%d] 的 %q 不是合法的程式名（不得是空白、也不得含路徑分隔符——寫 wc 而不是 /usr/bin/wc）", i, name)
+		}
+	}
+	return nil
+}
+
+// Forbids 是用例對 Workspace 環境的**反向**前置條件宣告（issue #62）。
+//
+// 它與 Requires 是同一個問題的兩個方向。專門測「被拒之後怎麼收斂」的用例，真正的前置
+// 條件是「這個東西**不在**白名單」——而 Requires 只表達得了正向：
+//
+//	evals/06-shell-denied-converges.yaml   需要 df   不在 shell.allowed_commands
+//	evals/exploratory/07-...yaml           需要 config.yaml 不在 file.allowed_paths
+//
+// **失敗形態與 issue #59 相同，只是方向相反**：有人把 df 加進白名單之後跑評測，shell
+// 執行成功、模型拿到磁碟資訊、回應裡自然不提白名單——一切都「正常」，只是這條用例量的
+// 東西已經不存在了。而它同樣是花完錢之後才看得到。
+//
+// **沒有 Tools 這一側**（issue #62 定案）：沒有實際用例需要「這個 Tool 必須不在
+// Profile」，依 YAGNI 不做。
+type Forbids struct {
+	// Paths 是 config.yaml 的 file.allowed_paths **不得涵蓋**的路徑。
+	Paths []string `yaml:"paths"`
+	// Commands 是 config.yaml 的 shell.allowed_commands **不得含有**的程式名。
+	Commands []string `yaml:"commands"`
+}
+
+// forbidsFields 是 forbids 段支援的全部欄位，**與 Forbids 的 yaml tag 一一對應**。
+// 顯式列出而不用反射取（憲法 2.3），與 requiresFields 同一條規則。
+var forbidsFields = []string{"paths", "commands"}
+
+// UnmarshalYAML 讓 forbids 的欄位成為一份**封閉的白名單**：不認得的欄位一律報錯。
+//
+// 理由與 Requires.UnmarshalYAML 相同（那裡有完整推導），**但這一側的後果更重**：
+// 正向宣告被靜默忽略時，校驗少了一道保護；反向宣告被靜默忽略時，校驗**恆過**——
+// 用例宣稱「df 不在白名單」這個性質成立，而它根本沒檢查過。
+func (f *Forbids) UnmarshalYAML(node *yaml.Node) error {
+	if node.Tag == "!!null" {
+		// 與 Requires 同一條理由：null 的語義是「沒有反向前置條件」，只 return nil
+		// 會讓舊值殘留。**這一側殘留更容易靜默放行**——forbids 的滿足態是「不在白名單」，
+		// 一份不屬於這份用例的殘留宣告很容易剛好滿足。
+		*f = Forbids{}
+		return nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("forbids 必須是一組欄位（支援 %s）", strings.Join(forbidsFields, "、"))
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		if !slices.Contains(forbidsFields, key) {
+			return fmt.Errorf("forbids 不認得的欄位 %q（支援 %s）；拼錯的欄位會讓整段反向前置條件被靜默略過，校驗因此恆過，所以一律擋下",
+				key, strings.Join(forbidsFields, "、"))
+		}
+	}
+	type plain Forbids
+	var p plain
+	if err := node.Decode(&p); err != nil {
+		return err
+	}
+	*f = Forbids(p)
+	return nil
+}
+
+// IsZero 回答這份反向宣告是不是完全沒有內容。
+func (f Forbids) IsZero() bool {
+	return len(f.Paths) == 0 && len(f.Commands) == 0
+}
+
+// validate 校驗這份反向宣告**本身**寫得合不合法——與 Workspace 的實際配置無關。
+//
+// 判準與 Requires.validate 完全相同（同樣三類不合法輸入），**但非擋不可的理由相反，
+// 而且更強**：
+//
+//	requires 的不合法條目 → 永遠不被滿足 → 每次執行都大聲失敗，看得見
+//	forbids 的不合法條目 → 永遠滿足     → 校驗恆過，一條什麼都沒檢查的宣告一直綠燈
+//
+// `forbids.paths: ["/etc/passwd"]` 就是後者：絕對路徑本來就不會被任何白名單放行，
+// 所以「它必須不在白名單」恆真。用例因此宣稱了一個它根本沒檢查的性質——那正是
+// AssertionKind 那段講的「比沒有評測更糟」。
+func (f Forbids) validate() error {
+	permissive := tool.NewSandboxChecker(tool.SandboxConfig{AllowedPaths: []string{"."}})
+	for i, path := range f.Paths {
+		if _, _, err := permissive.CheckFilePath(path); err != nil {
+			return fmt.Errorf("forbids.paths[%d]: %w", i, err)
+		}
+	}
+	for i, name := range f.Commands {
+		if len(tool.EffectiveAllowedCommands([]string{name})) == 0 {
+			return fmt.Errorf("forbids.commands[%d] 的 %q 不是合法的程式名（不得是空白、也不得含路徑分隔符——寫 df 而不是 /usr/bin/df）", i, name)
 		}
 	}
 	return nil
@@ -138,7 +226,7 @@ type Environment struct {
 	AllowedCommands []string
 }
 
-// CheckRequires 校驗 Workspace 環境是否滿足用例宣告的前置條件，滿足時回傳 nil。
+// CheckPreconditions 校驗 Workspace 環境是否滿足用例宣告的前置條件，滿足時回傳 nil。
 //
 // **每一項都檢查，不在第一項不滿足時就停**（與 Grade 同一條理由）。這個校驗雖然發生
 // 在花錢之前，但修一項、再跑一次、才看到第二項一樣消耗人。
@@ -154,8 +242,8 @@ type Environment struct {
 //     收出空的就代表它永遠不會出現在任何 effective 白名單裡），合法之後對原始白名單做
 //     字面完全相等的比對。第二步不再收斂一次：收斂只剔除條目、不修改保留下來的，對一個
 //     已確認合法的名字，收斂前後結果必然相同。
-func CheckRequires(req Requires, env Environment) error {
-	if req.IsZero() {
+func CheckPreconditions(req Requires, forb Forbids, env Environment) error {
+	if req.IsZero() && forb.IsZero() {
 		return nil
 	}
 
@@ -173,6 +261,11 @@ func CheckRequires(req Requires, env Environment) error {
 	if err := req.validate(); err != nil {
 		return fmt.Errorf("用例宣告的 requires 本身不合法：%w；這一項不論 Workspace 怎麼配置都不會滿足，請改寫用例 YAML", err)
 	}
+	// **反向這一側的診斷不能沿用上面那句。** 不合法的 forbids 條目不是「不會滿足」而是
+	// 「恆滿足」——照字面照抄會把方向講反，而使用者讀到的是一句與症狀對不上的說明。
+	if err := forb.validate(); err != nil {
+		return fmt.Errorf("用例宣告的 forbids 本身不合法：%w；這一項不論 Workspace 怎麼配置都恆滿足（它永遠不會被白名單放行），等於什麼都沒檢查，請改寫用例 YAML", err)
+	}
 
 	var unmet []string
 
@@ -185,7 +278,7 @@ func CheckRequires(req Requires, env Environment) error {
 	}
 
 	// SandboxChecker 是純字串判斷、不碰檔案系統（見 CheckFilePath 的說明），所以這裡
-	// 建一個來比對不會讓 CheckRequires 失去純函式的性質。
+	// 建一個來比對不會讓 CheckPreconditions 失去純函式的性質。
 	checker := tool.NewSandboxChecker(tool.SandboxConfig{
 		AllowedPaths:    env.AllowedPaths,
 		AllowedCommands: env.AllowedCommands,
@@ -214,11 +307,35 @@ func CheckRequires(req Requires, env Environment) error {
 		}
 	}
 
+	// ── 反向：宣告的東西**必須不在**白名單（issue #62）──
+	//
+	// 比對語義與正向那兩段同源，只是判斷取反：paths 走子樹涵蓋、commands 走字面相等。
+	// **paths 這一側尤其需要子樹涵蓋**：白名單寫 `["."]` 時 config.yaml 是被放行的，
+	// 而字面比對在清單裡找不到 "config.yaml" 這個字串，會誤判成「前提成立」——接著
+	// 那條用例會量到一個成功讀到檔案的執行，判卷全紅卻不指向原因。
+	for _, path := range forb.Paths {
+		if decision, _, _ := checker.CheckFilePath(path); decision == tool.SandboxAllow {
+			unmet = append(unmet, fmt.Sprintf(
+				"forbids.paths 的 %q 在 file.allowed_paths 的涵蓋範圍內（這條用例測的是路徑被拒之後的行為；請從 Workspace config.yaml 的 file.allowed_paths 移除它或涵蓋它的上層目錄）",
+				path))
+		}
+	}
+
+	// **與正向同一條理由用原值比對，不收斂**：入口的 validate 已確保 name 本身合法，
+	// 而 EffectiveAllowedCommands 只剔除條目、不修改保留下來的，所以收斂前後結果相同。
+	for _, name := range forb.Commands {
+		if slices.Contains(env.AllowedCommands, name) {
+			unmet = append(unmet, fmt.Sprintf(
+				"forbids.commands 的 %q 出現在 shell.allowed_commands（這條用例測的是命令被拒之後的行為；請從 Workspace config.yaml 的 shell.allowed_commands 移除它）",
+				name))
+		}
+	}
+
 	if len(unmet) == 0 {
 		return nil
 	}
 	// 縮排配合 cmd/oryxos-eval 的執行錯誤輸出（那一層用 8 個空格起頭），多出來的行
 	// 自己對齊，否則第二項之後會貼在行首、看起來像另一則錯誤。
-	return fmt.Errorf("Workspace 環境不滿足用例宣告的 requires：\n        - %s",
+	return fmt.Errorf("Workspace 環境不滿足用例宣告的前置條件：\n        - %s",
 		strings.Join(unmet, "\n        - "))
 }

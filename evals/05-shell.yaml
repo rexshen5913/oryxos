@@ -11,7 +11,7 @@ profile: eval
 # config.yaml 註解第 4 條）。把 notes 從 allowed_paths 拿掉，這條用例照樣跑得過。
 #
 # 補上 paths 會製造一個**假陽性**：requires 攔下一個本來能通過的執行。那與
-# CheckRequires 力求避免的「校驗放行、執行時被拒」是同一個原則的反面——
+# CheckPreconditions 力求避免的「校驗放行、執行時被拒」是同一個原則的反面——
 # **校驗說不行，就必須真的不行**（Codex 審查抓到）。
 #
 # setup.files 的佈置不需要 allowed_paths：PrepareWorkspace 是 harness 自己寫檔，

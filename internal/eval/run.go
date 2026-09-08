@@ -74,10 +74,10 @@ func RunCase(ctx context.Context, sourceWS, caseRoot string, c Case) (result Run
 	// 是所有校驗裡最輕的一道，而它擋下的正是「Workspace 配置漂掉、失敗形態卻完全不指向
 	// 原因」那類執行——越早擋越接近該 issue 要的「在送出任何請求之前」。
 	//
-	// 判斷邏輯全在 CheckRequires（純函式，測得到）；這裡只有組裝與傳遞，沒有分支。
+	// 判斷邏輯全在 CheckPreconditions（純函式，測得到）；這裡只有組裝與傳遞，沒有分支。
 	// ProfileName 傳的是用例宣告的 c.Profile 而不是 prof.Name：錯誤訊息要說得出該去改
 	// 哪一個檔案，而檔名對應的是前者。
-	if err := CheckRequires(c.Requires, Environment{
+	if err := CheckPreconditions(c.Requires, c.Forbids, Environment{
 		ProfileName:     c.Profile,
 		ProfileTools:    prof.Tools,
 		AllowedPaths:    cfg.File.AllowedPaths,
