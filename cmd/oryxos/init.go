@@ -142,6 +142,11 @@ settings:
 // 揭露以**性質**表述，**不寫成一份危險命令清單**：列清單的副作用是讓使用者反推
 // 「不在清單上就安全」，而那份清單在定義上窮舉不完。
 //
+// 三段白名單之前那句「**白名單的內容會被送往模型**」來自 ADR-0007（ticket #68）：拒絕訊息
+// 列出白名單，而那則訊息會送往 Provider、落進審計表。填白名單的當下就該知道這件事。**它只
+// 影響新建的 Workspace**——既有 Workspace 的行為無條件改變、不另外告知，取捨與成立條件見
+// ADR-0007 威脅模型一節。
+//
 // 考慮過把 file.allowed_paths 預填成整個 Workspace 取「開箱可用」，**不採納**：那之下
 // Agent 讀得到 config.yaml（含 base_url 與 ${ENV_VAR} 佔位）、profiles/*.yaml（自己的
 // 配置）與 memory/MEMORY.md，而後續的 write_file 更能改寫它們——**Agent 能改自己的
@@ -169,6 +174,10 @@ providers:
     # 要啟用就拿掉每行開頭的「# 」，把模型名與價格改成你實際用的：
     #
 ` + commentOut(pricingExample) + `
+# 下面三段白名單（http、file、shell）是允許清單。**白名單的內容會被送往模型**：Tool 呼叫被
+# 其中一段拒絕時，拒絕訊息會列出那一段的條目（條目很多或很長時只列一部分），讓 Agent 知道
+# 什麼是允許的；那則訊息會隨對話送往 Provider，也會寫進審計表。
+# 不想讓 Provider 看到的名稱（或任何憑證），不要寫進白名單。
 http:
   # HTTP Tool（http_get、http_post）只能存取白名單內的域名，預設全部拒絕。
   # 範例： - api.example.com

@@ -2,9 +2,11 @@ package tool_test
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/rexshen5913/oryxos/internal/tool"
 )
@@ -359,11 +361,15 @@ func TestSandboxCheckerCheckFilePath(t *testing.T) {
 	}
 }
 
-// TestSandboxFilePathErrorIsActionableAndNarrow 驗證拒絕訊息**可行動**又**不多話**：
-// 它要指出使用者該改哪一段設定（沒有這句，使用者只會看到「被拒絕」卻不知往哪加），
-// 但不得把白名單其餘條目一起倒出來——訊息會落日誌、也會回填給 LLM，那等於把這個
-// Workspace 允許的其他路徑一併交出去。形狀沿用 TestSandboxViolationErrorOmitsQuery。
-func TestSandboxFilePathErrorIsActionableAndNarrow(t *testing.T) {
+// TestSandboxFilePathErrorIsActionableAndListsWhitelist 驗證拒絕訊息**可行動**：它要指出
+// 使用者該改哪一段設定（沒有這句，使用者只會看到「被拒絕」卻不知往哪加），並**列出白名單
+// 其餘條目**。
+//
+// **後一半在 ticket #68 反轉了**，這支測試原名 …AndNarrow，斷言的是「不得把其餘條目倒
+// 出來」。那條規則的代價是 issue #58：訊息完全不提白名單裡有什麼，模型就把沉默讀成
+// 「白名單是空的」，對使用者說出一句假話。ADR-0007 決定列出來，並把保密性損失照實記在
+// 威脅模型一節——這裡守的是那個決定，理由不在這裡重寫。
+func TestSandboxFilePathErrorIsActionableAndListsWhitelist(t *testing.T) {
 	const otherEntry = "internal/private-notes"
 	checker := tool.NewSandboxChecker(tool.SandboxConfig{AllowedPaths: []string{"notes", otherEntry}})
 
@@ -374,8 +380,9 @@ func TestSandboxFilePathErrorIsActionableAndNarrow(t *testing.T) {
 	if !strings.Contains(err.Error(), "file.allowed_paths") {
 		t.Errorf("錯誤訊息沒告訴使用者要改哪段設定: %q", err.Error())
 	}
-	if strings.Contains(err.Error(), otherEntry) {
-		t.Errorf("錯誤訊息洩漏了白名單的其他條目: %q", err.Error())
+	if !strings.Contains(err.Error(), otherEntry) {
+		t.Errorf("錯誤訊息沒列出白名單的其他條目 %q——模型看不到它，就可能把沉默讀成「白名單是空的」: %q",
+			otherEntry, err.Error())
 	}
 }
 
@@ -522,8 +529,8 @@ func TestSandboxCheckerCheckShellCommand(t *testing.T) {
 // 命令名被擋，也說得出要往 `config.yaml` 的哪一段加。少了後者，使用者只知道「被擋了」
 // 而不知道去哪裡開。
 //
-// 同時釘住訊息**不把白名單其餘條目倒出來**——那等於交出這個 Workspace 還允許跑哪些
-// 程式（形狀沿用 TestSandboxViolationErrorOmitsQuery）。
+// 同時釘住訊息**列出白名單其餘條目與總數**（ticket #68 反轉；原本斷言的是「不得倒出來、
+// 連基數都不提」，推翻的理由見下方反轉那一段）。
 func TestSandboxShellCommandErrorIsActionable(t *testing.T) {
 	checker := tool.NewSandboxChecker(tool.SandboxConfig{AllowedCommands: []string{"echo", "internal-deploy-tool"}})
 
@@ -537,8 +544,8 @@ func TestSandboxShellCommandErrorIsActionable(t *testing.T) {
 	if !strings.Contains(err.Error(), "shell.allowed_commands") {
 		t.Errorf("訊息 %q 沒說要往 config.yaml 的哪一段加", err)
 	}
-	if strings.Contains(err.Error(), "internal-deploy-tool") {
-		t.Errorf("訊息 %q 洩漏了白名單其餘條目", err)
+	if !strings.Contains(err.Error(), "internal-deploy-tool") {
+		t.Errorf("訊息 %q 沒列出白名單其餘條目", err)
 	}
 
 	// **訊息要對 LLM 說話，不只對使用者說話**（issue #36）。
@@ -552,20 +559,35 @@ func TestSandboxShellCommandErrorIsActionable(t *testing.T) {
 	//
 	// 修法是純措辭：補一句**對 LLM 的行為指示**——不要逐一嘗試，直接轉向使用者。
 	//
-	// **同一個模型、同一句 prompt 重驗過：10 次變 1 次。** 這一格與下面那格反向斷言合起來
-	// 擋的就是回退——把引導拿掉（10 次那個形態回來），或「順便把白名單列出來」這種看似
-	// 更有幫助、實際上退回 #33 定案的改法。
+	// **同一個模型、同一句 prompt 重驗過：10 次變 1 次。** 這一格擋的是回退：把引導拿掉，
+	// 10 次那個形態就回來。
+	//
+	// **ticket #68 列出白名單之後，這一格一個字都沒改**（ADR-0007「保留 shell 那則的防猜
+	// 句」）。有人會推論「清單都列出來了，候選不再近乎無限，防猜句可以拿掉」——那是推論，
+	// 這一格守的 10 → 1 是量測。用推論換掉量測，換來的只是訊息短一點。
 	for _, want := range []string{"逐一", "告訴使用者"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("訊息 %q 未提到 %q——少了對 LLM 的引導，它會改猜下一個命令名而不是轉向使用者", err, want)
 		}
 	}
 
-	// **反向：引導不得以洩漏白名單為代價**（#33 定案不得回退）。
-	// 連「有幾個」都不說——基數本身就是這個 Workspace 的資訊。
-	for _, leak := range []string{"echo", "2 個", "兩個"} {
-		if strings.Contains(err.Error(), leak) {
-			t.Errorf("訊息 %q 洩漏了白名單的內容或基數 %q", err, leak)
+	// **反轉：訊息要列出白名單的內容與總數**（ticket #68，ADR-0007）。
+	//
+	// 這一段原本是反向斷言——「引導不得以洩漏白名單為代價，連『有幾個』都不說」——而上面
+	// 那段註解原本還寫著：「順便把白名單列出來」是看似更有幫助、實際上退回 #33 定案的改法。
+	// **那句話預先擋住的正是 ADR-0007 走的這條路**，所以不能默默刪掉，要說清楚為什麼推翻：
+	//
+	//   - **分歧在證據的時間差。** 那句話寫於 issue #36 落地時，當時「不列出」的代價還沒有
+	//     被量到。issue #58 之後才有資料：模型把沉默讀成「白名單是空的」，對使用者講出一句
+	//     假話，而四次措辭介入都沒有在謊稱率上建立效益（沒量出效益，不等於證明沒有效果）。
+	//   - **「#33 定案」查無論證。** #33 與上游 spec 的全文只寫了訊息**要**包含什麼，沒寫它
+	//     **不得**包含什麼。ADR-0007 是這條規則的第一次論證，結論是反轉，保密性損失照實記在
+	//     它的威脅模型一節。
+	//   - **它警告的另一半本決定照單全收**：把引導拿掉會讓 10 次那個形態回來，所以上面那格
+	//     不動。
+	for _, want := range []string{"echo", "共 2 條"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("訊息 %q 沒列出白名單的內容或總數 %q", err, want)
 		}
 	}
 }
@@ -724,23 +746,11 @@ func TestEffectiveAllowedDedup(t *testing.T) {
 	}
 }
 
-// whitelistNoListingMark 是三則白名單拒絕訊息共同要帶的那句話。
-//
-// 它面對的是一個很難察覺的推論：**資訊的缺席被讀成了資訊**。訊息說「X 不在白名單」
-// 而完全沒提白名單裡有什麼，模型就把它讀成「白名單是空的」，然後對使用者講出一句
-// 聽起來合理的錯誤事實（issue #58 的實測：`file.allowed_paths` 實際是 [notes]，
-// 模型卻告訴使用者「未設定任何允許路徑」）。
-//
-// **但這半句自己擋不住那個推論，它只陳述了「你看不到」。** 真正擋住的是接在它後面
-// 那句「所以⋯⋯」——每一則各自不同，見表格的 wantConsequence 欄。兩半要一起釘，
-// 否則刪掉下半句測試照樣綠，而缺陷原封不動回來（外部審查抓到本輪第一版的漏洞：
-// 突變測試只試了「整段刪掉」，沒試「只留前半句」）。
-const whitelistNoListingMark = "不會在這裡列出"
-
 // whitelistHandoffMark 是三則白名單拒絕訊息共同要帶的**行動指示**：轉向使用者、說出
 // 你需要哪一個。
 //
-// **它與 whitelistNoListingMark 的差別是「禁令」與「指令」的差別，而那個差別是量出來的。**
+// **它與 ticket #68 之前那句「白名單的內容不會在這裡列出，所以看不到⋯⋯不代表白名單是
+// 空的」的差別，是「指令」與「禁令」的差別，而那個差別是量出來的。**
 //
 // issue #36 在 shell 那則補的是指令（「不要逐一嘗試——請直接告訴使用者你需要哪一個
 // 命令」），真實 API 上 10 次 iteration 變 1 次。issue #58 在路徑那則補的是禁令
@@ -773,33 +783,40 @@ const whitelistHandoffMark = "告訴使用者你需要哪一個"
 // 逐則補測試修得掉這一次的症狀，修不掉「下一則又漂掉」的成因。表格驅動讓七項契約在
 // 三則上一次成立，日後新增第四種白名單時，加一列就得同時滿足全部七項。
 //
-// 七項契約：
+// 七項契約（ticket #68 依 ADR-0007「契約七項的完整遷移」改過一次，每項括號裡標了動向）：
 //
-//  1. **指名被拒的那一個**——沒有它，使用者不知道是什麼被擋了
+//  1. **指名被拒的那一個**——沒有它，使用者不知道是什麼被擋了（不動）
 //  2. **說出要往 config.yaml 的哪一段加**——沒有它，使用者知道被擋了卻不知道怎麼放行
-//  3. **說出白名單的內容不會在這裡列出**——沒有它，模型會把缺席讀成「白名單是空的」
-//  4. **那句話必須接上「所以⋯⋯」**（每列的 wantConsequence，措辭各自不同）
-//  5. **不洩漏白名單其餘條目**（issue #33 定案，不得回退）——訊息會落日誌、也會回填
-//     給 LLM，把其餘條目倒出來等於交出這個 Workspace 還允許什麼
+//     （不動）
+//  3. **列出該段白名單實際生效的內容與總數**——模型手上有了清單，「白名單是空的」這句話
+//     就與一條已知事實直接矛盾（**換新契約**，原本是「說出白名單的內容不會在這裡列出」）。
+//     空白名單、兩個顯示上限、三個分支由 TestWhitelistDenialMessagesListEffectiveEntries
+//     逐格守，這裡只驗一般分支
+//  4. **清單之後接上「所以⋯⋯」**（每列的 wantConsequence）——路徑與 HTTP 的「不代表白名單
+//     是空的」在清單出現後成了贅語，清單本身就是結論，那兩列留空；shell 的「不要逐一嘗試」
+//     保留（**順序錨點從第 3 項那句改為清單**）
+//  5. **白名單其餘條目必須出現**（**反轉**，原本是 issue #33 定案的「不得洩漏」；推翻的理由
+//     見 TestSandboxShellCommandErrorIsActionable 反轉那一段，保密性損失見 ADR-0007）
 //  6. **那個「所以⋯⋯」必須是一道指令，不能只是一句禁令**——說出轉向使用者、指名你
-//     需要哪一個（whitelistHandoffMark），且同樣排在 no-listing 之後
+//     需要哪一個（whitelistHandoffMark），且排在清單之後（標記不動，**順序錨點改為清單**）
 //  7. **轉向使用者之前要先回答「還能不能換一條路」**（每列的 wantRouting，措辭各自
-//     不同），且排在 whitelistHandoffMark 之前
+//     不同），且排在 whitelistHandoffMark 之前（不動——路徑與 HTTP 的「已經確認可用」
+//     現在有了來源）
 //
-// 第 3、4 項與第 5 項是**同一個張力的兩端**：不揭露內容（5）正是模型無從得知白名單
-// 狀態的原因，所以必須明說「看不到不等於沒有」（3），並說出因此該怎麼辦（4）。少了
-// 第 3 項，第 5 項會被模型自行「補完」成一個錯誤的結論；少了第 4 項，第 3 項只是一句
-// 沒有出口的陳述，模型會自己補一個出口出來。
+// **第 3 項與第 5 項原本是同一個張力的兩端**：不揭露內容（舊 5）正是模型無從得知白名單
+// 狀態的原因，所以必須明說「看不到不等於沒有」（舊 3）。四次措辭介入都沒有在謊稱率上建立
+// 效益，ADR-0007 改從前提那端著手：把內容列出來，模型手上就有一份可核對的事實（是否因此
+// 少說錯尚未驗證）——所以一項換掉、一項反轉，而且舊的那兩句補缺席的話**不得留下**，清單
+// 出現之後它們是假話。
 //
-// **第 4 項鎖的是每列一個「最低語意標記」，不是整句措辭。** 三則的下半句各自不同——
-// 路徑與 HTTP 擋推論（標記「不代表白名單是空的」），shell 擋行為（標記「不要逐一
-// 嘗試」）——契約要求的是那個標記在、且排在 no-listing 那句之後，其餘用字自由。
+// **第 4 項鎖的是每列一個「最低語意標記」，不是整句措辭。** shell 擋的是行為（標記「不要
+// 逐一嘗試」）；路徑與 HTTP 原本擋推論，那個推論現在由清單本身擋——契約要求的是標記在、
+// 且排在清單之後，其餘用字自由。
 //
 // 這與 TestSandboxShellCommandErrorIsActionable 的分工要說清楚，因為兩邊都會查
 // shell 那則：那一支是 issue #36 的成果測試，查的是那則訊息**整組**性質（含「告訴
-// 使用者」與不洩漏基數，是真實 API 量出來的，10 次 iteration 變 1 次）；這裡只查
-// 「no-listing 之後有沒有接上結論」這一件三則共有的事。同一個字串被兩支測試查到，
-// 但它們問的是不同的問題。
+// 使用者」，是真實 API 量出來的，10 次 iteration 變 1 次）；這裡只查「清單之後有沒有
+// 接上結論」這一件三則共有的事。同一個字串被兩支測試查到，但它們問的是不同的問題。
 //
 // 這也是 issue #58「只把『內容不會列出』搬進路徑那則、不搬防猜句」的正確讀法：不搬的
 // 是**防猜的措辭**（「不要逐一嘗試其他命令名」），因為那句治的是候選近乎無限時逐一猜
@@ -815,20 +832,23 @@ func TestWhitelistDenialMessagesShareTheSameContract(t *testing.T) {
 		name string
 		// deny 觸發這一種白名單的拒絕，回傳那個錯誤。
 		deny func(*tool.SandboxChecker) error
-		// checker 帶**兩條**白名單條目：一條與被拒對象無關，用來驗第 5 項不洩漏。
+		// checker 帶**兩條**白名單條目：listedEntry 與 otherEntry，兩條都必須列出。
 		checker *tool.SandboxChecker
 		// wantSubject 是被拒的那一個，必須出現在訊息裡。
 		wantSubject string
 		// wantSetting 是 config.yaml 裡該改的那一段。
 		wantSetting string
-		// otherEntry 是白名單裡的另一條，絕不可出現。
+		// listedEntry 是白名單裡的第一條，必須以 %q 出現（第 3 項）。
+		listedEntry string
+		// otherEntry 是白名單裡與被拒對象無關的另一條，必須以 %q 出現（第 5 項，ticket #68
+		// 反轉——原本是「絕不可出現」）。
 		otherEntry string
-		// wantConsequence 是接在「內容不會列出」後面那句「所以⋯⋯」的關鍵字。
+		// wantConsequence 是接在清單後面那句「所以⋯⋯」的關鍵字；**空字串代表清單本身就是
+		// 結論**。
 		//
-		// **每一則不同，但都必須有**：這半句才是真正起作用的部分。路徑與 HTTP 擋的是
-		// 推論（別以為白名單是空的），shell 擋的是行為（別逐一猜命令名）——兩者都在
-		// 回答同一個問題：「既然我看不到清單，那我該怎麼辦」。少了它，前半句只是一句
-		// 沒有出口的陳述，而模型會自己補一個出口出來。
+		// **路徑與 HTTP 留空**：它們原本的「不代表白名單是空的」擋的是推論，而清單出現之後
+		// 那個推論已經與眼前的事實矛盾，再說一次是贅語（ADR-0007 契約遷移第 4 項）。**shell
+		// 保留「不要逐一嘗試」**：它擋的是行為，而那個行為的效果是量出來的（issue #36）。
 		wantConsequence string
 		// wantRouting 是「這次該做什麼」那半句的關鍵字，排在 wantHandoff 之前。
 		//
@@ -859,11 +879,12 @@ func TestWhitelistDenialMessagesShareTheSameContract(t *testing.T) {
 				_, _, err := c.CheckFilePath("secrets/api.txt")
 				return err
 			},
-			wantSubject:     "secrets/api.txt",
-			wantSetting:     "file.allowed_paths",
-			otherEntry:      "internal/private-notes",
-			wantConsequence: "不代表白名單是空的",
-			wantRouting:     "已經確認可用的路徑",
+			wantSubject: "secrets/api.txt",
+			wantSetting: "file.allowed_paths",
+			listedEntry: "notes",
+			otherEntry:  "internal/private-notes",
+			// wantConsequence 留空：清單本身就是結論（見欄位說明）。
+			wantRouting: "已經確認可用的路徑",
 		},
 		{
 			name: "shell 命令",
@@ -875,6 +896,7 @@ func TestWhitelistDenialMessagesShareTheSameContract(t *testing.T) {
 			},
 			wantSubject: "rm",
 			wantSetting: "shell.allowed_commands",
+			listedEntry: "echo",
 			otherEntry:  "internal-deploy-tool",
 			// shell 這句由 issue #36 量出來（10 次 iteration 變 1 次），
 			// TestSandboxShellCommandErrorIsActionable 另有專屬斷言；這裡收的是
@@ -893,11 +915,12 @@ func TestWhitelistDenialMessagesShareTheSameContract(t *testing.T) {
 				_, err := c.CheckHTTPURL("https://blocked.example.net/x")
 				return err
 			},
-			wantSubject:     "blocked.example.net",
-			wantSetting:     "http.allowed_domains",
-			otherEntry:      "internal.example.org",
-			wantConsequence: "不代表白名單是空的",
-			wantRouting:     "已經確認可用的網域",
+			wantSubject: "blocked.example.net",
+			wantSetting: "http.allowed_domains",
+			listedEntry: "trusted.example.com",
+			otherEntry:  "internal.example.org",
+			// wantConsequence 留空：清單本身就是結論（見欄位說明）。
+			wantRouting: "已經確認可用的網域",
 		},
 	}
 
@@ -922,27 +945,50 @@ func TestWhitelistDenialMessagesShareTheSameContract(t *testing.T) {
 						msg, want)
 				}
 			}
-			if !strings.Contains(msg, whitelistNoListingMark) {
-				t.Errorf("訊息 %q 未說明白名單的內容不會列出——"+
-					"模型會把這個缺席讀成「白名單是空的」，然後對使用者講出一句"+
-					"聽起來合理的錯誤事實（issue #58）", msg)
+			// **第 3 項：列出該段白名單實際生效的內容與總數**（ticket #68 換新契約）。以 %q
+			// 查而不是裸字串：條目是使用者手寫的 YAML 字串，序列化方式本身就是契約的一部分。
+			listed := fmt.Sprintf("%q", tt.listedEntry)
+			for _, want := range []string{listed, "共 2 條"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("訊息 %q 沒列出白名單的內容 %q——模型手上沒有清單，可能把沉默讀成"+
+						"「白名單是空的」，對使用者講出一句聽起來合理的錯誤事實（issue #58）", msg, want)
+				}
 			}
-			// **下半句要單獨查。** 只查上面那半句的話，把「所以⋯⋯」刪掉測試照樣綠，
-			// 而缺陷原封不動回來——「你看不到清單」本身不構成任何指示，模型會自己
-			// 補一個出口。
-			//
-			// **而且要查它排在後面**，不只是「出現在訊息裡某處」。下半句是個結論子句
-			// （「所以⋯⋯」），放到 no-listing 之前就不成話——而 strings.Contains 對
-			// 順序一無所知，光用它，這段註解說的「必須接上」就只是一句沒有測試支持的
-			// 宣稱（外部審查抓到）。
-			atConsequence := strings.Index(msg, tt.wantConsequence)
-			if atConsequence < 0 {
-				t.Errorf("訊息 %q 說了內容不會列出，卻沒接上 %q——"+
-					"一句沒有出口的陳述，模型會自己補一個出口出來", msg, tt.wantConsequence)
-			} else if atNoListing := strings.Index(msg, whitelistNoListingMark); atConsequence < atNoListing {
-				t.Errorf("訊息 %q 的 %q 出現在 %q **之前**——"+
-					"下半句是結論子句，排到前面就不成話",
-					msg, tt.wantConsequence, whitelistNoListingMark)
+			// 清單出現之前，三則訊息各用一句話補上缺席。清單列出來之後那兩句成了假話——「不會在
+			// 這裡列出」與眼前的清單直接矛盾，「你無從得知它的狀態」也不再成立。留著等於同一則
+			// 訊息對模型說兩件互斥的事，所以遷移不只是加上清單，還得把它們拿掉。
+			for _, stale := range []string{"不會在這裡列出", "無從得知它的狀態"} {
+				if strings.Contains(msg, stale) {
+					t.Errorf("訊息 %q 列出了清單，卻還留著 %q——那句話現在與清單矛盾", msg, stale)
+				}
+			}
+			// **第 5 項（ticket #68 反轉）：白名單其餘條目必須出現。** 原本是 issue #33 定案的
+			// 「不得洩漏」；推翻的理由見 TestSandboxShellCommandErrorIsActionable 反轉那一段。
+			other := fmt.Sprintf("%q", tt.otherEntry)
+			if !strings.Contains(msg, other) {
+				t.Errorf("訊息 %q 沒列出白名單的其他條目 %q", msg, other)
+			}
+
+			// 第 4、6 項的順序錨點：**清單結束的位置**（原本錨在「不會在這裡列出」那句）。
+			// 兩條條目有一條沒找到時上面已經報錯，順序就不查，免得多報一串連帶的錯。
+			listEnd := -1
+			if atListed, atOther := strings.Index(msg, listed), strings.Index(msg, other); atListed >= 0 && atOther >= 0 {
+				listEnd = max(atListed+len(listed), atOther+len(other))
+			}
+
+			// **第 4 項：清單之後接上「所以⋯⋯」。** 下半句要單獨查：只查清單的話，把「所以
+			// ⋯⋯」刪掉測試照樣綠。**而且要查它排在後面**，不只是出現在訊息裡某處——下半句
+			// 是個結論子句，放到清單之前就不成話，而 strings.Contains 對順序一無所知（外部
+			// 審查抓到）。路徑與 HTTP 這一欄留空，清單本身就是結論。
+			if tt.wantConsequence != "" {
+				atConsequence := strings.Index(msg, tt.wantConsequence)
+				if atConsequence < 0 {
+					t.Errorf("訊息 %q 列出了清單，卻沒接上 %q——"+
+						"一句沒有出口的陳述，模型會自己補一個出口出來", msg, tt.wantConsequence)
+				} else if listEnd >= 0 && atConsequence < listEnd {
+					t.Errorf("訊息 %q 的 %q 出現在清單結束**之前**——"+
+						"下半句是結論子句，排到前面就不成話", msg, tt.wantConsequence)
+				}
 			}
 			// **第 7 項：轉向使用者之前要先回答「還能不能換一條路」。** 推導見
 			// wantRouting 欄。它與第 6 項是一句話的兩半，所以順序也要查——換路的
@@ -958,24 +1004,284 @@ func TestWhitelistDenialMessagesShareTheSameContract(t *testing.T) {
 
 			// **第 6 項：那個出口要是一道指令，不只是一句禁令。** 推導與量測見
 			// whitelistHandoffMark。順序同樣要查——它回答的是「所以你該做什麼」，
-			// 排到 no-listing 之前一樣不成話。
+			// 排到清單之前一樣不成話。
 			atHandoff := strings.Index(msg, whitelistHandoffMark)
 			if atHandoff < 0 {
 				t.Errorf("訊息 %q 沒有給出口 %q——只告訴模型不能怎麼推論，它到了最後一個 "+
 					"iteration 仍然得自己編一段話交代給使用者（issue #58 的 A／B：純禁令 p=1.000）",
 					msg, whitelistHandoffMark)
-			} else if atNoListing := strings.Index(msg, whitelistNoListingMark); atHandoff < atNoListing {
-				t.Errorf("訊息 %q 的 %q 出現在 %q **之前**——出口是結論子句，排到前面就不成話",
-					msg, whitelistHandoffMark, whitelistNoListingMark)
+			} else if listEnd >= 0 && atHandoff < listEnd {
+				t.Errorf("訊息 %q 的 %q 出現在清單結束**之前**——出口是結論子句，排到前面就不成話",
+					msg, whitelistHandoffMark)
 			} else if atRouting >= 0 && atHandoff < atRouting {
 				t.Errorf("訊息 %q 的 %q 出現在 %q **之前**——"+
 					"「什麼時候停下來問人」排到「這次該做什麼」前面，等於那個條件從沒被提出過",
 					msg, whitelistHandoffMark, tt.wantRouting)
 			}
-			if strings.Contains(msg, tt.otherEntry) {
-				t.Errorf("訊息 %q 洩漏了白名單的其他條目 %q（issue #33 定案不得回退）",
-					msg, tt.otherEntry)
-			}
 		})
+	}
+}
+
+// TestWhitelistDenialMessagesListEffectiveEntries 是三則拒絕訊息**列出白名單**的序列化
+// 規則（ADR-0007「清單序列化的登記測試」，ticket #68）。
+//
+// **每一格對三則訊息各跑一次，而且走三個 Check* 方法，不直接測渲染函式。** 這條規則要防的
+// 失敗形態是：渲染邏輯寫在一處、三則各自呼叫它，其中一則忘了呼叫——直接測渲染函式的話測試
+// 照樣綠，而模型在那一則上照樣看不到清單。
+//
+// 清單的內容是**使用者可控的字串**，而它會進 Provider context、落日誌、落審計，所以下面每一條
+// 都是「漏了不會有人發現」的收口：
+//
+//   - **兩個顯示上限**：最多列 32 條；%q 渲染後超過 256 bytes 的不列。兩者都計入總數、**不做
+//     字串截斷**——列出去的每一條都完整、可直接使用，模型不會拿一條殘缺的路徑去呼叫、再被拒。
+//   - **套用順序：去重 → 濾掉過長 → 取前 32。**「33 條、第 1 條過長」那格是它與「先取 32 再
+//     濾」的唯一分辨點：前者列滿 32 條，後者只列 31 條。
+//   - **三個分支**：空白名單／零筆可顯示／一般。「零筆可顯示」是有條目但全部過長，它和空白
+//     名單一樣不得輸出清單的冒號後接空白。
+//   - **%q 逸出**：條目含換行時若原樣輸出，訊息會長出一行看起來像系統輸出的文字——既污染
+//     日誌，也在模型的 context 裡製造一句它會當真的假話。
+//
+// 格子逐列對應 ADR 那張表，**刻意不在這裡寫格數**：可變的計數寫死就會過期。
+func TestWhitelistDenialMessagesListEffectiveEntries(t *testing.T) {
+	denials := []struct {
+		name string
+		// checker 以 entries 當作這一段的白名單，建出校驗器。
+		checker func(entries []string) *tool.SandboxChecker
+		// deny 觸發這一段的拒絕，回傳那個錯誤。被拒的對象不會被下面任何一格的條目放行。
+		deny func(*tool.SandboxChecker) error
+	}{
+		{
+			name: "檔案路徑",
+			checker: func(entries []string) *tool.SandboxChecker {
+				return tool.NewSandboxChecker(tool.SandboxConfig{AllowedPaths: entries})
+			},
+			deny: func(c *tool.SandboxChecker) error {
+				_, _, err := c.CheckFilePath("secrets/api.txt")
+				return err
+			},
+		},
+		{
+			name: "shell 命令",
+			checker: func(entries []string) *tool.SandboxChecker {
+				return tool.NewSandboxChecker(tool.SandboxConfig{AllowedCommands: entries})
+			},
+			deny: func(c *tool.SandboxChecker) error {
+				_, err := c.CheckShellCommand("rm")
+				return err
+			},
+		},
+		{
+			name: "HTTP 域名",
+			checker: func(entries []string) *tool.SandboxChecker {
+				return tool.NewSandboxChecker(tool.SandboxConfig{AllowedDomains: entries})
+			},
+			deny: func(c *tool.SandboxChecker) error {
+				_, err := c.CheckHTTPURL("https://blocked.example.net/x")
+				return err
+			},
+		},
+	}
+
+	// seq 產生 e01、e02⋯⋯共 n 條。這種條目在三段收斂下都原樣保留（相對路徑、不含分隔符、
+	// 已是小寫），所以同一份清單能拿去三則訊息各跑一次。
+	seq := func(n int) []string {
+		entries := make([]string, n)
+		for i := range entries {
+			entries[i] = fmt.Sprintf("e%02d", i+1)
+		}
+		return entries
+	}
+	// renderedAs 產生一條 %q 渲染後**恰好** n bytes 的條目。tag 讓條目彼此不同，其餘以 `"`
+	// 填滿：每個 `"` 渲染成 `\"`，原字串因此只有渲染結果的一半左右——門檻若量的是原字串，
+	// 這種條目會被錯放進清單。長度當場量出來，不靠算術。
+	renderedAs := func(tag string, n int) string {
+		entry := tag
+		for len(fmt.Sprintf("%q", entry)) < n-1 {
+			entry += `"`
+		}
+		if len(fmt.Sprintf("%q", entry)) < n {
+			entry += "x"
+		}
+		if got := len(fmt.Sprintf("%q", entry)); got != n {
+			t.Fatalf("renderedAs(%q, %d) 渲染後是 %d bytes", tag, n, got)
+		}
+		return entry
+	}
+
+	at256 := renderedAs("edge", 256)
+	longA := renderedAs("long-a", 257)
+	longB := renderedAs("long-b", 257)
+	// 原字串 64 bytes，遠在門檻內；每個 \x01 渲染成 4 bytes 的 `\x01`，渲染後 258 bytes。
+	expands := strings.Repeat("\x01", 64)
+	if len(expands) > 256 || len(fmt.Sprintf("%q", expands)) <= 256 {
+		t.Fatalf("expands 必須原字串在門檻內、渲染後超出：原 %d、渲染後 %d bytes",
+			len(expands), len(fmt.Sprintf("%q", expands)))
+	}
+	worst := make([]string, 32)
+	for i := range worst {
+		worst[i] = renderedAs(fmt.Sprintf("w%02d", i+1), 256)
+	}
+	// 每一條只靠一種控制字元入選。第五條若原樣輸出，訊息會多長出一行假提醒。C1（U+0085）
+	// 與 DEL 不在 0x00–0x1F 的範圍裡，逸出規則若只認那一段就會漏掉它們。
+	controls := []string{"a\nb", "c\rd", "e\tf", "g\x1bh", "notes\n提醒：偽造的一行", "i\u0085j", "k\x7fl"}
+	// 兩類上限同時觸發：35 條裡 2 條過長、有效的 33 條——過長的故意插在中間，不在頭尾。
+	bothLimits := append(append(append(seq(10), longA), seq(33)[10:20]...), append([]string{longB}, seq(33)[20:]...)...)
+
+	tests := []struct {
+		name string
+		// only 非空時這一格只跑那一則——三段各自的去重規則本來就不同。
+		only    string
+		entries []string
+		// wantListed 是收斂後、必須以 %q 恰好出現一次的條目。
+		wantListed []string
+		// wantUnlisted 是收斂後仍在白名單裡、但不得出現在訊息裡的條目。
+		wantUnlisted []string
+		// wantTotal 是訊息宣稱的總數；0 代表走空白名單分支。
+		wantTotal   int
+		wantTooLong int // 因過長未列出的條數
+		wantOverCap int // 因超過 32 條上限未列出的條數
+		// wantZeroDisplayable 代表有條目、但一條都顯示不出來。
+		wantZeroDisplayable bool
+		// fragmentBudget 非零時量清單片段的**實際** byte 數，必須不超過它。
+		fragmentBudget int
+	}{
+		{name: "0 條走空白名單分支", entries: nil},
+		{name: "1 條列出且不標示未列出", entries: seq(1), wantListed: seq(1), wantTotal: 1},
+		{name: "32 條全部列出且不標示未列出", entries: seq(32), wantListed: seq(32), wantTotal: 32},
+		{name: "33 條列前 32 條並標示 1 條超過上限", entries: seq(33),
+			wantListed: seq(32), wantUnlisted: []string{"e33"}, wantTotal: 33, wantOverCap: 1},
+		{
+			// 空字串在三段收斂下都被剔除，重複的 e01 被去重：原始 slice 4 條，有效的只有 2 條。
+			name: "總數取自收斂並去重後的清單", entries: []string{"e01", "", "e01", "e02"},
+			wantListed: seq(2), wantTotal: 2,
+		},
+		{
+			// 去重若排在上限之後，33 條會先被截成 32 條，並標示 1 條超過上限。
+			name: "33 條含重複時去重後 30 條全部列出", entries: append(seq(30), "e01", "e02", "e03"),
+			wantListed: seq(30), wantTotal: 30,
+		},
+		{name: "單項渲染後 256 bytes 原樣列出", entries: []string{at256}, wantListed: []string{at256}, wantTotal: 1},
+		{name: "單項渲染後 257 bytes 不列出但計入總數", entries: []string{"e01", longA},
+			wantListed: seq(1), wantUnlisted: []string{longA}, wantTotal: 2, wantTooLong: 1},
+		{name: "原字串在門檻內但渲染後超出時不列出", entries: []string{"e01", expands},
+			wantListed: seq(1), wantUnlisted: []string{expands}, wantTotal: 2, wantTooLong: 1},
+		{
+			// 8 KiB 是 32 × 256；另外 512 bytes 給說明文字與 31 個分隔符。
+			name: "32 條各 256 bytes 時清單片段的實際長度有上界", entries: worst,
+			wantListed: worst, wantTotal: 32, fragmentBudget: 8*1024 + 512,
+		},
+		{
+			// 先取 32 再濾的話，前 32 條裡含那條過長的，只列得出 31 條，e32 被擠到上限之外。
+			name: "33 條且第 1 條過長時列滿 32 條", entries: append([]string{longA}, seq(32)...),
+			wantListed: seq(32), wantUnlisted: []string{longA}, wantTotal: 33, wantTooLong: 1,
+		},
+		{name: "兩類上限同時觸發時分開計", entries: bothLimits,
+			wantListed: seq(32), wantUnlisted: []string{longA, longB, "e33"}, wantTotal: 35, wantTooLong: 2, wantOverCap: 1},
+		{name: "零筆可顯示時不輸出清單的冒號", entries: []string{longA},
+			wantUnlisted: []string{longA}, wantTotal: 1, wantZeroDisplayable: true},
+		{name: "控制字元與換行以 %q 逸出", entries: controls, wantListed: controls, wantTotal: len(controls)},
+		{name: "paths 標準化後重複收斂成一條", only: "檔案路徑", entries: []string{"notes", "notes/", "./notes"},
+			wantListed: []string{"notes"}, wantTotal: 1},
+		{name: "commands 字面重複收斂成一條", only: "shell 命令", entries: []string{"git", "git", "git"},
+			wantListed: []string{"git"}, wantTotal: 1},
+		{
+			// 列的是轉小寫後的有效值，不是使用者寫的原樣：校驗器實際拿來比對的就是那一份。
+			name: "domains 大小寫重複收斂成一條", only: "HTTP 域名", entries: []string{"Example.com", "example.COM"},
+			wantListed: []string{"example.com"}, wantUnlisted: []string{"Example.com", "example.COM"}, wantTotal: 1,
+		},
+	}
+
+	// 分支標記。一般分支長成「目前允許的⋯⋯（共 N 條⋯⋯）：清單。」
+	const (
+		emptyMark  = "白名單目前是空的"
+		listColon  = "）："
+		listHeader = "目前允許的"
+	)
+	// clause 查一個「N 條因⋯⋯未列出」子句：n 為零時整個子句必須省略。
+	clause := func(t *testing.T, msg, suffix string, n int) {
+		t.Helper()
+		if n == 0 {
+			if strings.Contains(msg, suffix) {
+				t.Errorf("沒有條目%s，訊息卻有這個子句: %q", suffix, msg)
+			}
+			return
+		}
+		if want := fmt.Sprintf("%d %s", n, suffix); !strings.Contains(msg, want) {
+			t.Errorf("訊息沒說 %q: %q", want, msg)
+		}
+	}
+
+	for _, tt := range tests {
+		matched := 0
+		for _, d := range denials {
+			if tt.only != "" && tt.only != d.name {
+				continue
+			}
+			matched++
+			t.Run(tt.name+"/"+d.name, func(t *testing.T) {
+				err := d.deny(d.checker(tt.entries))
+				if !errors.Is(err, tool.ErrSandboxViolation) {
+					t.Fatalf("拒絕的錯誤 = %v, 期望 SandboxViolation", err)
+				}
+				msg := err.Error()
+
+				// 不論哪一格，訊息裡都不得有任何控制字元：換行會偽造日誌行，ESC 會改終端機版面。
+				if strings.ContainsFunc(msg, unicode.IsControl) {
+					t.Errorf("訊息含未逸出的控制字元: %q", msg)
+				}
+
+				switch {
+				case tt.wantTotal == 0:
+					if !strings.Contains(msg, emptyMark) {
+						t.Errorf("空白名單要明說是空的（期望含 %q）: %q", emptyMark, msg)
+					}
+					for _, forbidden := range []string{listHeader, listColon, "共 "} {
+						if strings.Contains(msg, forbidden) {
+							t.Errorf("空白名單走了清單的形狀（含 %q）: %q", forbidden, msg)
+						}
+					}
+				case tt.wantZeroDisplayable:
+					if want := fmt.Sprintf("共 %d 條，但全部因過長未列出", tt.wantTotal); !strings.Contains(msg, want) {
+						t.Errorf("零筆可顯示要說出總數與全部未列出（期望含 %q）: %q", want, msg)
+					}
+					if strings.Contains(msg, listColon) {
+						t.Errorf("零筆可顯示輸出了清單的冒號，後面卻什麼都沒有: %q", msg)
+					}
+				default:
+					for _, want := range []string{fmt.Sprintf("（共 %d 條", tt.wantTotal), listColon} {
+						if !strings.Contains(msg, want) {
+							t.Errorf("一般分支期望含 %q: %q", want, msg)
+						}
+					}
+					clause(t, msg, "條因過長未列出", tt.wantTooLong)
+					clause(t, msg, "條因超過 32 條上限未列出", tt.wantOverCap)
+				}
+
+				for _, entry := range tt.wantListed {
+					if got := strings.Count(msg, fmt.Sprintf("%q", entry)); got != 1 {
+						t.Errorf("條目 %q 以 %%q 出現了 %d 次，期望恰好 1 次: %q", entry, got, msg)
+					}
+				}
+				for _, entry := range tt.wantUnlisted {
+					if strings.Contains(msg, fmt.Sprintf("%q", entry)) {
+						t.Errorf("條目 %q 不該被列出: %q", entry, msg)
+					}
+				}
+
+				if tt.fragmentBudget > 0 {
+					last := fmt.Sprintf("%q", tt.wantListed[len(tt.wantListed)-1])
+					start, end := strings.Index(msg, listHeader), strings.LastIndex(msg, last)
+					if start < 0 || end < 0 {
+						t.Fatalf("量不到清單片段（header 在 %d、最後一條在 %d）: %q", start, end, msg)
+					}
+					if got := end + len(last) - start; got > tt.fragmentBudget {
+						t.Errorf("清單片段實際 %d bytes，超過宣稱的上界 %d bytes", got, tt.fragmentBudget)
+					}
+				}
+			})
+		}
+		if matched == 0 {
+			t.Errorf("格子 %q 的 only = %q 對不上任何一則訊息", tt.name, tt.only)
+		}
 	}
 }

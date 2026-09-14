@@ -1,0 +1,24 @@
+{
+  "id": "chatcmpl-chat-domain-count-1",
+  "object": "chat.completion",
+  "created": 1726300000,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_domain_count_http_get",
+            "type": "function",
+            "function": {"name": "http_get", "arguments": "{\"url\":\"https://blocked.example.net/x\"}"}
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {"prompt_tokens": 180, "completion_tokens": 20, "total_tokens": 200}
+}

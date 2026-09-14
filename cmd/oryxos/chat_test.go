@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -523,6 +524,85 @@ tools: []
 				}
 			}
 		})
+	}
+}
+
+// TestChatDomainWarningCountMatchesRefusalTotal 釘住**同一份配置在兩個輸出面上給出同一個
+// 數字**（ADR-0007「警告條數與訊息總數一致」，ticket #68）。
+//
+// 啟動提醒數的是「可能永遠比不中」的條數，拒絕訊息說的是白名單總數。`["Example.com/x",
+// "example.com/x"]` 去重後剩 1 條，而那 1 條正好可疑，所以兩個數字都必須是 1。任何一邊改成
+// 數原始 slice 就會變成 2——使用者在終端機看到「有 2 條」，模型在拒絕訊息裡看到「共 1 條」，
+// 同一份設定講出兩個互相矛盾的數字。
+//
+// **兩個觀測點彼此獨立**：提醒從 runChat 的輸出讀；拒絕訊息從記錄型 replay server 收到的
+// 第二次 LLM 請求讀，那就是模型實際看到的內容。兩邊都走真正的組裝點（runChat），不是在
+// 測試裡另外拼一個校驗器出來比。
+func TestChatDomainWarningCountMatchesRefusalTotal(t *testing.T) {
+	var bodies [][]byte
+	srv := newRecordingReplayServer(t, &bodies,
+		readFixture(t, "chat_reply_http_get_denied.json"),
+		readFixture(t, "chat_reply_1.json"),
+	)
+	dir := setupChatWorkspace(t, srv.URL)
+	writeProfile(t, dir, `identity:
+  agent_name: Oryx
+  prompt: 你是 Oryx。
+provider:
+  name: openrouter
+  model: deepseek/deepseek-v4-flash
+tools:
+  - http_get
+`)
+	cfg := "providers:\n  openrouter:\n    api_key: ${OPENROUTER_API_KEY}\n    base_url: " + srv.URL +
+		"\nhttp:\n" + allowedDomainsYAML([]string{`"Example.com/x"`, `"example.com/x"`})
+	if err := os.WriteFile(filepath.Join(dir, workspaceDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runChat(context.Background(), strings.NewReader(""), &out, dir,
+		chatOptions{profileName: "default", message: "幫我抓 blocked.example.net 的首頁"}); err != nil {
+		t.Fatalf("runChat: %v", err)
+	}
+
+	warning := regexp.MustCompile(`http\.allowed_domains 有 (\d+) 條可能永遠比不中`).FindStringSubmatch(out.String())
+	if warning == nil {
+		t.Fatalf("沒有印出可能比不中的提醒: %q", out.String())
+	}
+
+	if len(bodies) != 2 {
+		t.Fatalf("LLM 請求數 = %d, 期望 2（http_get 被拒一次、收尾一次）", len(bodies))
+	}
+	var request struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(bodies[1], &request); err != nil {
+		t.Fatalf("解析第二次 LLM 請求: %v", err)
+	}
+	var refusal string
+	for _, m := range request.Messages {
+		if m.Role == "tool" {
+			refusal = m.Content
+		}
+	}
+	if !strings.Contains(refusal, "SandboxViolation") {
+		t.Fatalf("第二次請求裡的 tool 訊息 = %q, 期望是 http_get 被白名單拒絕", refusal)
+	}
+	total := regexp.MustCompile(`共 (\d+) 條`).FindStringSubmatch(refusal)
+	if total == nil {
+		t.Fatalf("拒絕訊息沒說出白名單總數: %q", refusal)
+	}
+
+	if warning[1] != total[1] {
+		t.Errorf("啟動提醒說有 %s 條可疑，拒絕訊息卻說白名單共 %s 條——同一份設定給出兩個數字",
+			warning[1], total[1])
+	}
+	if total[1] != "1" {
+		t.Errorf("拒絕訊息說共 %s 條，期望去重後的 1 條: %q", total[1], refusal)
 	}
 }
 

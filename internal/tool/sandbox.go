@@ -235,6 +235,94 @@ func escapesWorkspace(clean string) bool {
 	return clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator))
 }
 
+// 拒絕訊息列出白名單時的兩個顯示上限（ADR-0007，人類批准 2026-09-09）。
+//
+// **兩個數字都是成本取捨，沒有資料支持。** 清單會進 Provider context（計費）、落日誌、落審計，
+// 而白名單的條數與單條長度都由使用者配置、沒有上界——不設上限是把成本外包給運氣。它們是
+// 可被第一份反例推翻的預設值，不是推導結果。
+const (
+	// maxListedWhitelistEntries 是一則拒絕訊息最多列出的條數。
+	maxListedWhitelistEntries = 32
+	// maxListedWhitelistEntryBytes 是單一條目 **%q 渲染後**的 byte 數上限。量渲染後而不是
+	// 原字串：%q 會把引號、反斜線與控制字元擴張成逸出序列（一個 \x01 變成 4 bytes），量原
+	// 字串的話「32 條 × 256 bytes」這個上界就不成立。
+	maxListedWhitelistEntryBytes = 256
+)
+
+// describeWhitelist 產生三則拒絕訊息共用的那一段：列出某一段白名單**實際生效**的內容。
+//
+// effective 必須是校驗器持有的那一份（已經過 Effective* 收斂與去重）：列出來的就是拿去比對
+// 的，模型看到的清單與校驗結果不可能對不上。noun 是條目的稱呼（路徑、命令、網域）。
+//
+// **為什麼要列出來**（ADR-0007）：三則訊息原本刻意不提白名單裡有什麼，模型把這個沉默讀成
+// 「白名單是空的」，對使用者說出一句聽起來合理的假話（issue #58）。四次措辭介入都沒有在
+// 謊稱率上建立效益——是沒量出效益，不是證明沒有效果——而它們的共同盲點是**沒有一次改變
+// 模型手上的事實**：禁令叫它別下結論、指令叫它改做別的事，「白名單是空的」那個空格始終填得
+// 進去。列出清單是**提供可核對的事實**，那句話從此與訊息裡的清單直接矛盾；**是否因此減少
+// 謊稱尚未驗證**——ADR-0007 修訂後不再以真實模型量測這個效益，保留它的理由是作用點與前四次
+// 不同、成本低、要回退只需改回訊息字串。代價是白名單內容會送往 Provider、落進審計資料，
+// 取捨照實記在 ADR-0007 的威脅模型一節。
+//
+// 規則（每一條由 TestWhitelistDenialMessagesListEffectiveEntries 逐格守）：
+//
+//   - **每個條目以 %q 序列化。** 條目是使用者手寫的 YAML 字串，一個含換行的條目原樣輸出，
+//     會讓訊息長出一行看起來像系統輸出的文字——既污染日誌，也在模型的 context 裡製造一句
+//     它會當真的假話。
+//   - **超出兩個上限的不列出，但計入總數；不做字串截斷。** 截斷會給模型一條殘缺的路徑，它
+//     拿去呼叫、再被拒一次、燒掉 iteration——那正是 #58 這條線在治的毛病。不列出是誠實的：
+//     模型知道有這條，只是看不到。
+//   - **套用順序：去重（收斂時已完成）→ 濾掉過長 → 取前 32。** 反過來先取 32 的話，前 32 條
+//     裡每有一條過長就少列一條可用的；被上限擋掉的每一條都是模型看不到的可用項目，能少擋一條
+//     就少一條。
+//   - **兩類未列出數分開說**，各自為零時省略。兩者的處置不同：過長要使用者縮短那條設定，
+//     超過上限要他精簡白名單，合成一個數字他就不知道該做哪一件。
+//   - **三個分支**：空白名單明說是空的；有條目但全部過長時說出總數與全部未列出，**不輸出清單
+//     的冒號**——冒號後面接空白，正是空白名單那一格在防的形狀，不能從第二條路抵達它；其餘
+//     列出清單。零筆可顯示分支一條都列不出來，但仍提供「共 N 條」這個可核對的事實，與「白名單
+//     是空的」直接矛盾。
+//
+// 回傳的句子以句號收尾，呼叫端把它接在「該改哪一段設定」之後、出口之前。**順序有意義**：
+// 路徑與網域那兩則的出口寫「已經確認可用的⋯⋯就直接改走那一條」，那個「已經確認可用」指的
+// 就是這份清單，排到出口後面條件就沒有來源（TestWhitelistDenialMessagesShareTheSameContract
+// 第 4、6 項錨在清單之後）。
+func describeWhitelist(noun string, effective []string) string {
+	if len(effective) == 0 {
+		return fmt.Sprintf("這份白名單目前是空的，沒有任何允許的%s。", noun)
+	}
+
+	var listed []string
+	tooLong := 0
+	for _, entry := range effective {
+		rendered := fmt.Sprintf("%q", entry)
+		if len(rendered) > maxListedWhitelistEntryBytes {
+			tooLong++
+			continue
+		}
+		listed = append(listed, rendered)
+	}
+	if len(listed) == 0 {
+		return fmt.Sprintf("目前允許的%s共 %d 條，但全部因過長未列出。", noun, len(effective))
+	}
+	overCap := 0
+	if len(listed) > maxListedWhitelistEntries {
+		overCap = len(listed) - maxListedWhitelistEntries
+		listed = listed[:maxListedWhitelistEntries]
+	}
+
+	count := fmt.Sprintf("共 %d 條", len(effective))
+	var unlisted []string
+	if tooLong > 0 {
+		unlisted = append(unlisted, fmt.Sprintf("%d 條因過長未列出", tooLong))
+	}
+	if overCap > 0 {
+		unlisted = append(unlisted, fmt.Sprintf("%d 條因超過 %d 條上限未列出", overCap, maxListedWhitelistEntries))
+	}
+	if len(unlisted) > 0 {
+		count += "，其中 " + strings.Join(unlisted, "、")
+	}
+	return fmt.Sprintf("目前允許的%s（%s）：%s。", noun, count, strings.Join(listed, "、"))
+}
+
 // CheckHTTPURL 解析 rawURL 的 host 後做通配符匹配；解析不了、非 http/https、
 // 或 host 不在白名單一律回 SandboxDeny ＋ ErrSandboxViolation（deny by default）。
 // 錯誤訊息不內嵌原始 URL——它會落日誌與回填 LLM，query 常帶密鑰。
@@ -261,8 +349,13 @@ func (c *SandboxChecker) CheckHTTPURL(rawURL string) (SandboxDecision, error) {
 		}
 	}
 	// 措辭與路徑、命令兩則同一份契約（見 TestWhitelistDenialMessagesShareTheSameContract）：
-	// 指名被拒的那一個、說出要往 config.yaml 的哪一段加、說明白名單的內容不會列出，
-	// 且不洩漏其餘條目。
+	// 指名被拒的那一個、說出要往 config.yaml 的哪一段加、列出白名單實際生效的內容
+	// （describeWhitelist），再給出口。
+	//
+	// **ticket #68 之前，清單的位置上是一句「白名單的內容不會在這裡列出，所以看不到允許的
+	// 網域不代表白名單是空的——你無從得知它的狀態」**，那是「不列出白名單」這條規則的產物。
+	// 規則的代價與推翻理由見 describeWhitelist 與 ADR-0007；清單出現之後那兩句成了與清單
+	// 矛盾的假話，所以拿掉。
 	//
 	// **這一則原本三項只有一項**（issue #58 落地前）：只說「host X 不在
 	// http.allowed_domains 白名單」——段名出現了，卻沒有一個字叫人去改設定檔，也沒有
@@ -281,11 +374,9 @@ func (c *SandboxChecker) CheckHTTPURL(rawURL string) (SandboxDecision, error) {
 	// TestProcessReadFileSandboxRejectionRecovers 那一類「被拒後改走已知可用的那條」的
 	// 恢復契約衝突——而那些測試走固定回放，看不出提示詞已經與它們矛盾。形狀沿用
 	// core.ToolErrorNotFound 的 Guidance()：先給這次該做什麼，再給什麼時候停下來問人。
-	return SandboxDeny, fmt.Errorf("%w: host %q 不在 http.allowed_domains 白名單（要允許它請把這個網域加進 Workspace config.yaml 的 http.allowed_domains）。"+
-		"白名單的內容不會在這裡列出，所以**看不到允許的網域不代表白名單是空的**——"+
-		"你無從得知它的狀態，不要向使用者描述它有什麼或沒有什麼。"+
+	return SandboxDeny, fmt.Errorf("%w: host %q 不在 http.allowed_domains 白名單（要允許它請把這個網域加進 Workspace config.yaml 的 http.allowed_domains）。%s"+
 		"已經確認可用的網域就直接改走那一條；沒有的話請直接告訴使用者你需要哪一個網域，由他決定要不要加進白名單",
-		ErrSandboxViolation, host)
+		ErrSandboxViolation, host, describeWhitelist("網域", c.allowedDomains))
 }
 
 // matchDomain 比對單條白名單：`*.example.com` 匹配任意層級子域名（不含裸域名
@@ -340,24 +431,30 @@ func (c *SandboxChecker) CheckFilePath(rawPath string) (SandboxDecision, string,
 			return SandboxAllow, target, nil
 		}
 	}
-	// 訊息只提被拒的那條路徑與該改哪一段設定：它會落日誌、也會回填給 LLM，把白名單
-	// 其餘條目一起倒出來等於交出這個 Workspace 還允許哪些路徑（issue #33 定案）。
+	// **訊息列出白名單實際生效的內容**（describeWhitelist，ticket #68）。
 	//
-	// **末句擋的是「資訊的缺席被讀成資訊」**（issue #58）。上一段那條不洩漏規則是對的，
-	// 但它讓訊息完全不提白名單裡有什麼，而模型把這個沉默讀成了「白名單是空的」：真實
-	// 驗收裡 file.allowed_paths 明明是 [notes]，模型卻告訴使用者「未設定任何允許路徑」。
-	// 那句話不會讓任何指標轉紅（收斂正常、iteration 與失敗數都在上限內），它只是**一個
-	// 聽起來合理的錯誤事實**——使用者可能因此把一個過寬的路徑加進設定，而其實只要加對
-	// 一個目錄。
+	// 這裡原本寫著相反的規則：「訊息只提被拒的那條路徑與該改哪一段設定——它會落日誌、也會
+	// 回填給 LLM，把白名單其餘條目一起倒出來等於交出這個 Workspace 還允許哪些路徑（issue #33
+	// 定案）」。但 #33 與其上游 spec 的全文都找不到這條規則的論證，只寫了訊息**要**包含什麼。
+	// ADR-0007 是它的第一次論證，結論是反轉——保密性損失是真的，照實記在那份 ADR 的威脅模型
+	// 一節，接受它的理由是換到的東西值得，不是損失不存在。
+	//
+	// **那條規則的代價是「資訊的缺席被讀成資訊」**（issue #58）。訊息完全不提白名單裡有什麼，
+	// 模型就把這個沉默讀成「白名單是空的」：真實驗收裡 file.allowed_paths 明明是 [notes]，
+	// 模型卻告訴使用者「未設定任何允許路徑」。那句話不會讓任何指標轉紅（收斂正常、iteration
+	// 與失敗數都在上限內），它只是**一個聽起來合理的錯誤事實**——使用者可能因此把一個過寬的
+	// 路徑加進設定，而其實只要加對一個目錄。以下幾段是 #58 在「不列出」的前提下補措辭的紀錄，
+	// 出口那一半沿用至今。
 	//
 	// **不搬 shell 那則的「不要逐一嘗試其他命令名」**（issue #58 明訂）：那句話治的是
 	// 候選近乎無限時逐一猜名字的形態，而路徑被拒時模型本來就會 2 次後轉向使用者
 	// （#34 與 ticket #55 驗收都是），加防猜是修沒壞的東西。
 	//
-	// **但末段那個出口要搬**（issue #58 第二輪，2026-09-04 的受控 A／B）：上一段那句
-	// 反推論句單獨落地之後量到謊稱率 4/12 對 4/12、Fisher exact 雙尾 **p = 1.000**——
-	// 兩組相同。原因是它只是一句**禁令**：模型走到最後一個 iteration 時必須生出一段話
-	// 交代為什麼辦不到，而禁令沒有給它一句可以說的話，於是它照樣自己編一個解釋。
+	// **但末段那個出口要搬**（issue #58 第二輪，2026-09-04 的受控 A／B）：當時訊息裡那句
+	// 反推論句（「看不到允許的路徑不代表白名單是空的」，ticket #68 隨清單出現而拿掉）單獨
+	// 落地之後量到謊稱率 4/12 對 4/12、Fisher exact 雙尾 **p = 1.000**——兩組相同。原因是
+	// 它只是一句**禁令**：模型走到最後一個 iteration 時必須生出一段話交代為什麼辦不到，
+	// 而禁令沒有給它一句可以說的話，於是它照樣自己編一個解釋。
 	//
 	// #36 在 shell 那則量到 10 次 iteration 變 1 次，靠的是一道**指令**（轉向使用者、
 	// 指名你需要哪一個）。搬過來的就是那個形狀，不是那句措辭。這同時履行
@@ -375,12 +472,11 @@ func (c *SandboxChecker) CheckFilePath(rawPath string) (SandboxDecision, string,
 	// **條件寫「已經確認可用」而不是「可能可用」**，這一個字的差別是量出來的：第一輪那句
 	// 反推論句被模型讀成「白名單可能有東西，再試試」，A／B 量到走到第 3 次 Tool 呼叫
 	// 從 3/12 升到 7/12。措辭因此沿用 not_found 那段的「用**確認過的**確切名字」，讓
-	// 「還沒確認過的」一律落在轉向使用者那一邊，不必再寫一句防猜。
-	return SandboxDeny, "", fmt.Errorf("%w: 路徑 %q 不在 file.allowed_paths 白名單（請把它所在的目錄加進 Workspace config.yaml 的 file.allowed_paths）。"+
-		"白名單的內容不會在這裡列出，所以**看不到允許的路徑不代表白名單是空的**——"+
-		"你無從得知它的狀態，不要向使用者描述它有什麼或沒有什麼。"+
+	// 「還沒確認過的」一律落在轉向使用者那一邊，不必再寫一句防猜。ticket #68 之後，「已經
+	// 確認可用」有了來源：排在它前面的那份清單。
+	return SandboxDeny, "", fmt.Errorf("%w: 路徑 %q 不在 file.allowed_paths 白名單（請把它所在的目錄加進 Workspace config.yaml 的 file.allowed_paths）。%s"+
 		"已經確認可用的路徑就直接改走那一條；沒有的話請直接告訴使用者你需要哪一個路徑，由他決定要不要加進白名單",
-		ErrSandboxViolation, rawPath)
+		ErrSandboxViolation, rawPath, describeWhitelist("路徑", c.allowedPaths))
 }
 
 // CheckShellCommand 校驗 command 是 shell.allowed_commands 裡的一個程式名。
@@ -423,9 +519,10 @@ func (c *SandboxChecker) CheckShellCommand(command string) (SandboxDecision, err
 			return SandboxAllow, nil
 		}
 	}
-	// 訊息只提被拒的那個名字與該改哪一段設定：它會落日誌、也會回填給 LLM，把白名單
-	// 其餘條目一起倒出來等於交出這個 Workspace 還允許跑哪些程式。**連基數都不提**
-	// ——「這裡只允許 N 個命令」同樣是這個 Workspace 的資訊。
+	// **訊息列出白名單實際生效的內容與總數**（describeWhitelist，ticket #68）。這裡原本寫著
+	// 相反的規則——「只提被拒的那個名字與該改哪一段設定，把其餘條目倒出來等於交出這個
+	// Workspace 還允許跑哪些程式，**連基數都不提**」——推翻的理由與保密性損失見
+	// CheckFilePath 對應那段與 ADR-0007。
 	//
 	// **最後那句是對 LLM 說的，不是對使用者說的**（issue #36）。#34 的真實 API 驗收量到
 	// 一組對比：同一個模型、同樣形狀的 SandboxViolation，**路徑**被拒 2 次就停下來告知
@@ -434,16 +531,21 @@ func (c *SandboxChecker) CheckShellCommand(command string) (SandboxDecision, err
 	// 「已達最大迭代次數」，真正的原因完全沒出現在回應裡。
 	//
 	// 差別不在模型，在**可猜的候選數**：路徑被拒時它推得出沒有別的路徑可試；命令被拒時
-	// 候選名近乎無限，而上面那條不洩漏規則（正確地）讓它無從得知什麼是被允許的，於是它
-	// 只能一個一個猜。兩條定案在此互相拉扯，而**能不動安全那條的解法就是把行為指示寫進
+	// 候選名近乎無限，而當時那條不列出白名單的規則讓它無從得知什麼是被允許的，於是它只能
+	// 一個一個猜。兩條規則在此互相拉扯，而**當時能不動不列出那條的解法就是把行為指示寫進
 	// 訊息**：告訴它別猜，轉向使用者。
 	//
 	// **改完之後在同一個模型、同一句 prompt、同一份白名單上重驗過：10 次變 1 次**，而且
 	// 模型把「要加進 config.yaml 的哪一段」原樣轉述給了使用者——那句話舊訊息裡本來就有，
-	// 只是模型從沒說出來過，因為它忙著猜下一個名字。白名單內容仍未洩漏。
-	return SandboxDeny, fmt.Errorf("%w: 命令 %q 不在 shell.allowed_commands 白名單（要允許它請把這個程式名加進 Workspace config.yaml 的 shell.allowed_commands）。"+
-		"白名單的內容不會在這裡列出，所以**不要逐一嘗試其他命令名**——請直接告訴使用者你需要哪一個命令，由他決定要不要加進白名單",
-		ErrSandboxViolation, command)
+	// 只是模型從沒說出來過，因為它忙著猜下一個名字。（當時白名單內容仍未列出。）
+	//
+	// **ticket #68 列出清單之後，防猜句一個字都不動**（ADR-0007）。有人會推論：清單都列出來
+	// 了，上面那個「候選近乎無限、無從得知什麼被允許」的前提已經不在，防猜句可以拿掉——那是
+	// **推論**，10 次變 1 次是**量測**。用推論換掉量測，換來的只是訊息短一點。拿掉的只有接在
+	// 它前面的「白名單的內容不會在這裡列出，所以」，清單出現之後那半句是假話。
+	return SandboxDeny, fmt.Errorf("%w: 命令 %q 不在 shell.allowed_commands 白名單（要允許它請把這個程式名加進 Workspace config.yaml 的 shell.allowed_commands）。%s"+
+		"**不要逐一嘗試其他命令名**——請直接告訴使用者你需要哪一個命令，由他決定要不要加進白名單",
+		ErrSandboxViolation, command, describeWhitelist("命令", c.allowedCommands))
 }
 
 // withinSubtree 判斷 target 是否落在 base 這棵子樹內。兩者都已標準化過。

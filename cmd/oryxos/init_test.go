@@ -149,6 +149,9 @@ func TestInitCommand(t *testing.T) {
 			// 少了它 go-openai 會打回 OpenAI 的預設端點，憑證與模型 ID 全部對不上。
 			"base_url: https://openrouter.ai/api/v1",
 			"allowed_domains", // http.allowed_domains 白名單段
+			// 被拒時拒絕訊息會列出白名單內容、隨對話送往 Provider（ADR-0007）。新建 Workspace
+			// 的使用者在填白名單的當下就該知道這件事，而不是事後在 SECURITY.md 讀到。
+			"白名單的內容會被送往模型",
 		} {
 			if !strings.Contains(cfg, want) {
 				t.Errorf("config.yaml 缺少 %q，實際內容：\n%s", want, cfg)
