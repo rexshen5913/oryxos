@@ -283,6 +283,249 @@ func TestChatEmptyWhitelistWarning(t *testing.T) {
 	}
 }
 
+// allowedDomainsYAML 組出 config.yaml 裡 http 段底下的 allowed_domains。entries 是**已經
+// 寫成 YAML 形式**的條目（含引號與 YAML 逸出），原樣放進清單——這幾格的重點就是 YAML 裡
+// 那個字面，轉兩次手反而看不出在測什麼。nil 代表寫成 `[]`。
+func allowedDomainsYAML(entries []string) string {
+	if entries == nil {
+		return "  allowed_domains: []\n"
+	}
+	var b strings.Builder
+	b.WriteString("  allowed_domains:\n")
+	for _, entry := range entries {
+		b.WriteString("    - ")
+		b.WriteString(entry)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// TestChatHTTPDomainWhitelistWarnings 是網域段的兩種啟動提醒（ADR-0007「收斂規則」）。
+//
+// **第一種：空白名單。** 判斷改走 EffectiveAllowedDomains，與另外兩段一致。修掉的既有
+// 缺陷是 `allowed_domains: [""]`：原本數的是 slice 長度，一條空字串被當成「已配置」而
+// 閉嘴，實際上每次呼叫都被攔。
+//
+// **第二種：可能永遠比不中。** 收斂只剔除空字串，其餘一律保留——剔錯的代價是使用者授權
+// 過的網域被靜默拒絕。所以「這條看起來寫成了網址」的疑慮改由這一行承擔。它是一個新的
+// 輸出面，契約有四條，每條一格以上：
+//
+//   - **只印條數與判準，不印條目值。** 條目含換行或控制字元時偽造不了終端輸出，條目很多
+//     時也灌不滿畫面（控制字元那格、100 條那格）。
+//   - **條數取自去重後的有效清單，每個有效值最多計一次。** 否則同一份配置會讓這行說 2 條、
+//     拒絕訊息的總數說 1 條（大小寫重複那格、多判準那格）。
+//   - **只對 url.Parse 保證比不中的形狀喊。** 比得中的條目不喊，否則合法設定會被誤報
+//     （保留形狀那格）。
+//   - **只在 Profile 含 HTTP Tool 時輸出**，與既有三行同形。
+//
+// 標記刻意比 TestChatEmptyWhitelistWarning 的 "allowed_domains" 精確：兩種提醒都含那個
+// 字串，用它分不出印的是哪一種。
+func TestChatHTTPDomainWhitelistWarnings(t *testing.T) {
+	const (
+		emptyMark      = "http.allowed_domains 為空"
+		suspiciousMark = "可能永遠比不中"
+	)
+	const profileWithHTTPGet = `identity:
+  agent_name: Oryx
+  prompt: 你是 Oryx。
+provider:
+  name: openrouter
+  model: deepseek/deepseek-v4-flash
+tools:
+  - http_get
+`
+	const profileWithHTTPPost = `identity:
+  agent_name: Oryx
+  prompt: 你是 Oryx。
+provider:
+  name: openrouter
+  model: deepseek/deepseek-v4-flash
+tools:
+  - http_post
+`
+	const profileWithoutHTTP = `identity:
+  agent_name: Oryx
+  prompt: 你是 Oryx。
+provider:
+  name: openrouter
+  model: deepseek/deepseek-v4-flash
+tools: []
+`
+	hundredSuspicious := make([]string, 100)
+	for i := range hundredSuspicious {
+		hundredSuspicious[i] = `"https://h` + strconv.Itoa(i) + `.example"`
+	}
+
+	tests := []struct {
+		name           string
+		domains        []string // YAML 形式的條目；nil 代表 []
+		profile        string
+		wantEmpty      bool
+		wantSuspicious int // 0 代表這行不該出現
+		mustNotContain []string
+	}{
+		{
+			name:      "只有空字串條目時判為空並提醒",
+			domains:   []string{`""`},
+			profile:   profileWithHTTPGet,
+			wantEmpty: true,
+		},
+		{
+			// 對照：空字串混著一條真的網域，就不該再喊。
+			name:    "空字串與有效條目混寫時不提醒",
+			domains: []string{`""`, `api.example.com`},
+			profile: profileWithHTTPGet,
+		},
+		{
+			// 它們判為非空（所以不走空白名單那行），但 url.Parse 自己就會拒絕這種 host。
+			name:           "ASCII 空白與 tab 判為非空並提醒可能比不中",
+			domains:        []string{`" "`, `"\t"`},
+			profile:        profileWithHTTPGet,
+			wantSuspicious: 2,
+		},
+		{
+			// 每個判準各一條：scheme、路徑、query、fragment、userinfo、前後空白。
+			name: "寫成網址的條目每條計一次，且不印條目值",
+			domains: []string{`"https://example.com"`, `"example.com/path"`, `"example.com?q=1"`,
+				`"example.com#frag"`, `"user@example.com"`, `" example.com "`},
+			profile:        profileWithHTTPGet,
+			wantSuspicious: 6,
+			mustNotContain: []string{"example.com/path", "user@example.com"},
+		},
+		{
+			// 這些條目看起來都不像網域，但 url.Parse → Hostname() → 白名單比對這條路真的
+			// 比得中（internal/tool 的 TestCheckHTTPURLStillMatchesRetainedDomainShapes
+			// 逐一證明）。對它們喊「可能比不中」是誤報。`:` 與 `%` 因此不能當判準（IPv6、
+			// zoned IPv6），NBSP、全形空白與 C1 控制字元也不能算進「空白或控制字元」。
+			//
+			// C1 控制字元寫成 YAML 逸出（`\u0085`）就進得了 config.yaml，而且比得中。注意是
+			// 逸出寫法：原始的 U+0085 字元會被 yaml.v3 當換行折成空白，其他原始 C1 字元則讓整份
+			// 設定拒絕解析——這格曾因為寫進了原始字元而量到一條「含空白」的條目。
+			name: "比得中的保留形狀不提醒",
+			domains: []string{`exa_mple.com`, `example.com.`, `bücher.example`, `"*example.com"`, `"*."`,
+				`"*.*.example.com"`, `"fe80::1%en0"`, `"::1"`, `192.168.0.1`, `Example.COM`,
+				`"\u00a0"`, `"\u3000"`, `"a\u0085b.example"`},
+			profile: profileWithHTTPGet,
+		},
+		{
+			// 去重後剩 1 條：這行若說 2 條，就與拒絕訊息的總數互相矛盾。
+			name:           "大小寫不同的重複只計一次",
+			domains:        []string{`"Example.com/x"`, `"example.com/x"`},
+			profile:        profileWithHTTPGet,
+			wantSuspicious: 1,
+		},
+		{
+			name:           "同時符合多個判準只計一次",
+			domains:        []string{`"https://a.com/x "`},
+			profile:        profileWithHTTPGet,
+			wantSuspicious: 1,
+		},
+		{
+			// 四條都只靠控制字元入選。第一條若被原樣印出，輸出會多一行看起來像系統提醒
+			// 的假句子；第三條會讓終端機清屏。第四條是 DEL（0x7F）：它不在 0x00–0x20 的
+			// 範圍裡，判準得另外認它。
+			name: "條目含換行或控制字元時不偽造輸出行",
+			domains: []string{`"evil.example\n提醒：偽造的一行"`, `"a.example\r提醒：偽造的第二行"`,
+				`"b.example\x1b[2J"`, `"c.example\x7f"`},
+			profile:        profileWithHTTPGet,
+			wantSuspicious: 4,
+			mustNotContain: []string{"偽造", "\x1b"},
+		},
+		{
+			name:           "100 條可疑條目仍只印一行",
+			domains:        hundredSuspicious,
+			profile:        profileWithHTTPGet,
+			wantSuspicious: 100,
+			mustNotContain: []string{"h0.example"},
+		},
+		{
+			// 既有的判斷認 http_get 或 http_post 任一個；新那行只認 http_get 的話，只開
+			// http_post 的使用者就收不到。
+			name:           "Profile 只列 http_post 時同樣提醒",
+			domains:        []string{`"https://example.com"`},
+			profile:        profileWithHTTPPost,
+			wantSuspicious: 1,
+		},
+		{
+			name:    "Profile 沒有 HTTP Tool 時空白名單不提醒",
+			domains: nil,
+			profile: profileWithoutHTTP,
+		},
+		{
+			name:    "Profile 沒有 HTTP Tool 時可疑條目不提醒",
+			domains: []string{`"https://example.com"`},
+			profile: profileWithoutHTTP,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newReplayServer(t, readFixture(t, "chat_reply_1.json"))
+			dir := setupChatWorkspace(t, srv.URL)
+			writeProfile(t, dir, tt.profile)
+			cfg := "providers:\n  openrouter:\n    api_key: ${OPENROUTER_API_KEY}\n    base_url: " + srv.URL +
+				"\nhttp:\n" + allowedDomainsYAML(tt.domains)
+			if err := os.WriteFile(filepath.Join(dir, workspaceDir, "config.yaml"), []byte(cfg), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := runChat(context.Background(), strings.NewReader(""), &out, dir, chatOptions{profileName: "default", message: "你好"}); err != nil {
+				t.Fatalf("runChat: %v", err)
+			}
+			output := out.String()
+
+			var emptyLines, suspiciousLines []string
+			reminders := 0
+			for _, line := range strings.Split(output, "\n") {
+				if strings.HasPrefix(line, "提醒：") {
+					reminders++
+				}
+				if strings.Contains(line, emptyMark) {
+					emptyLines = append(emptyLines, line)
+				}
+				if strings.Contains(line, suspiciousMark) {
+					suspiciousLines = append(suspiciousLines, line)
+				}
+			}
+
+			if tt.wantEmpty != (len(emptyLines) == 1) || len(emptyLines) > 1 {
+				t.Errorf("空白名單提醒 %d 行，期望出現 = %v; 輸出: %q", len(emptyLines), tt.wantEmpty, output)
+			}
+			if tt.wantSuspicious == 0 {
+				if len(suspiciousLines) != 0 {
+					t.Errorf("不該出現可能比不中的提醒，實際: %q", suspiciousLines)
+				}
+			} else {
+				if len(suspiciousLines) != 1 {
+					t.Fatalf("可能比不中的提醒應恰好 1 行，實際 %d 行; 輸出: %q", len(suspiciousLines), output)
+				}
+				if want := "有 " + strconv.Itoa(tt.wantSuspicious) + " 條"; !strings.Contains(suspiciousLines[0], want) {
+					t.Errorf("提醒的條數不對，期望含 %q，實際: %q", want, suspiciousLines[0])
+				}
+			}
+
+			// 版面沒被改變的直接證據：以「提醒：」起頭的行數恰好是該出現的那幾行。條目值
+			// 若被原樣印出，含換行的那條會多長出一行假提醒。
+			wantReminders := 0
+			if tt.wantEmpty {
+				wantReminders++
+			}
+			if tt.wantSuspicious > 0 {
+				wantReminders++
+			}
+			if reminders != wantReminders {
+				t.Errorf("以「提醒：」起頭的行有 %d 行，期望 %d; 輸出: %q", reminders, wantReminders, output)
+			}
+			for _, forbidden := range tt.mustNotContain {
+				if strings.Contains(output, forbidden) {
+					t.Errorf("輸出含有條目內容 %q（提醒不得印條目值）; 輸出: %q", forbidden, output)
+				}
+			}
+		})
+	}
+}
+
 // TestChatEmptyFilePathWhitelistWarning 是同一條提醒的第二種（路徑白名單），形狀比照
 // 上面那條 http.allowed_domains 的。
 //

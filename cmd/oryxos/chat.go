@@ -265,6 +265,40 @@ func longestServerPrefix(name string, specs []core.McpServerSpec) string {
 	return longest
 }
 
+// countUnmatchableDomains 數一份**已收斂**的網域白名單裡，有幾條含有 host 裡幾乎不會出現
+// 的字元，供啟動提醒使用。每條最多計一次，同時符合多個判準也只計一次。
+//
+// 判準取自 CheckHTTPURL 真的會走的那條路（url.Parse → Hostname()），每個字元都實測過：
+//
+//   - `/`、`?`、`#`：authority 遇到它們就結束，進不了 host。scheme 的 `://` 由 `/` 涵蓋。
+//   - `@`：userinfo 的分隔符，host 在它之後。
+//   - ASCII 空白與控制字元（0x00–0x20、0x7F）：url.Parse 在 host 裡直接拒絕。
+//
+// **這是「幾乎一定比不中」，不是保證。** 實測找到一個例外：zoned IPv6 的 zone 裡以 `%20`
+// 寫進的空白會留在 Hostname() 裡（`http://[fe80::1%25a%20b]/` → `fe80::1%a b`）。所以它
+// 只配當一行提醒，不配當剔除的依據——提醒印錯了，使用者忽略它就好。
+//
+// **刻意不算的字元**：它們出現在比得中的合法條目裡，算進來就是誤報。
+//
+//   - `:` 與 `%`：IPv6（`::1`）與 zoned IPv6（`fe80::1%en0`）。
+//   - `*`：`*example.com` 是 url.Parse 接受的字面 host。
+//   - NBSP、全形空白與 C1 控制字元：非 ASCII，url.Parse 接受它們當 host。C1 寫成 YAML
+//     逸出（`\u0085`）就進得了 config.yaml，不是理論上的邊角。
+func countUnmatchableDomains(domains []string) int {
+	count := 0
+	for _, domain := range domains {
+		if strings.ContainsAny(domain, "/?#@") || strings.ContainsFunc(domain, isASCIISpaceOrControl) {
+			count++
+		}
+	}
+	return count
+}
+
+// isASCIISpaceOrControl 判斷 r 是不是 ASCII 空白或控制字元（0x00–0x20、0x7F）。
+func isASCIISpaceOrControl(r rune) bool {
+	return r <= ' ' || r == 0x7f
+}
+
 // runChat 載入 Workspace 設定檔與 Profile、校驗 Provider 可解析，組出
 // AgentService 後交給 CLI Channel；message 非空時走單訊息模式。
 func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, opts chatOptions) (err error) {
@@ -443,7 +477,13 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 	// 啟動即清晰告知（需求 5.12 基礎校驗）：空白名單是安全的預設（全拒），
 	// 但 Profile 列了 HTTP Tool 時，每次呼叫都會在執行期被攔截——先提醒，
 	// 不硬報錯（純對話不受影響）。
-	if len(cfg.HTTP.AllowedDomains) == 0 && (slices.Contains(prof.Tools, "http_get") || slices.Contains(prof.Tools, "http_post")) {
+	//
+	// **判斷「空」用校驗器自己的那一份**（EffectiveAllowedDomains），理由與下面路徑那行
+	// 相同。原本數的是 slice 長度，`allowed_domains: [""]` 因此被當成「已配置」而閉嘴，
+	// 實際上每次呼叫都被攔（ADR-0007）。這份清單與 HTTP Tool 的判斷，下面第三種提醒還要用。
+	effectiveDomains := tool.EffectiveAllowedDomains(cfg.HTTP.AllowedDomains)
+	hasHTTPTool := slices.Contains(prof.Tools, "http_get") || slices.Contains(prof.Tools, "http_post")
+	if len(effectiveDomains) == 0 && hasHTTPTool {
 		fmt.Fprintf(out, "提醒：%s/config.yaml 的 http.allowed_domains 為空，HTTP Tool 呼叫將全部被攔截；請把允許的域名加入白名單。\n", workspaceDir)
 	}
 	// 路徑白名單同一條，理由也同一條：兩段白名單的預設值都是 []，少了這行使用者會
@@ -483,6 +523,24 @@ func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, o
 		fmt.Fprintf(out, "提醒：PATH 上的 %s 落在 %s/config.yaml 的 file.allowed_paths 之內；"+
 			"這代表 write_file 能新增或改掉 shell 跑得到的程式（等於把寫檔權限升級成執行權限）。"+
 			"若非刻意，請讓兩者不要重疊。\n", strings.Join(overlapping, "、"), workspaceDir)
+	}
+	// 第三種提醒：**網域白名單裡有條目可能永遠比不中**（ADR-0007）。
+	//
+	// EffectiveAllowedDomains 只剔除空字串，其餘一律保留——剔錯的代價是使用者授權過的
+	// 網域被靜默拒絕。所以「這條大概寫成了網址」的疑慮由這一行承擔，不由剔除承擔。
+	//
+	// 契約三條：
+	//
+	//   - **只印條數與判準，不印條目值。** 條目是使用者手寫的 YAML 字串，含換行時原樣印出
+	//     會偽造一行終端輸出，條目很多時也會洗版。上面三行空白名單提醒同樣一個條目值都
+	//     不印。
+	//   - **條數取自去重後的有效清單**（effectiveDomains）。否則 `["Example.com/x",
+	//     "example.com/x"]` 會讓這行說 2 條，而拒絕訊息的總數是 1 條。
+	//   - **措辭不承諾它們會出現在拒絕訊息裡**：拒絕訊息另有兩個顯示上限，它們一樣受約束。
+	//     準確的說法只到「仍會參與白名單比對」。
+	if unmatchable := countUnmatchableDomains(effectiveDomains); unmatchable > 0 && hasHTTPTool {
+		fmt.Fprintf(out, "提醒：%s/config.yaml 的 http.allowed_domains 有 %d 條可能永遠比不中（含 URL 分隔符、scheme、空白或控制字元）；"+
+			"它們仍會參與白名單比對，請確認寫的是網域而不是網址。\n", workspaceDir, unmatchable)
 	}
 
 	// 對話與審計落 Workspace 內單一 SQLite 檔：備份或搬遷 Workspace 就是搬檔案。

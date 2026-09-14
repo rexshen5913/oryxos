@@ -86,15 +86,51 @@ type SandboxChecker struct {
 
 // NewSandboxChecker 以 config.yaml 的三段設定建立校驗器；空白名單全部拒絕。
 //
-// 路徑白名單在這裡就收斂成 EffectiveAllowedPaths 的產物：**校驗器持有的那一份，
-// 就是它實際會拿來比對的那一份**。這讓「白名單是不是空的」只有一個答案，組裝點
-// 的啟動提醒與校驗結果不可能對不上（見 EffectiveAllowedPaths 的說明）。
+// 三段白名單在這裡就收斂成各自 Effective* 的產物：**校驗器持有的那一份，就是它實際
+// 會拿來比對的那一份**。這讓「白名單是不是空的」只有一個答案，組裝點的啟動提醒與
+// 校驗結果不可能對不上（見 EffectiveAllowedPaths 的說明）。
 func NewSandboxChecker(cfg SandboxConfig) *SandboxChecker {
 	return &SandboxChecker{
-		allowedDomains:  cfg.AllowedDomains,
+		allowedDomains:  EffectiveAllowedDomains(cfg.AllowedDomains),
 		allowedPaths:    EffectiveAllowedPaths(cfg.AllowedPaths),
 		allowedCommands: EffectiveAllowedCommands(cfg.AllowedCommands),
 	}
+}
+
+// EffectiveAllowedDomains 回傳一組 http.allowed_domains 之中**校驗器實際會拿來比對**的
+// 條目，已轉小寫並去重。存在的理由與另外兩段相同：讓「白名單是不是空的」只有一個定義
+// 點——啟動提醒、白名單比對、拒絕訊息三者共用這一份。
+//
+// **只剔除一種條目：真正的空字串**（不是 trim 後為空）。這條規則刻意比另外兩段寬鬆，
+// 因為它的兩種錯法嚴重程度不對等（ADR-0007）：
+//
+//   - 剔得太少：啟動提醒少印一行，輕。
+//   - 剔得太多：一條使用者授權過、而且比得中的網域被靜默剔除，請求被拒而系統一句話都
+//     不說，重。
+//
+// 空字串是唯一**能證明**比不中的：CheckHTTPURL 在進入比對迴圈之前就擋下空 host。其餘
+// 看起來比不中的形狀一律保留——底線、尾點、Unicode、`*` 字面、zoned IPv6，甚至 NBSP 與
+// 全形空白（TrimSpace 會吃掉它們，但 url.Parse 接受它們當 host，比得中）。逐一實測見
+// TestCheckHTTPURLStillMatchesRetainedDomainShapes。「這條大概寫錯了」的疑慮由組裝點的
+// 啟動提醒承擔，不由剔除承擔。
+//
+// **轉小寫在這裡做一次**：matchDomain 本來就兩側小寫比對，預先轉換與比對時轉換行為
+// 相同；而去重也需要它——`Example.com` 與 `example.COM` 是同一個網域，不該佔兩個名額。
+func EffectiveAllowedDomains(entries []string) []string {
+	effective := make([]string, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		if entry == "" {
+			continue
+		}
+		domain := strings.ToLower(entry)
+		if seen[domain] {
+			continue
+		}
+		seen[domain] = true
+		effective = append(effective, domain)
+	}
+	return effective
 }
 
 // EffectiveAllowedPaths 回傳一組 file.allowed_paths 之中**校驗器實際會拿來比對**的
@@ -115,8 +151,13 @@ func NewSandboxChecker(cfg SandboxConfig) *SandboxChecker {
 // 前後帶空白的條目原樣保留——檔名前後真的可以有空白，替使用者猜會讓那種路徑永遠
 // 碰不到。YAML 的未加引號純量本來就會自動去掉前後空白，會走到這裡的是刻意加了
 // 引號的寫法。
+//
+// **依標準化後的值去重、保留首次出現**（ADR-0007）。`notes`、`notes/`、`./notes` 在
+// 校驗器眼中是同一棵子樹，字面比對卻看不出來。去重不改變比對結果——重複條目放行的集合
+// 與單一條目完全相同——它只讓拒絕訊息的顯示名額不被同一條佔掉。
 func EffectiveAllowedPaths(entries []string) []string {
 	effective := make([]string, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		if strings.TrimSpace(entry) == "" {
 			continue
@@ -128,6 +169,10 @@ func EffectiveAllowedPaths(entries []string) []string {
 		if escapesWorkspace(base) {
 			continue
 		}
+		if seen[base] {
+			continue
+		}
+		seen[base] = true
 		effective = append(effective, base)
 	}
 	return effective
@@ -147,8 +192,13 @@ func EffectiveAllowedPaths(entries []string) []string {
 //
 // 條目本身**不做 trim 後再比對**，理由同 EffectiveAllowedPaths：只有「trim 後為空」
 // 才算沒寫。
+//
+// **字面去重、保留首次出現**（ADR-0007）。判重用字面而不做大小寫或 basename 正規化，
+// 因為 CheckShellCommand 的比對就是字面完全相等（spec #4 定案）——`git` 與 `Git` 在
+// 校驗器眼中是兩個程式名。去重不改變比對結果。
 func EffectiveAllowedCommands(entries []string) []string {
 	effective := make([]string, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		if strings.TrimSpace(entry) == "" {
 			continue
@@ -156,6 +206,10 @@ func EffectiveAllowedCommands(entries []string) []string {
 		if hasPathSeparator(entry) {
 			continue
 		}
+		if seen[entry] {
+			continue
+		}
+		seen[entry] = true
 		effective = append(effective, entry)
 	}
 	return effective
@@ -199,8 +253,10 @@ func (c *SandboxChecker) CheckHTTPURL(rawURL string) (SandboxDecision, error) {
 	if host == "" {
 		return SandboxDeny, fmt.Errorf("%w: URL 缺 host", ErrSandboxViolation)
 	}
+	// c.allowedDomains 已在建構時經 EffectiveAllowedDomains 轉小寫：這裡不再轉一次，讓
+	// 「轉小寫」只發生在一個地方（形狀同 CheckFilePath 的迴圈）。
 	for _, pattern := range c.allowedDomains {
-		if matchDomain(strings.ToLower(pattern), host) {
+		if matchDomain(pattern, host) {
 			return SandboxAllow, nil
 		}
 	}

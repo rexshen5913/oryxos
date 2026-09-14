@@ -128,6 +128,74 @@ func TestSandboxViolationErrorOmitsQuery(t *testing.T) {
 	}
 }
 
+// retainedDomainShape 是一個「看起來不像網域、但現在真的比得中」的白名單條目，連同一個
+// 會被它放行的網址。
+type retainedDomainShape struct {
+	name      string
+	entry     string // 使用者寫在 http.allowed_domains 的原樣
+	effective string // 收斂之後的樣子（只差在轉小寫）
+	rawURL    string // 一個會被這條條目放行的網址
+}
+
+// retainedDomainShapes 是 EffectiveAllowedDomains **必須保留**的條目形狀（ADR-0007「收斂
+// 規則」一節的保留形狀）。
+//
+// **兩支測試共用這一份，不各寫一份**：TestEffectiveAllowedDomains 驗「收斂後還在」，
+// TestCheckHTTPURLStillMatchesRetainedDomainShapes 驗「還在的真的比得中」。同一組形狀寫
+// 兩處，就是下一個過期的來源——而那一節在 ADR 階段被連續駁回四輪，四次都是同一個錯：
+// 撰寫者憑語法猜「這個比不中」，然後被一條真的比得中的條目打穿。
+//
+// 用函式回傳而不是套件層級變數：每支測試拿到自己的一份，改了也不會污染別支。
+func retainedDomainShapes() []retainedDomainShape {
+	return []retainedDomainShape{
+		{name: "含底線", entry: "exa_mple.com", effective: "exa_mple.com", rawURL: "https://exa_mple.com/x"},
+		{name: "帶尾點的絕對域名", entry: "example.com.", effective: "example.com.", rawURL: "https://example.com./x"},
+		{name: "Unicode 主機名", entry: "bücher.example", effective: "bücher.example", rawURL: "https://bücher.example/x"},
+		// `*` 不在開頭接點時不是萬用字元，而是字面：url.Parse 允許 host 含 `*`。
+		{name: "星號字面", entry: "*example.com", effective: "*example.com", rawURL: "https://*example.com/x"},
+		// `*.` 的後綴是空字串，於是匹配任何以點結尾的 host。
+		{name: "星號點匹配帶尾點的 host", entry: "*.", effective: "*.", rawURL: "https://a./x"},
+		{name: "多層星號", entry: "*.*.example.com", effective: "*.*.example.com", rawURL: "https://a.*.example.com/x"},
+		// zoned IPv6 是合法的 Hostname，但 net.ParseIP 不收——用 ParseIP 判準會剔錯它。
+		{name: "zoned IPv6", entry: "fe80::1%en0", effective: "fe80::1%en0", rawURL: "http://[fe80::1%25en0]/x"},
+		{name: "IPv6", entry: "::1", effective: "::1", rawURL: "http://[::1]:8080/x"},
+		{name: "IPv4", entry: "192.168.0.1", effective: "192.168.0.1", rawURL: "http://192.168.0.1/x"},
+		{name: "大小寫混雜", entry: "Example.COM", effective: "example.com", rawURL: "https://EXAMPLE.com/x"},
+		// NBSP 與全形空白會被 strings.TrimSpace 吃掉，但 url.Parse 接受它們當 host——
+		// 這正是「trim 後為空就剔除」那一版被打穿的第四個反例。
+		{name: "NBSP", entry: "\u00a0", effective: "\u00a0", rawURL: "https://\u00a0/x"},
+		{name: "全形空白", entry: "\u3000", effective: "\u3000", rawURL: "https://\u3000/x"},
+		// 非 ASCII 的控制字元（C1）以 UTF-8 編碼後每個 byte 都 ≥ 0x80，url.Parse 的控制
+		// 字元檢查只擋 < 0x20 與 0x7F，所以它同樣是比得中的 host。
+		{name: "C1 控制字元", entry: "a\u0085b.example", effective: "a\u0085b.example", rawURL: "https://a\u0085b.example/x"},
+		// zone 裡以 %20 寫進的空白會留在 Hostname() 裡。所以「含 ASCII 空白」只配觸發啟動
+		// 提醒，不配當剔除的依據——這一條就是反例。
+		{name: "zone 含空白的 IPv6", entry: "fe80::1%a b", effective: "fe80::1%a b", rawURL: "http://[fe80::1%25a%20b]/x"},
+	}
+}
+
+// TestCheckHTTPURLStillMatchesRetainedDomainShapes 是網域收斂的**全鏈路回歸**（ADR-0007）。
+//
+// 判準是這條路本身——`url.Parse` → `Hostname()` → 白名單比對，也就是 CheckHTTPURL 真的
+// 會走的那一條——**不是任何語法描述**。每一格建一個只含那條條目的校驗器，丟一個網址
+// 進去，斷言放行。
+//
+// **它在收斂落地之前就是綠的，這是刻意的。** 它不是在驗新行為，是在守一條不能被縮減的
+// 授權集合：日後有人替 EffectiveAllowedDomains 加一條「看起來比不中就剔除」的規則，
+// 這裡就會轉紅，並指名是哪一個形狀被剔錯了。
+func TestCheckHTTPURLStillMatchesRetainedDomainShapes(t *testing.T) {
+	for _, shape := range retainedDomainShapes() {
+		t.Run(shape.name, func(t *testing.T) {
+			checker := tool.NewSandboxChecker(tool.SandboxConfig{AllowedDomains: []string{shape.entry}})
+			decision, err := checker.CheckHTTPURL(shape.rawURL)
+			if decision != tool.SandboxAllow || err != nil {
+				t.Errorf("白名單 [%q] 之下 CheckHTTPURL(%q) = (%v, %v)，期望放行——這條條目被收斂剔除或比對失效了",
+					shape.entry, shape.rawURL, decision, err)
+			}
+		})
+	}
+}
+
 // TestSandboxCheckerCheckFilePath 是路徑白名單的拒絕矩陣：解析基準固定為 Workspace
 // 根，先標準化再比對，比對是**子樹包含**而不是字串前綴，空白名單全部拒絕。
 //
@@ -535,6 +603,121 @@ func TestEffectiveAllowedCommands(t *testing.T) {
 			for i := range got {
 				if got[i] != tt.want[i] {
 					t.Errorf("EffectiveAllowedCommands(%v)[%d] = %q, 期望 %q", tt.entries, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestEffectiveAllowedDomains 釘住網域段「白名單是不是空的」那個單一定義點（ADR-0007
+// 「先決條件」一節）。消費者有三個：SandboxChecker 拿它比對、組裝點拿它決定要不要印
+// 空白名單提醒、ticket #68 之後的拒絕訊息拿它列出內容。三者必須得到同一個答案。
+//
+// **它刻意比另外兩段寬鬆：只剔除真正的空字串。** 收斂有兩種錯法，嚴重程度不對等——剔得
+// 太少只是少印一行提醒；剔得太多是一條使用者授權過、而且比得中的網域被靜默剔除，請求
+// 被拒而系統一句話都不說。`""` 是唯一能確定比不中的：CheckHTTPURL 在進入比對迴圈之前
+// 就擋下空 host。
+func TestEffectiveAllowedDomains(t *testing.T) {
+	type testCase struct {
+		name    string
+		entries []string
+		want    []string
+	}
+	tests := []testCase{
+		{name: "nil 是空的", entries: nil, want: []string{}},
+		{name: "空字串條目等於沒寫", entries: []string{""}, want: []string{}},
+		{name: "空字串與有效條目混在一起時只留有效的",
+			entries: []string{"", "api.example.com", ""}, want: []string{"api.example.com"}},
+		{
+			// 最容易寫錯的一格：TrimSpace 會把這兩個字元當空白吃掉，但它們是合法且比得中
+			// 的 host（見 TestCheckHTTPURLStillMatchesRetainedDomainShapes）。
+			name:    "NBSP 與全形空白判為非空並保留",
+			entries: []string{"\u00a0", "\u3000"},
+			want:    []string{"\u00a0", "\u3000"},
+		},
+		{
+			// url.Parse 自己就會拒絕含 ASCII 空白或 tab 的 host，所以它們比不中——但留著
+			// 無害，疑慮交給啟動提醒。剔除它們得先證明「比不中」，而這一節的教訓是別猜。
+			name:    "ASCII 空白與 tab 判為非空並保留",
+			entries: []string{" ", "\t"},
+			want:    []string{" ", "\t"},
+		},
+		{
+			// 疑慮由啟動時的一行聚合提醒承擔，不由剔除承擔（見 chat.go）。
+			name:    "看起來寫成網址的條目留在清單裡",
+			entries: []string{"https://example.com", "example.com/path", "user@example.com", " example.com "},
+			want:    []string{"https://example.com", "example.com/path", "user@example.com", " example.com "},
+		},
+	}
+	// 保留形狀那一格從共用清單組出來，不在這裡另抄一份（理由見 retainedDomainShapes）。
+	retained := testCase{name: "保留形狀全部保留（只轉小寫）"}
+	for _, shape := range retainedDomainShapes() {
+		retained.entries = append(retained.entries, shape.entry)
+		retained.want = append(retained.want, shape.effective)
+	}
+	tests = append(tests, retained)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tool.EffectiveAllowedDomains(tt.entries)
+			if len(got) != len(tt.want) {
+				t.Fatalf("EffectiveAllowedDomains(%q) = %q, 期望 %q", tt.entries, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("EffectiveAllowedDomains(%q)[%d] = %q, 期望 %q", tt.entries, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestEffectiveAllowedDedup 釘住三段共通的去重規則（ADR-0007）：**依有效值判重、保留首次
+// 出現、在計數之前完成**。
+//
+// **為什麼要去重**：ticket #68 之後拒絕訊息最多列 32 條。重複條目若佔掉名額，會把真正
+// 可用的後續條目擠出訊息之外——使用者看到「共 40 條，其中 8 條未列出」，而列出的那 32
+// 條裡有一半是同一個網域。
+//
+// **為什麼是「依有效值」而不是字面**：三段各自的比對語義決定了什麼叫「同一條」。paths
+// 經 filepath.Clean 標準化，`notes`／`notes/`／`./notes` 在校驗器眼中是同一棵子樹；
+// domains 兩側轉小寫比對，大小寫不同的是同一個網域；commands 是字面完全相等（spec #4
+// 定案不做 basename 或大小寫正規化），所以 `git` 與 `Git` 是兩條。
+//
+// **去重不改變任何比對結果**：重複條目放行的集合與單一條目完全相同。所以這裡只驗清單的
+// 形狀，比對行為由三個 Check* 的既有矩陣守著。
+func TestEffectiveAllowedDedup(t *testing.T) {
+	tests := []struct {
+		name      string
+		effective func([]string) []string
+		entries   []string
+		want      []string
+	}{
+		{name: "paths 在標準化之後判重", effective: tool.EffectiveAllowedPaths,
+			entries: []string{"notes", "notes/", "./notes"}, want: []string{"notes"}},
+		{name: "paths 保留首次出現的順序", effective: tool.EffectiveAllowedPaths,
+			entries: []string{"docs", "notes", "./docs/"}, want: []string{"docs", "notes"}},
+		{name: "commands 字面判重", effective: tool.EffectiveAllowedCommands,
+			entries: []string{"git", "git", "git"}, want: []string{"git"}},
+		{name: "commands 保留首次出現的順序", effective: tool.EffectiveAllowedCommands,
+			entries: []string{"ls", "git", "ls"}, want: []string{"ls", "git"}},
+		{name: "commands 大小寫不同是兩條", effective: tool.EffectiveAllowedCommands,
+			entries: []string{"git", "Git"}, want: []string{"git", "Git"}},
+		{name: "domains 轉小寫後判重", effective: tool.EffectiveAllowedDomains,
+			entries: []string{"Example.com", "example.COM"}, want: []string{"example.com"}},
+		{name: "domains 保留首次出現的順序", effective: tool.EffectiveAllowedDomains,
+			entries: []string{"b.example", "a.example", "B.EXAMPLE"}, want: []string{"b.example", "a.example"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.effective(tt.entries)
+			if len(got) != len(tt.want) {
+				t.Fatalf("收斂(%q) = %q, 期望 %q", tt.entries, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("收斂(%q)[%d] = %q, 期望 %q", tt.entries, i, got[i], tt.want[i])
 				}
 			}
 		})
