@@ -161,10 +161,9 @@ func assembleProcess(ctx context.Context, out io.Writer, baseDir string) (*proce
 // Close 依序關閉審計、SQLite、各份 Profile 的 MCP 連線、Workspace root 與日誌檔。每一項
 // 都會試著關，不因前一項失敗而跳過——漏掉的 MCP 連線會變成孤兒進程。
 //
-// **順序沿用 ticket #74 抽取之前 runChat 那一串 defer 實際的執行順序**。spec #73 第二節把
-// chat 的收尾順序寫成「審計、MCP、SQLite」，與當時的程式碼不符，這裡以程式碼為準。其中
-// 硬性的一條是審計先於 SQLite：佇列裡還沒寫出去的記錄要寫進那個資料庫，先關庫的話它們隨
-// 進程消失，而對話本身一切正常，沒有人會發現。
+// **順序沿用 ticket #74 抽取之前 runChat 那一串 defer 實際的執行順序**；spec #73 第二節定案
+// server 的優雅關閉也照這個順序。其中硬性的一條是審計先於 SQLite：佇列裡還沒寫出去的記錄
+// 要寫進那個資料庫，先關庫的話它們隨進程消失，而對話本身一切正常，沒有人會發現。
 //
 // **Profile 層級的 MCP 連線交進這裡收，不讓呼叫端各排一個 defer**：Profile 層級一定組在
 // 進程層級之後，各自 defer 的話後進先出會讓 MCP 最先關、排到審計前面。呼叫端把組好的
