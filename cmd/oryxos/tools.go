@@ -100,7 +100,7 @@ func runTools(ctx context.Context, out io.Writer, baseDir string, opts toolsOpti
 	}
 	longTerm := memory.NewLongTermMemory(wsRoot, filepath.Join("memory", memoryFile))
 	sandbox := sandboxConfig(cfg)
-	// **composition root：與 runChat 對稱，limiter 在這裡建立一次。** 兩個命令是兩個
+	// **composition root：與 assembleProcess 對稱，limiter 在這裡建立一次。** 兩個命令是兩個
 	// 不同的進程，各自一份就是「整個進程一份」；把它移進 buildToolRegistry 才會壞掉
 	// ——那個函式在單一進程裡就可能被呼叫多次（ticket #35）。
 	registry, err := buildToolRegistry(sandbox, shellRuntime(sandbox, ws), tool.NewShellLimiter(),
