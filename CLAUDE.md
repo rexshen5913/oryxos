@@ -8,7 +8,7 @@
 
 ## 0. 專案現況
 
-**實作啟動。** Go module 骨架已落地（`go.mod`、`cmd/oryxos`、8 個 `internal/` package、`Makefile`；ticket #2）。核心功能依 spec #1（issue #1）的 tickets #3～#6 逐張落地中，§2 的 package scope 自此生效。
+**核心階段實作中。** Go module 骨架在 ticket #2 落地（`go.mod`、`cmd/oryxos`、`internal/` 分包、`Makefile`），之後依 spec #1～#7 逐張落地；最近一份是 spec #7（issue #73）的 Web Service：`oryxos server` 與核心 10 個 REST 端點。§2 的 package scope 生效中。
 
 ---
 
@@ -18,7 +18,7 @@
 - **建置與測試**：
   - 執行所有測試：`make test`
   - 建置二進制：`make build`（`CGO_ENABLED=0 go build -o oryxos ./cmd/oryxos`）
-  - Web 服務（`make web`／`oryxos server`）尚未實作，屬後續 ticket，落地時再補對應 target
+  - 啟動 Web Service：`oryxos server`（預設監聽 `:8080`，可用 `--addr`、`--turn-timeout` 調整；未啟用認證，風險見 `SECURITY.md`）。Makefile 沒有對應的 target：先 `make build`，再執行產出的二進制
 
 ---
 
