@@ -55,8 +55,7 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, "invalid_request", "缺少必填欄位 profile")
 		return
 	}
-	if problem := userIDProblem(req.UserID); problem != "" {
-		h.writeError(w, http.StatusBadRequest, "invalid_request", problem)
+	if !h.checkUserID(w, req.UserID) {
 		return
 	}
 	entry, ok := h.lookupAvailableProfile(w, req.Profile)
@@ -150,6 +149,16 @@ func (h *handler) lookupWebSession(w http.ResponseWriter, r *http.Request) (*sto
 		return nil, false
 	}
 	return record, true
+}
+
+// checkUserID 檢查 user_id（spec #73 第五節），不合格時寫好 400 invalid_request 並回 false。建立
+// Session 與無狀態呼叫共用這一份規則。
+func (h *handler) checkUserID(w http.ResponseWriter, userID string) bool {
+	if problem := userIDProblem(userID); problem != "" {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", problem)
+		return false
+	}
+	return true
 }
 
 // userIDProblem 回傳 user_id 不合格的原因；合格時回空字串。原因一律指名 user_id。

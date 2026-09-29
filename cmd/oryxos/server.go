@@ -236,6 +236,7 @@ func runServer(ctx context.Context, out io.Writer, baseDir string, opts serverOp
 			// 取自 Profile 過濾後的 Executor，也就是送給 LLM 的那一份：MCP 降級與自動加入的 load_skill
 			// 都已經反映在裡面。拿 Profile 的 tools 欄位原文來列，會把連不上的 MCP 工具也列成可用。
 			entry.Agent = assembled.agent
+			entry.StatelessAgent = assembled.statelessAgent
 			for _, info := range assembled.executor.Tools() {
 				entry.Tools = append(entry.Tools, web.ToolEntry{Name: info.Name, Description: info.Description, Server: info.Server})
 			}

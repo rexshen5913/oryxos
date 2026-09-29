@@ -65,6 +65,21 @@ func (h *handler) markSessionBusy(w http.ResponseWriter, r *http.Request) (strin
 	return id, true
 }
 
+// checkMessage 檢查 message 本身（spec #73 第八節）：空的或只有空白回 400，超過 maxMessageBytes 回 413
+// message_too_large。不合格時寫好錯誤回應並回 false。發訊息與無狀態呼叫共用這一份規則。
+func (h *handler) checkMessage(w http.ResponseWriter, message string) bool {
+	if strings.TrimSpace(message) == "" {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", "message 不可為空，也不可只有空白")
+		return false
+	}
+	if len(message) > maxMessageBytes {
+		h.writeError(w, http.StatusRequestEntityTooLarge, "message_too_large",
+			fmt.Sprintf("message 有 %d bytes，超過 %d bytes 的上限", len(message), maxMessageBytes))
+		return false
+	}
+	return true
+}
+
 // postMessageRequest 是 POST /api/v1/sessions/{id}/messages 的 body。
 type postMessageRequest struct {
 	Message string `json:"message"`
@@ -89,16 +104,7 @@ func (h *handler) postMessage(w http.ResponseWriter, r *http.Request) {
 	// ID 就記，不論它存不存在。
 	noteSessionID(w, r.PathValue("id"))
 	var req postMessageRequest
-	if !h.decodeJSONBody(w, r, &req) {
-		return
-	}
-	if strings.TrimSpace(req.Message) == "" {
-		h.writeError(w, http.StatusBadRequest, "invalid_request", "message 不可為空，也不可只有空白")
-		return
-	}
-	if len(req.Message) > maxMessageBytes {
-		h.writeError(w, http.StatusRequestEntityTooLarge, "message_too_large",
-			fmt.Sprintf("message 有 %d bytes，超過 %d bytes 的上限", len(req.Message), maxMessageBytes))
+	if !h.decodeJSONBody(w, r, &req) || !h.checkMessage(w, req.Message) {
 		return
 	}
 
@@ -130,14 +136,21 @@ func (h *handler) postMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.runTurn(w, r, entry.Agent, record.Session, req.Message)
+}
+
+// runTurn 以 agent 跑一個 turn 並寫出回應：turn 的 context 從請求衍生並帶上 --turn-timeout 的期限，
+// 成功回 200 與 session_id、reply，失敗交給 writeTurnFailure 分類。發訊息與無狀態呼叫共用這一份，
+// 兩者只差在用哪個 AgentService、哪個 Session。
+func (h *handler) runTurn(w http.ResponseWriter, r *http.Request, agent *core.AgentService, session *core.Session, message string) {
 	turnCtx, cancel := context.WithTimeout(r.Context(), h.opts.TurnTimeout)
 	defer cancel()
-	reply, err := entry.Agent.Process(turnCtx, record.Session, req.Message)
+	reply, err := agent.Process(turnCtx, session, message)
 	if err != nil {
-		h.writeTurnFailure(turnCtx, w, r, id, err)
+		h.writeTurnFailure(turnCtx, w, r, session.ID, err)
 		return
 	}
-	h.writeJSON(w, http.StatusOK, messageResponse{SessionID: id, Reply: reply})
+	h.writeJSON(w, http.StatusOK, messageResponse{SessionID: session.ID, Reply: reply})
 }
 
 // writeTurnFailure 把 turn 的失敗分類成回應（spec #73 第八節），順序不能換：

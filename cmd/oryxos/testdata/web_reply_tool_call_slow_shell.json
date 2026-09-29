@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-fixture-web-tool-call-slow-shell",
+  "object": "chat.completion",
+  "created": 1790700000,
+  "model": "deepseek/deepseek-v4-flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_web_slow_shell_1",
+            "type": "function",
+            "function": {
+              "name": "shell",
+              "arguments": "{\"command\":\"sleep\",\"args\":[\"5\"]}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 120,
+    "completion_tokens": 20,
+    "total_tokens": 140
+  }
+}

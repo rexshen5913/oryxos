@@ -61,6 +61,10 @@ type ProfileEntry struct {
 	Reason string
 	// Agent 是這份 Profile 組出來的 Agent，發訊息時由它跑 turn。不可用時為 nil。
 	Agent *core.AgentService
+	// StatelessAgent 是同一個 Agent 的第二個 AgentService，無狀態呼叫由它跑 turn（spec #73 第七節）：
+	// Session 的持久化不做事，其餘依賴都與 Agent 共用（一份 Profile 仍只對應一個 Agent，見
+	// CONTEXT.md）。不可用時為 nil。
+	StatelessAgent *core.AgentService
 	// Tools 是這份 Profile 這次啟動**實際可用**的 Tool：Profile 過濾後的子集，已套用 MCP 降級、
 	// 含自動加入的 load_skill（ticket #77）。不可用時為 nil。
 	//
@@ -112,6 +116,7 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("GET /api/v1/sessions/{id}", h.getSession)
 	mux.HandleFunc("DELETE /api/v1/sessions/{id}", h.deleteSession)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/messages", h.postMessage)
+	mux.HandleFunc("POST /api/v1/agents/{name}/invoke", h.invoke)
 	return h.withRequestLog(withCORS(h.withJSONNotFound(mux)))
 }
 

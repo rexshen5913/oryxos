@@ -41,7 +41,9 @@ type processAssembly struct {
 	store         *storage.DB
 	sessions      *storage.SessionManager
 	memories      *memory.Service
-	audit         *storage.AuditLog
+	// statelessMemories 給無狀態呼叫用：長期記憶與 memories 是同一個，Session 的持久化不做事。
+	statelessMemories *memory.Service
+	audit             *storage.AuditLog
 	// unusableProviders 是憑證展不開的 Provider → 原因。只有 credentialsPerProvider 會填；
 	// requireAllCredentials 遇到第一個就讓整個組裝失敗，這裡永遠是空的。
 	unusableProviders map[string]error
@@ -69,6 +71,8 @@ type profileAssembly struct {
 	// AgentService 的內部零件——spec #7 的 Tool 清單與無狀態呼叫都要共用同一份。
 	executor *tool.Executor
 	agent    *core.AgentService
+	// statelessAgent 給無狀態呼叫用（spec #73 第七節），見 assembleProfile。只有 server 用得到。
+	statelessAgent *core.AgentService
 }
 
 // assembleProcess 組出整個進程只該有一份的依賴，並印出只跟 Workspace 有關的啟動提醒。
@@ -188,6 +192,9 @@ func assembleProcess(ctx context.Context, out io.Writer, baseDir string, policy 
 	// Memory 統一門面：Session 的持久化委託 SQLite、長期記憶委託 MEMORY.md，
 	// 引擎只認這一個介面。
 	proc.memories = memory.NewService(proc.sessions, proc.longTerm)
+	// 無狀態呼叫的門面：長期記憶照常讀寫（save_memory 寫的就是同一份 MEMORY.md），只有 Session
+	// 的持久化換成不做事的實作，所以不在 sessions 表留下資料列（spec #73 第七節）。
+	proc.statelessMemories = memory.NewService(core.NopSessionStore{}, proc.longTerm)
 	// 審計與 Session 同庫；寫入在背景進行、失敗只落錯誤日誌，不中斷對話
 	// （憲法 6.2、3.3）。關閉順序見 Close。
 	proc.audit = storage.NewAuditLog(store, proc.logger)
@@ -414,7 +421,18 @@ func assembleProfile(ctx context.Context, out io.Writer, proc *processAssembly, 
 
 	// Bootstrap 上下文（AGENTS.md／USER.md／SOUL.md）：每個 turn 由 ReAct 循環
 	// 載入一次注入 system prompt，順序與覆蓋語義見 ADR-0003。
-	assembled.agent = core.NewAgentService(prof, proc.providers, executor, proc.memories, proc.audit,
-		proc.contextLoader, events, proc.prices, proc.logger)
+	//
+	// 同一份 Profile 組兩個 AgentService：發訊息用的 agent，與無狀態呼叫用的 statelessAgent（spec #73
+	// 第七節）。**兩者只差在 memory**——Provider、Executor（含 shell admission limiter 與 MCP 連線）、
+	// 審計、Bootstrap 與 Skill 的載入器都是同一個實例，turn 的行為與上下文完全相同，只是後者不寫
+	// sessions 表。newAgent 只收 memory 這一個參數，「只差這一個」由結構保證，不靠讀的人逐個比對。
+	// AgentService.Process 本身不改。chat 用不到 statelessAgent：組一個 AgentService 只是配置一個結構，
+	// 不開任何資源。
+	newAgent := func(memories core.MemoryService) *core.AgentService {
+		return core.NewAgentService(prof, proc.providers, executor, memories, proc.audit,
+			proc.contextLoader, events, proc.prices, proc.logger)
+	}
+	assembled.agent = newAgent(proc.memories)
+	assembled.statelessAgent = newAgent(proc.statelessMemories)
 	return assembled, nil
 }
