@@ -491,3 +491,71 @@ func TestServerRequestLogRecordsSessionID(t *testing.T) {
 		}
 	}
 }
+
+// TestServerTimestampsAreUTC 釘住 API 回應的時間戳一律是 UTC（Demo 四發現的不一致）：Session 的三個
+// 時間戳來自 storage，本來就是 UTC；歷史訊息、錯誤回應、/info 的 started_at 卻帶著 server 的本地
+// 時區。呼叫端比對時不該需要知道 server 在哪個時區。轉換只在回應出門時做，資料庫的原文不動。
+//
+// **歷史訊息那一格與跑測試的機器在哪個時區無關**：直接放一條 +08:00 的訊息，期望固定的 UTC 值。
+// 其餘幾個是「當下」的時間戳，機器本身在 UTC 時，改之前也是 Z，分辨不出來；在非 UTC 的機器上才
+// 驗得到。錯誤回應另由所有錯誤測試共用的 assertErrorShape 檢查。
+func TestServerTimestampsAreUTC(t *testing.T) {
+	dir := setupChatWorkspace(t, newReplayServer(t).URL)
+	s := startServer(t, dir)
+	created := createSession(t, s, "default", "alice")
+
+	taipei := time.FixedZone("UTC+8", 8*60*60)
+	session := core.Session{ID: created.SessionID, Channel: "web", UserID: "alice", ProfileName: "default"}
+	session.Append(core.Message{Role: core.RoleUser, Content: "你好", Timestamp: time.Date(2026, 9, 29, 13, 45, 11, 0, taipei)})
+	seedHistory(t, dir, session)
+
+	resp, body := s.send(t, http.MethodGet, sessionPath(created.SessionID), "", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET 狀態碼 = %d, 期望 200\nbody: %s", resp.StatusCode, body)
+	}
+	var detail struct {
+		CreatedAt    string `json:"created_at"`
+		LastActiveAt string `json:"last_active_at"`
+		Messages     []struct {
+			Timestamp string `json:"timestamp"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &detail); err != nil {
+		t.Fatalf("解析 Session: %v\nbody: %s", err, body)
+	}
+	if len(detail.Messages) != 1 || detail.Messages[0].Timestamp != "2026-09-29T05:45:11Z" {
+		t.Errorf("歷史訊息的 timestamp = %+v, 期望 [2026-09-29T05:45:11Z]（13:45:11+08:00 換成 UTC）", detail.Messages)
+	}
+
+	resp, conflict := postSession(t, s, `{"profile":"default","user_id":"alice"}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("第二次建立狀態碼 = %d, 期望 409\nbody: %s", resp.StatusCode, conflict)
+	}
+	var exists struct {
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal(conflict, &exists); err != nil {
+		t.Fatalf("解析 409: %v\nbody: %s", err, conflict)
+	}
+	resp, infoBody := s.send(t, http.MethodGet, "/api/v1/info", "", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /info 狀態碼 = %d\nbody: %s", resp.StatusCode, infoBody)
+	}
+	var info struct {
+		StartedAt string `json:"started_at"`
+	}
+	if err := json.Unmarshal(infoBody, &info); err != nil {
+		t.Fatalf("解析 /info: %v\nbody: %s", err, infoBody)
+	}
+
+	for name, value := range map[string]string{
+		"created_at":               detail.CreatedAt,
+		"last_active_at":           detail.LastActiveAt,
+		"session_exists.timestamp": exists.Timestamp,
+		"info.started_at":          info.StartedAt,
+	} {
+		if !strings.HasSuffix(value, "Z") {
+			t.Errorf("%s = %q, 期望 UTC（以 Z 結尾）", name, value)
+		}
+	}
+}

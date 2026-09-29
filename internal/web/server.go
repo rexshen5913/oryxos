@@ -145,7 +145,7 @@ func (h *handler) info(w http.ResponseWriter, _ *http.Request) {
 	h.writeJSON(w, http.StatusOK, infoResponse{
 		Name:      productName,
 		Version:   h.opts.Version,
-		StartedAt: h.opts.StartedAt,
+		StartedAt: h.opts.StartedAt.UTC(), // 一律 UTC，見 writeError
 		Profiles:  h.countProfiles(),
 		Providers: h.opts.Providers,
 	})
@@ -337,8 +337,12 @@ type errorResponse struct {
 }
 
 // writeError 寫出統一形狀的錯誤回應。
+//
+// **API 回應的時間戳一律是 UTC**：Session 的三個時間戳來自 storage，本來就是 UTC；錯誤回應、歷史
+// 訊息、/info 的 started_at 若照 time.Now() 原樣輸出，會帶著 server 的本地時區，同一個回應裡混著兩種
+// 寫法，呼叫端比對時得先知道 server 在哪個時區。轉換只在回應出門時做，資料庫與 chat 的顯示不動。
 func (h *handler) writeError(w http.ResponseWriter, status int, code, message string) {
-	h.writeJSON(w, status, errorResponse{ErrorCode: code, Message: message, Timestamp: time.Now()})
+	h.writeJSON(w, status, errorResponse{ErrorCode: code, Message: message, Timestamp: time.Now().UTC()})
 }
 
 // writeInternalError 回 500 internal_error，原因（已去敏）同時落錯誤日誌 event：呼叫端看得到訊息，

@@ -86,6 +86,10 @@ func assertErrorShape(t *testing.T, resp *http.Response, body []byte, wantStatus
 	if _, err := time.Parse(time.RFC3339, values["timestamp"]); err != nil {
 		t.Errorf("timestamp = %q 不是 RFC 3339: %v", values["timestamp"], err)
 	}
+	// API 的時間戳一律是 UTC（見 TestServerTimestampsAreUTC）。
+	if !strings.HasSuffix(values["timestamp"], "Z") {
+		t.Errorf("timestamp = %q 不是 UTC", values["timestamp"])
+	}
 }
 
 // TestServerToolsListsActualSubset 釘住 GET /tools 列的是這次啟動**實際可用**的子集（spec #73 第八節，

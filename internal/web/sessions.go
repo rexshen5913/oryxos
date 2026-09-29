@@ -71,7 +71,7 @@ func (h *handler) createSession(w http.ResponseWriter, r *http.Request) {
 			errorResponse: errorResponse{
 				ErrorCode: "session_exists",
 				Message:   fmt.Sprintf("使用者 %s 對 Profile %s 已有 active Session；可以接著用它，或先歸檔再建立", req.UserID, entry.Name),
-				Timestamp: time.Now(),
+				Timestamp: time.Now().UTC(), // 一律 UTC，見 writeError
 			},
 			SessionID: exists.SessionID,
 		})
@@ -230,7 +230,8 @@ func sessionDetailOf(record *storage.SessionRecord) sessionDetailView {
 		for _, call := range msg.ToolCalls {
 			calls = append(calls, toolCallView{ID: call.ID, Name: call.Name, Arguments: core.RedactArgs(call.Arguments)})
 		}
-		view := messageView{Role: string(msg.Role), Content: msg.Content, Timestamp: msg.Timestamp, ToolCalls: calls}
+		// 時間戳換成 UTC（見 writeError）：core 記的是本地時間，sessions 表的原文不動。
+		view := messageView{Role: string(msg.Role), Content: msg.Content, Timestamp: msg.Timestamp.UTC(), ToolCalls: calls}
 		if msg.ToolCallID != "" {
 			toolCallID := msg.ToolCallID
 			view.ToolCallID = &toolCallID
