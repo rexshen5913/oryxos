@@ -382,7 +382,7 @@ func TestServerMessageTurnOutcomes(t *testing.T) {
 		wantCode string
 		// wantText 是錯誤訊息或 reply 裡必須出現的片段。
 		wantText string
-		// wantAbsent 非空時，回應與 turn_failed 那一行日誌裡都不能出現它（錯誤文字去敏）。
+		// wantAbsent 非空時，回應與整份日誌裡都不能出現它（錯誤文字去敏）。
 		wantAbsent string
 	}{
 		{
@@ -485,11 +485,10 @@ func TestServerMessageTurnOutcomes(t *testing.T) {
 				if strings.Contains(string(body), tt.wantAbsent) {
 					t.Errorf("回應含有 %q，錯誤文字沒有去敏\nbody: %.400s", tt.wantAbsent, body)
 				}
-				// 只看 turn_failed 這一行：internal/provider 的 llm_call 日誌記的是未去敏的原始錯誤，那是
-				// #79 之前就在的另一條路徑，不在這張票的範圍，另案處理。
+				// 整份日誌都不能有：turn_failed 之外，Provider 那一行 llm_call 也記著同一個錯誤。
 				for line := range strings.SplitSeq(readWorkspaceLog(t, dir), "\n") {
-					if strings.Contains(line, `"msg":"turn_failed"`) && strings.Contains(line, tt.wantAbsent) {
-						t.Errorf("turn_failed 日誌含有 %q，錯誤文字沒有去敏:\n%s", tt.wantAbsent, line)
+					if strings.Contains(line, tt.wantAbsent) {
+						t.Errorf("日誌含有 %q，錯誤文字沒有去敏:\n%s", tt.wantAbsent, line)
 					}
 				}
 			}

@@ -61,11 +61,13 @@ func (s *Service) Chat(ctx context.Context, req core.ChatRequest) (core.ChatResp
 	})
 	latency := time.Since(start)
 	if err != nil {
+		// 錯誤文字要去敏：連線失敗時 Go 會把完整的請求網址寫進錯誤，base_url 的 query 若帶著 key
+		// （有些 Provider 這樣收），key 就跟著進日誌。與 turn_failed、tool_invocation 同一條規則。
 		s.logger.ErrorContext(ctx, "llm_call",
 			"provider", req.Provider,
 			"model", req.Model,
 			"latency_ms", latency.Milliseconds(),
-			"error", err.Error(),
+			"error", core.RedactErrorText(err.Error()),
 		)
 		return core.ChatResponse{}, fmt.Errorf("Provider %s 呼叫失敗: %w", req.Provider, err)
 	}
