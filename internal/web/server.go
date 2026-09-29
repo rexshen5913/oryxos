@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/rexshen5913/oryxos/internal/core"
 )
 
 // productName 是 info 回應裡的 name。
@@ -31,14 +33,27 @@ type Options struct {
 	Version string
 	// StartedAt 是 server 啟動的時間。
 	StartedAt time.Time
-	// Profiles 是這次啟動已載入的 Profile 名。
-	Profiles []string
+	// Profiles 是 profiles/ 底下每一份 Profile 在這次啟動的載入結果，可用與不可用都在裡面。
+	Profiles []ProfileEntry
 	// Providers 是 config.yaml 裡已配置的 Provider 名。
 	//
 	// **只收名字**：憑證與 base_url 從型別上就進不了這個 package，info 端點也就沒有機會把它們
 	// 送出去（spec #73 使用者故事 43）。
 	Providers []string
 }
+
+// ProfileEntry 是一份 Profile 在這次啟動的載入結果，由命令層組好交進來。
+type ProfileEntry struct {
+	// Name 是 Profile 對外的名字，也就是檔名去掉 .yaml（spec #73 第三節）。
+	Name string
+	// Profile 是讀進來的設定。YAML 讀不出來時是 nil：那時連描述、Agent 名與 Provider 都不知道。
+	Profile *core.Profile
+	// Reason 是不可用的原因，已套用錯誤文字去敏。空字串代表這份 Profile 可用。
+	Reason string
+}
+
+// Available 回報這份 Profile 在這次啟動是否可用。
+func (e ProfileEntry) Available() bool { return e.Reason == "" }
 
 // handler 是 Web Service 各個端點共用的狀態。
 type handler struct {
@@ -59,6 +74,7 @@ func NewHandler(opts Options) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/health", h.health)
 	mux.HandleFunc("GET /api/v1/info", h.info)
+	mux.HandleFunc("GET /api/v1/profiles", h.profiles)
 	return h.withRequestLog(withCORS(h.withJSONNotFound(mux)))
 }
 
@@ -93,11 +109,64 @@ func (h *handler) info(w http.ResponseWriter, _ *http.Request) {
 		Name:      productName,
 		Version:   h.opts.Version,
 		StartedAt: h.opts.StartedAt,
-		// 不可用的數量恆為 0：#75 的暫時語義是任何一份 Profile 組不起來就不啟動。#76 放寬成
-		// 「只讓那一份不可用」之後，這裡才會有數字。
-		Profiles:  profileCounts{Available: len(h.opts.Profiles)},
+		Profiles:  h.countProfiles(),
 		Providers: h.opts.Providers,
 	})
+}
+
+// countProfiles 數出可用與不可用的 Profile 數。
+func (h *handler) countProfiles() profileCounts {
+	var counts profileCounts
+	for _, entry := range h.opts.Profiles {
+		if entry.Available() {
+			counts.Available++
+		} else {
+			counts.Unavailable++
+		}
+	}
+	return counts
+}
+
+// profileView 是 GET /api/v1/profiles 回應裡的一筆（spec #73 第八節）。
+//
+// **description、agent_name、provider 是指標**：YAML 讀不出來的那份，這三個值不知道，回 null。
+// 回空字串的話，會被讀成「作者沒寫描述」，而事實是「讀不出來」。
+type profileView struct {
+	Name        string        `json:"name"`
+	Description *string       `json:"description"`
+	AgentName   *string       `json:"agent_name"`
+	Provider    *providerView `json:"provider"`
+	Status      string        `json:"status"`
+	// Error 只在不可用時出現。
+	Error string `json:"error,omitempty"`
+}
+
+// providerView 是一份 Profile 引用的 Provider 與模型。只有名字：憑證與 base_url 屬於 config.yaml，
+// 不屬於 Profile，本來就不在這裡。
+type providerView struct {
+	Name  string `json:"name"`
+	Model string `json:"model"`
+}
+
+// profiles 列出這次啟動的每一份 Profile，不可用的也列，並附上原因（spec #73 使用者故事 35）：
+// 運維人員從 API 就能診斷，不必登入主機翻啟動輸出。
+func (h *handler) profiles(w http.ResponseWriter, _ *http.Request) {
+	views := make([]profileView, 0, len(h.opts.Profiles))
+	for _, entry := range h.opts.Profiles {
+		view := profileView{Name: entry.Name, Status: "available", Error: entry.Reason}
+		if !entry.Available() {
+			view.Status = "unavailable"
+		}
+		if prof := entry.Profile; prof != nil {
+			view.Description = &prof.Description
+			view.AgentName = &prof.Identity.AgentName
+			view.Provider = &providerView{Name: prof.Provider.Name, Model: prof.Provider.Model}
+		}
+		views = append(views, view)
+	}
+	h.writeJSON(w, http.StatusOK, struct {
+		Profiles []profileView `json:"profiles"`
+	}{Profiles: views})
 }
 
 // errorResponse 是所有錯誤回應共用的形狀（spec #73 第八節）：呼叫端的程式依 error_code 分支，

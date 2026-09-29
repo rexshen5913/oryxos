@@ -50,7 +50,7 @@ func writeWorkspaceConfig(t *testing.T, dir, baseURL, extra string) {
 func assembleWorkspace(t *testing.T, out io.Writer, dir string, profileNames ...string) []*profileAssembly {
 	t.Helper()
 	ctx := context.Background()
-	proc, err := assembleProcess(ctx, out, dir)
+	proc, err := assembleProcess(ctx, out, dir, requireAllCredentials)
 	var profiles []*profileAssembly
 	t.Cleanup(func() {
 		if cerr := proc.Close(profiles...); cerr != nil {
@@ -169,7 +169,7 @@ func TestProcessAssemblyClosesAuditBeforeStore(t *testing.T) {
 
 	dir := setupChatWorkspace(t, "http://provider.invalid")
 	ctx := context.Background()
-	proc, err := assembleProcess(ctx, io.Discard, dir)
+	proc, err := assembleProcess(ctx, io.Discard, dir, requireAllCredentials)
 	if err != nil {
 		t.Fatalf("assembleProcess: %v（收尾：%v）", err, proc.Close())
 	}

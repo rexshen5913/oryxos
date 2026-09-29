@@ -241,3 +241,51 @@ func assertProfileEqual(t *testing.T, got, want *core.Profile) {
 		t.Errorf("settings = %+v, 期望 %+v", got.Settings, want.Settings)
 	}
 }
+
+// TestLoadProfileKeepsParsedProfileOnValidationFailure 釘住 LoadProfile 失敗時的回傳值：**解析成功、
+// 校驗失敗時交出解析出來的 Profile**，讀檔或解析失敗時才是 nil（ticket #76）。
+//
+// server 的 profiles 端點靠它分辨「不知道」與「知道但不能用」：一份只拼錯 bootstrap 檔名的 Profile，
+// 描述、Agent 名與 Provider 都寫得好好的，運維人員要靠它們認出是哪一個 Agent 壞了。
+func TestLoadProfileKeepsParsedProfileOnValidationFailure(t *testing.T) {
+	const valid = "name: p\ndescription: 保留下來\nprovider:\n  name: openrouter\n  model: m\n"
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+		// wantParsed 為真時，期望錯誤之外還拿得到解析出來的 Profile。
+		wantParsed bool
+	}{
+		{name: "provider.model 缺漏", yaml: "name: p\ndescription: 保留下來\nprovider:\n  name: openrouter\n",
+			wantErr: "provider.model 必填", wantParsed: true},
+		{name: "bootstrap 列了不是 Bootstrap 檔案的名字", yaml: valid + "bootstrap:\n  - TYPO.md\n",
+			wantErr: "TYPO.md", wantParsed: true},
+		{name: "skills 引用不合法的 Skill 名稱", yaml: valid + "skills:\n  - Not_Valid\n",
+			wantErr: "Not_Valid", wantParsed: true},
+		{name: "YAML 解析失敗", yaml: "name: p\nprovider: [unclosed\n", wantErr: "解析 Profile"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "p.yaml")
+			if err := os.WriteFile(path, []byte(tt.yaml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			got, err := core.LoadProfile(path)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("錯誤 = %v, 期望含 %q", err, tt.wantErr)
+			}
+			if !tt.wantParsed {
+				if got != nil {
+					t.Errorf("YAML 解析失敗時回傳 %+v, 期望 nil（沒有東西可以交）", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("解析成功、校驗失敗時回傳 nil, 期望交出解析出來的 Profile")
+			}
+			if got.Description != "保留下來" {
+				t.Errorf("Description = %q, 期望 %q（解析出來的值要原樣交出）", got.Description, "保留下來")
+			}
+		})
+	}
+}

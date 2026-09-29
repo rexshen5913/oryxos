@@ -232,7 +232,7 @@ func TestServerInfo(t *testing.T) {
 	if info.StartedAt.Before(before.Add(-time.Second)) || info.StartedAt.After(after) {
 		t.Errorf("info.started_at = %v, 期望落在 %v 與 %v 之間", info.StartedAt, before, after)
 	}
-	// 兩份 Profile 都組得起來（#75 的暫時語義下，任何一份失敗就起不來，所以不可用恆為 0）。
+	// 兩份 Profile 都組得起來，所以不可用是 0；有不可用時的數量見 TestServerProfileFailureMatrix。
 	if info.Profiles.Available == nil || *info.Profiles.Available != 2 {
 		t.Errorf("info.profiles.available = %v, 期望 2\nbody: %s", info.Profiles.Available, body)
 	}
@@ -491,93 +491,6 @@ func TestServerStartupOutput(t *testing.T) {
 	}
 }
 
-// TestServerStartupFailsWhenAnyProfileFails 是 #75 的**暫時語義**：任何一份 Profile 組不起來，
-// server 就啟動失敗，並指名是哪一份。#76 會把它放寬成「只讓那一份不可用」。
-//
-// **「指名」要對每一種失敗都成立**，所以兩條錯誤路徑各有一格錯誤本身不含 Profile 名的：
-// LoadProfile 的錯誤只帶檔案路徑；MCP server 缺憑證的錯誤只講 server 與環境變數。tools
-// 那一格的錯誤本來就寫了「Profile broken 的…」，單靠它驗不出命令層有沒有包上名字。
-//
-// 每一格都另外驗 listener 已關（埠號不會被一個起不來的進程佔著）；tools 那一格再驗 MCP 子
-// 進程已結束——那一格的 MCP 在 Subset 擋下之前**已經連上**，組裝函式手上握著子進程離開，
-// 半成品要有人收。
-func TestServerStartupFailsWhenAnyProfileFails(t *testing.T) {
-	tests := []struct {
-		name string
-		// profile 是 profiles/broken.yaml 的完整內容。
-		profile string
-		// mcpServers 回傳 mcp_servers.yaml 裡 mcp_servers 段的條目；nil 代表不宣告。marker 是
-		// exit marker 的路徑。
-		mcpServers func(t *testing.T, marker string) string
-		// wantMarker 為真時，另外驗 MCP 子進程已經被收掉。
-		wantMarker bool
-	}{
-		{
-			name:    "Profile YAML 解析失敗",
-			profile: "name: broken\nprovider: [unclosed\n",
-		},
-		{
-			name: "引用的 MCP server 缺憑證（錯誤本身不含 Profile 名）",
-			profile: "name: broken\nprovider:\n  name: openrouter\n  model: m\n" +
-				"mcp_servers:\n  - needs_token\n",
-			mcpServers: func(t *testing.T, _ string) string {
-				// 這個環境變數刻意從不設定：展開失敗發生在連線之前，子進程不會起來。
-				return testMcpServerEntry(t, "needs_token", "echo") +
-					"      TOKEN: ${ORYXOS_TEST_NEVER_SET_TOKEN_75}\n"
-			},
-		},
-		{
-			name: "tools 引用未註冊的 Tool（MCP 已連上之後才被擋下）",
-			profile: "name: broken\nprovider:\n  name: openrouter\n  model: m\n" +
-				"mcp_servers:\n  - alive\ntools:\n  - alive__echo\n  - no_such_tool\n",
-			mcpServers: func(t *testing.T, marker string) string {
-				return testMcpServerEntryWithExitMarker(t, "alive", marker, "echo")
-			},
-			wantMarker: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := setupChatWorkspace(t, newReplayServer(t).URL)
-			marker := filepath.Join(t.TempDir(), "alive.exited")
-			if tt.mcpServers != nil {
-				writeMcpServers(t, dir, "mcp_servers:\n"+tt.mcpServers(t, marker))
-			}
-			if err := os.WriteFile(filepath.Join(dir, workspaceDir, "profiles", "broken.yaml"), []byte(tt.profile), 0o644); err != nil {
-				t.Fatalf("寫入 broken.yaml: %v", err)
-			}
-
-			listener, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatalf("開 listener: %v", err)
-			}
-			addr := listener.Addr().String()
-			// 設期限而不是 Background：實作若誤把失敗吞掉、照常開始服務，這個呼叫會一直
-			// 阻塞；期限到了它會以「成功返回」收場，下面的斷言照樣抓得到。
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			var out bytes.Buffer
-			err = runServer(ctx, &out, dir, serverOptions{}, listener)
-
-			if err == nil {
-				t.Fatalf("有一份 Profile 組不起來，runServer 卻成功返回\n輸出:\n%s", out.String())
-			}
-			if !strings.Contains(err.Error(), "Profile broken") {
-				t.Errorf("錯誤沒有指名是哪一份 Profile: %v", err)
-			}
-			if conn, dialErr := net.DialTimeout("tcp", addr, time.Second); dialErr == nil {
-				_ = conn.Close()
-				t.Errorf("啟動失敗之後 %s 仍接受連線——listener 沒有關", addr)
-			}
-			if tt.wantMarker {
-				if _, statErr := os.Stat(marker); statErr != nil {
-					t.Errorf("runServer 返回時 MCP 子進程還沒被收掉（marker %s 不存在）", marker)
-				}
-			}
-		})
-	}
-}
-
 // TestServerCommandAddrFlag 走 cobra 命令路徑，驗證 --addr 的預設值與「無法綁定時命令回傳錯誤」。
 //
 // 綁定失敗那一格先自己佔住一個埠，再叫 server 去綁同一個。斷言用 errors.Is 對 EADDRINUSE，
@@ -615,8 +528,7 @@ func TestServerCommandAddrFlag(t *testing.T) {
 		root.SetOut(&out)
 		root.SetErr(&out)
 		root.SetArgs([]string{"server", "--addr", occupied.Addr().String()})
-		// 期限的理由同 TestServerStartupFailsWhenAnyProfileFails：綁定若意外成功，命令會
-		// 一直服務下去。
+		// 期限的理由同 runServerExpectingFailure：綁定若意外成功，命令會一直服務下去。
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		err = root.ExecuteContext(ctx)

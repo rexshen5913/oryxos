@@ -42,7 +42,25 @@ type processAssembly struct {
 	sessions      *storage.SessionManager
 	memories      *memory.Service
 	audit         *storage.AuditLog
+	// unusableProviders 是憑證展不開的 Provider → 原因。只有 credentialsPerProvider 會填；
+	// requireAllCredentials 遇到第一個就讓整個組裝失敗，這裡永遠是空的。
+	unusableProviders map[string]error
 }
+
+// credentialPolicy 決定某個 Provider 的憑證展不開（引用的環境變數沒設）時，進程層級組裝怎麼處理。
+//
+// **chat 與 server 刻意不同**（spec #73 第三節）：server 一次載入全部 Profile，一個沒人引用的
+// Provider 缺憑證就讓整個實例起不來，等於一個人的設定錯誤擋下所有 Agent。chat 一次只跑一份
+// Profile，維持原本的行為，以守住 #74 抽取時的遷移安全性。
+type credentialPolicy int
+
+const (
+	// requireAllCredentials：任何一個 Provider 的憑證展不開，就啟動失敗。chat 用這個。
+	requireAllCredentials credentialPolicy = iota
+	// credentialsPerProvider：逐個 Provider 展開，展不開的不註冊、原因記在 unusableProviders，
+	// 只影響引用它的 Profile。server 用這個。
+	credentialsPerProvider
+)
 
 // profileAssembly 是一份 Profile 組出來的可運作 Agent。
 type profileAssembly struct {
@@ -59,7 +77,7 @@ type profileAssembly struct {
 // connectProfileMcpServers 相同。半途失敗時已經開起來的日誌檔、Workspace root 與 SQLite
 // 要有人收；交給呼叫端收，「造成失敗的錯誤優先、收尾錯誤不蓋過它」這條語義就只寫在
 // 呼叫端的那一個 defer 裡，不必在這裡另寫一份清理。
-func assembleProcess(ctx context.Context, out io.Writer, baseDir string) (*processAssembly, error) {
+func assembleProcess(ctx context.Context, out io.Writer, baseDir string, policy credentialPolicy) (*processAssembly, error) {
 	proc := &processAssembly{ws: filepath.Join(baseDir, workspaceDir)}
 	if _, err := os.Stat(proc.ws); err != nil {
 		return proc, fmt.Errorf("找不到 Workspace %s（請先執行 oryxos init）: %w", workspaceDir, err)
@@ -82,9 +100,27 @@ func assembleProcess(ctx context.Context, out io.Writer, baseDir string) (*proce
 	// 憑證的 ${ENV_VAR} 展開是**顯式的一步**（issue #27）：Load 不再代勞，因為與
 	// Provider 無關的命令（`oryxos tools`）不該被缺一個環境變數擋下。chat 要真的呼叫
 	// LLM，所以在這裡展開，缺 key 仍然啟動即報錯。
-	providers, err := config.ExpandProviderEnv(cfg.Providers)
-	if err != nil {
-		return proc, fmt.Errorf("載入 Provider 憑證: %w", err)
+	var providers map[string]config.ProviderConfig
+	if policy == credentialsPerProvider {
+		// **逐個 Provider 呼叫同一個展開函式，不另寫一份**：錯誤的措辭因此與 chat 一字不差，
+		// 「哪個環境變數沒設」的判斷也只有一處。展不開的那個不註冊進 Provider 服務，引用它的
+		// Profile 由 assembleProfile 判成不可用。
+		providers = make(map[string]config.ProviderConfig, len(cfg.Providers))
+		proc.unusableProviders = make(map[string]error)
+		for name, pc := range cfg.Providers {
+			expanded, err := config.ExpandProviderEnv(map[string]config.ProviderConfig{name: pc})
+			if err != nil {
+				proc.unusableProviders[name] = err
+				continue
+			}
+			providers[name] = expanded[name]
+		}
+	} else {
+		// 其餘一律走「全部都要有」：它是零值，也是比較嚴的那一邊。
+		providers, err = config.ExpandProviderEnv(cfg.Providers)
+		if err != nil {
+			return proc, fmt.Errorf("載入 Provider 憑證: %w", err)
+		}
 	}
 	// config（YAML 檔案形狀）與 provider（執行期配置）刻意不共用型別，
 	// 避免 internal/provider 依賴設定檔格式；同形搬運是這條解耦的成本。
@@ -222,6 +258,13 @@ func assembleProfile(ctx context.Context, out io.Writer, proc *processAssembly, 
 	if _, ok := proc.cfg.Providers[prof.Provider.Name]; !ok {
 		return assembled, fmt.Errorf("Profile %s 引用的 Provider %q 未在 %s/config.yaml 的 providers 段配置",
 			prof.Name, prof.Provider.Name, workspaceDir)
+	}
+	// 憑證展不開的 Provider 沒有註冊進 Provider 服務（見 credentialsPerProvider）。不在這裡擋的話，
+	// 這份 Profile 會被判成可用，要到第一個 turn 才撞上「Provider 未註冊」。擋在 MCP 連線之前：
+	// 注定不可用的 Profile 不必起任何子進程。chat 走 requireAllCredentials，這張表永遠是空的。
+	if credErr, unusable := proc.unusableProviders[prof.Provider.Name]; unusable {
+		return assembled, fmt.Errorf("Profile %s 引用的 Provider %q 憑證展不開: %w",
+			prof.Name, prof.Provider.Name, credErr)
 	}
 
 	// Profile 明確列出的 Bootstrap 檔案必須存在，否則啟動即報錯（設定錯誤，fail

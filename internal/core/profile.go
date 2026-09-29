@@ -264,6 +264,11 @@ func (s Settings) effectiveMaxContextRunes() int {
 
 // LoadProfile 從 path 讀取並解析 Profile YAML，套用 Settings 預設值並做基礎校驗
 // （provider.name、provider.model 必填）。
+//
+// **解析成功、校驗失敗時，錯誤之外也交出解析出來的 Profile**；讀檔或解析失敗時才是 nil。
+// server 的 profiles 端點靠它列出一份不可用 Profile 的描述與 Provider：只拼錯一個 bootstrap
+// 檔名的 Profile，其餘欄位都寫得好好的，運維人員要靠它們認出是哪一個 Agent 壞了（ticket #76）。
+// 這份 Profile **不得拿去組裝**：它沒通過校驗，Settings 的預設值也還沒套上。
 func LoadProfile(path string) (*Profile, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -276,16 +281,16 @@ func LoadProfile(path string) (*Profile, error) {
 	}
 
 	if p.Provider.Name == "" {
-		return nil, fmt.Errorf("Profile %s 校驗失敗: provider.name 必填", path)
+		return &p, fmt.Errorf("Profile %s 校驗失敗: provider.name 必填", path)
 	}
 	if p.Provider.Model == "" {
-		return nil, fmt.Errorf("Profile %s 校驗失敗: provider.model 必填", path)
+		return &p, fmt.Errorf("Profile %s 校驗失敗: provider.model 必填", path)
 	}
 	if err := validateBootstrap(p.Bootstrap); err != nil {
-		return nil, fmt.Errorf("Profile %s 校驗失敗: %w", path, err)
+		return &p, fmt.Errorf("Profile %s 校驗失敗: %w", path, err)
 	}
 	if err := validateSkills(p.Skills); err != nil {
-		return nil, fmt.Errorf("Profile %s 校驗失敗: %w", path, err)
+		return &p, fmt.Errorf("Profile %s 校驗失敗: %w", path, err)
 	}
 
 	p.Settings.MaxIterations = p.Settings.effectiveMaxIterations()

@@ -113,6 +113,10 @@ func newServerCmd() *cobra.Command {
 // runServer 組一次進程層級、對 profiles/ 底下每份 Profile 各組一次 Profile 層級（見 assembly.go），
 // 然後在 listener 上服務，直到 ctx 取消再優雅關閉。
 //
+// **錯誤分兩級**（spec #73 第三節）：Workspace 層級的錯誤（Workspace 不存在、config.yaml 解析不了、
+// SQLite 或日誌檔打不開）直接讓啟動失敗；Profile 層級的錯誤只讓那一份不可用，可用數為 0 才失敗。
+// Provider 憑證逐個展開（credentialsPerProvider），所以缺憑證屬於後者。
+//
 // **listener 一交進來，所有權就歸這裡**：不管從哪條路離開都會關掉它，啟動失敗時埠號不會被一個
 // 起不來的進程佔著。
 //
@@ -135,7 +139,7 @@ func runServer(ctx context.Context, out io.Writer, baseDir string, opts serverOp
 	fmt.Fprintf(out, "提醒：未啟用認證，任何連得到這個位址的人都能驅動 Agent（含它的 Profile 開放的 Tool）；"+
 		"只想在本機使用請改用 --addr 127.0.0.1:8080，完整風險說明見 SECURITY.md。\n")
 
-	proc, err := assembleProcess(ctx, out, baseDir)
+	proc, err := assembleProcess(ctx, out, baseDir, credentialsPerProvider)
 	var profiles []*profileAssembly
 	defer func() {
 		if cerr := proc.Close(profiles...); cerr != nil && err == nil {
@@ -150,31 +154,28 @@ func runServer(ctx context.Context, out io.Writer, baseDir string, opts serverOp
 	if err != nil {
 		return err
 	}
+	// **一份 Profile 的錯誤只讓那一份不可用**（spec #73 第三節）：每一份都載入完，才判斷能不能啟動。
+	// 一個人的設定錯誤不該讓整個實例的 Agent 都停擺。
+	entries := make([]web.ProfileEntry, 0, len(names))
 	for _, name := range names {
-		prof, err := core.LoadProfile(filepath.Join(proc.ws, "profiles", name+".yaml"))
+		prof, assembled, err := loadServerProfile(ctx, out, proc, name)
+		entry := web.ProfileEntry{Name: name, Profile: prof}
 		if err != nil {
-			return fmt.Errorf("載入 Profile %s: %w", name, err)
+			// **去敏只做一次，三條輸出路徑用同一段文字**：啟動輸出、錯誤日誌、profiles 端點的 error
+			// 欄位。各自去敏的話，改了其中一條、漏了另一條，也沒有人會發現。原因是使用者手寫的字串
+			// 拼出來的（tools 裡一個打錯的名字會被原樣帶出來），規則與審計、事件流同一套。
+			entry.Reason = core.RedactErrorText(err.Error())
+			fmt.Fprintf(out, "Profile %s 不可用：%s\n", name, entry.Reason)
+			proc.logger.Error("profile_unavailable", "profile", name, "error", entry.Reason)
+			closeUnavailableProfile(proc, name, assembled)
+		} else {
+			profiles = append(profiles, assembled)
+			fmt.Fprintf(out, "Profile %s 已載入（Provider %s，模型 %s）\n", name, prof.Provider.Name, prof.Provider.Model)
 		}
-		// 跟這份 Profile 有關的提醒，行首一律帶上它的名字：多份 Profile 的提醒印在一起，不指名就
-		// 分不出是誰的（spec #73 第二節）。
-		//
-		// **指名是在外面包一層 writer，不是去改 assembleProfile 的措辭**。改措辭會連 chat 的輸出
-		// 一起變；包一層的話，提醒本身一個字都不動，chat 與 server 對同一份設定給出同一句診斷。
-		//
-		// 事件流傳不做事的實作：Web Service 的回應是同步阻塞的，SSE 屬擴展階段（spec #73 Out of Scope）。
-		assembled, err := assembleProfile(ctx, &linePrefixWriter{out: out, prefix: "[Profile " + name + "] "},
-			proc, prof, core.NopEventSink{})
-		// 先收進清單、再檢查錯誤：組到一半失敗時 MCP 子進程可能已經起來了，半成品也要交給 Close。
-		profiles = append(profiles, assembled)
-		if err != nil {
-			// #75 的暫時語義：任何一份組不起來就不啟動，與 chat 相同。#76 會放寬成只讓那一份不可用。
-			//
-			// **包上檔名，因為 assembleProfile 的錯誤不一定指名**：tools 校驗失敗會寫「Profile X 的…」，
-			// MCP server 缺憑證、Tool registry 組裝失敗則不會。已經指名的那幾種會重複一次名字，
-			// 用這個代價換「每一種失敗都指得出是哪一份」。
-			return fmt.Errorf("組裝 Profile %s: %w", name, err)
-		}
-		fmt.Fprintf(out, "Profile %s 已載入（Provider %s，模型 %s）\n", name, prof.Provider.Name, prof.Provider.Model)
+		entries = append(entries, entry)
+	}
+	if err := requireAvailableProfile(entries); err != nil {
+		return err
 	}
 
 	// 交給 web 的只有 Provider 的名字，憑證與 base_url 在這裡就不往下傳（見 web.Options.Providers）。
@@ -189,12 +190,15 @@ func runServer(ctx context.Context, out io.Writer, baseDir string, opts serverOp
 		Logger:    proc.logger,
 		Version:   buildVersion(),
 		StartedAt: startedAt,
-		Profiles:  names,
+		Profiles:  entries,
 		Providers: providers,
 	}), opts)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(listener) }()
-	fmt.Fprintf(out, "就緒：%d 份 Profile 已載入，開始接受請求（Ctrl+C 停止）\n", len(names))
+	// 可用的就是組起來、收進 profiles 的那幾份；與 entries 的 Reason 在同一個 if／else 裡決定，
+	// 兩邊不會對不上。
+	fmt.Fprintf(out, "就緒：%d 份 Profile 可用、%d 份不可用，開始接受請求（Ctrl+C 停止）\n",
+		len(profiles), len(entries)-len(profiles))
 
 	select {
 	case err := <-serveErr:
@@ -230,6 +234,83 @@ func forceClose(srv *http.Server) error {
 		return fmt.Errorf("強制關閉 HTTP 連線: %w", err)
 	}
 	return nil
+}
+
+// loadServerProfile 載入名為 name 的 Profile 並組成可運作的 Agent。
+//
+// 回傳的 Profile 在 YAML 讀不出來時是 nil；讀得出來但之後才失敗時非 nil，profiles 端點靠它列出
+// 描述與 Provider。組裝的半成品在失敗時也可能非 nil（MCP 已經連上），交給 closeUnavailableProfile。
+//
+// **錯誤包上「哪一步」，不包「哪一份」**：呼叫端把它印在「Profile X 不可用：」之後、列在「X：」
+// 之後，再包上名字只會讓同一個名字出現兩次。
+func loadServerProfile(ctx context.Context, out io.Writer, proc *processAssembly, name string) (
+	*core.Profile, *profileAssembly, error) {
+	prof, err := core.LoadProfile(filepath.Join(proc.ws, "profiles", name+".yaml"))
+	if err != nil {
+		// 解析成功、校驗失敗時 prof 非 nil（見 core.LoadProfile）：照樣交出去給 profiles 端點列描述，
+		// 但不往下組裝。
+		return prof, nil, fmt.Errorf("載入 Profile 設定檔: %w", err)
+	}
+	// **檔名與 name 欄位必須一致，只有 server 這樣要求**（spec #73 第三節）。對外的名字是檔名，會出現
+	// 在 URL 上；Session 的 profile_name 卻取自 name 欄位。兩者不一致時，同一個 Agent 在 URL 上和
+	// 資料庫裡是兩個名字。比對放在組裝之前：不一致的 Profile 不必起任何 MCP 子進程。chat 不跟著
+	// 收緊，留給 CLI 命令那份 spec 決定（spec #73 Further Notes）。
+	if prof.Name != name {
+		return prof, nil, fmt.Errorf("檔名 %s.yaml 與 name 欄位 %q 不一致；server 以檔名作為對外的名字，"+
+			"Session 記的卻是 name 欄位，請讓兩者相同", name, prof.Name)
+	}
+	// 跟這份 Profile 有關的提醒，行首一律帶上它的名字：多份 Profile 的提醒印在一起，不指名就
+	// 分不出是誰的（spec #73 第二節）。
+	//
+	// **指名是在外面包一層 writer，不是去改 assembleProfile 的措辭**。改措辭會連 chat 的輸出
+	// 一起變；包一層的話，提醒本身一個字都不動，chat 與 server 對同一份設定給出同一句診斷。
+	//
+	// 事件流傳不做事的實作：Web Service 的回應是同步阻塞的，SSE 屬擴展階段（spec #73 Out of Scope）。
+	assembled, err := assembleProfile(ctx, &linePrefixWriter{out: out, prefix: "[Profile " + name + "] "},
+		proc, prof, core.NopEventSink{})
+	if err != nil {
+		return prof, assembled, fmt.Errorf("組裝 Agent: %w", err)
+	}
+	return prof, assembled, nil
+}
+
+// closeUnavailableProfile 收掉一份不可用的 Profile 已經起來的 MCP 子進程。
+//
+// **現在就收，不等到 server 關閉**：這份 Profile 在這次啟動中永遠用不到它們。留到關閉時收的話，
+// 一個 tools 打錯字的 Profile 會讓幾個 MCP 子進程閒置到下一次重啟。會走到這裡的是 MCP 已經連上、
+// 之後才在 Subset 擋下的那種失敗。
+//
+// 收失敗只落錯誤日誌、不讓啟動失敗：這份 Profile 已經不可用，清理失敗不該連累其他 Agent。
+// McpClientService.Close 對每條連線都試過、也清空了清單，關閉時再收一次不會有不同的結果。
+func closeUnavailableProfile(proc *processAssembly, name string, assembled *profileAssembly) {
+	if assembled == nil {
+		return
+	}
+	if err := assembled.mcpClients.Close(); err != nil {
+		proc.logger.Error("mcp_close_failed", "profile", name, "error", core.RedactErrorText(err.Error()))
+	}
+}
+
+// requireAvailableProfile 在一份可用的 Profile 都沒有時回傳錯誤，列出每一份的原因。
+//
+// **可用數為 0 時不啟動**（spec #73 第三節，使用者故事 6）：一個 Agent 都沒有的 server 看起來
+// 服務正常，實際上什麼都做不了。profiles/ 底下沒有任何 YAML 也算這種情況。
+//
+// **錯誤由去敏過的原因組成，不以 %w 包原始錯誤**：這個錯誤會原樣印到終端機，包原始錯誤等於
+// 繞過去敏。錯誤日誌的 profile_unavailable 記的也是同一段去敏文字——原始錯誤刻意不落在任何
+// 地方，憑證不該因為多了一條輸出路徑就被保存下來。
+func requireAvailableProfile(entries []web.ProfileEntry) error {
+	if len(entries) == 0 {
+		return fmt.Errorf("%s/profiles 底下沒有任何 Profile（*.yaml），server 沒有 Agent 可以服務", workspaceDir)
+	}
+	var reasons []string
+	for _, entry := range entries {
+		if entry.Available() {
+			return nil
+		}
+		reasons = append(reasons, fmt.Sprintf("  %s：%s", entry.Name, entry.Reason))
+	}
+	return fmt.Errorf("沒有任何可用的 Profile，server 不啟動：\n%s", strings.Join(reasons, "\n"))
 }
 
 // profileNames 列出 profiles/ 底下每份 YAML 的檔名（去掉 .yaml），依檔名排序（os.ReadDir 的保證）。

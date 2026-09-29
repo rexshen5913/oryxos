@@ -299,7 +299,7 @@ func isASCIISpaceOrControl(r rune) bool {
 // runChat 組一次進程層級、再組一次 Profile 層級（見 assembly.go），把組出的 AgentService
 // 交給 CLI Channel；message 非空時走單訊息模式。
 func runChat(ctx context.Context, in io.Reader, out io.Writer, baseDir string, opts chatOptions) (err error) {
-	proc, err := assembleProcess(ctx, out, baseDir)
+	proc, err := assembleProcess(ctx, out, baseDir, requireAllCredentials)
 	// 收尾無條件排進 defer，而且整個函式只排這一個：失敗時的半成品也要收（見
 	// assembleProcess），Profile 層級的 MCP 連線也交給它按順序收（見 processAssembly.Close）。
 	var assembled *profileAssembly

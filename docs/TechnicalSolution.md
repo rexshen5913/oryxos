@@ -401,7 +401,13 @@ ProfileLoader 模組。從 `.oryxos/profiles/` 加載所有 YAML，解析後註�
 校驗失敗的處理**依載入形態而定**（spec #3 定案）：
 
 - **單一 Profile（`oryxos chat`，核心階段）—— fail fast，啟動即報錯。** 與本專案既有的一致語義對齊：`Registry.Subset` 對未註冊的 Tool、組裝點對未配置的 Provider 都是啟動即報錯。一次只跑一個 Profile，它壞了就沒有「其餘 Agent」可保；讓它半殘地啟動、使用者要到對話中途才發現 Agent 少了半個腦袋，比啟動就報錯更難查。
-- **多個 Profile 同時載入（Web Service，後續 spec）—— 不阻斷啟動、記錄錯誤日誌。** 一份 Profile 壞掉不該讓其餘 Agent 都起不來。這個形態尚未實作，契約隨那份 spec 定案。
+- **多個 Profile 同時載入（`oryxos server`，spec #7 定案）—— 只讓壞掉的那份不可用。** 一份 Profile 壞掉不該讓其餘 Agent 都起不來。錯誤分兩級：
+  - **Workspace 層級，啟動即失敗**：Workspace 不存在、config.yaml 無法解析、SQLite 或日誌檔打不開、監聽位址無法綁定。
+  - **Profile 層級，只讓那一份不可用**：YAML 解析失敗、檔名與 `name` 欄位不一致、引用了未配置的 Provider、該 Provider 的憑證展開失敗、bootstrap／skills／mcp_servers 校驗失敗、tools 引用了未註冊的 Tool。原因套用錯誤文字去敏（與審計、事件流同一套），落錯誤日誌、印在啟動輸出，也出現在 `GET /api/v1/profiles` 的 `error` 欄位。
+  - **MCP server 連不上不算不可用**：沿用 chat 的降級，只拿掉那台 server 提供的工具。
+  - **可用的 Profile 數為 0 時啟動失敗**，錯誤列出每份的原因；`profiles/` 底下沒有任何 YAML 也算。
+
+  兩點與 chat 刻意不對稱：**Provider 憑證逐個展開**（缺憑證只影響引用那個 Provider 的 Profile；chat 維持任何一個缺就失敗），以及**檔名必須等於 `name` 欄位**（Profile 對外的名字是檔名，會出現在 URL 上，而 Session 記的是 `name` 欄位；chat 暫不收緊）。
 
 `bootstrap` 欄位的校驗分三處，各自回答不同的問題：
 
