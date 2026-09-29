@@ -126,14 +126,24 @@ func (m *LongTermMemory) Append(ctx context.Context, content string) error {
 // 截斷只發生在**讀取側**：檔案本身一個字都不動，被截掉的內容仍可用
 // recall_memory 檢索回來。
 func (m *LongTermMemory) Load(ctx context.Context) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", fmt.Errorf("載入長期記憶: %w", err)
-	}
-	content, err := m.read()
+	content, err := m.Read(ctx)
 	if err != nil {
 		return "", err
 	}
 	return truncateForInjection(strings.TrimSpace(content)), nil
+}
+
+// Read 回傳長期記憶檔的**原文**：不截斷、不去頭尾空白（Web Service 的 GET /memory，ticket #77）。
+// 檔案不存在回空字串；越界的符號連結、權限不足等真實故障以 %w 包裝上拋，路徑防線與 Load 相同。
+//
+// **Load 就是 Read 加上為 prompt 做的裁切**：Load 為了塞進 system prompt 會截到 maxInjectRunes、
+// 並去掉頭尾空白；Read 回的是呼叫端想看到的整份檔案——使用者問「Agent 記得什麼」，答案不該被
+// 一個為 prompt 預算訂的上限切掉一半。
+func (m *LongTermMemory) Read(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("讀取長期記憶: %w", err)
+	}
+	return m.read()
 }
 
 // RecallByKeyword 以關鍵詞檢索長期記憶，回傳匹配的行（總量同樣受 maxInjectRunes

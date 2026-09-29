@@ -32,9 +32,9 @@ const shutdownTimeout = 10 * time.Second
 
 // serverOptions 是 server 命令的選項。
 //
-// 唯一的旗標 --addr 在 listener 建立之前就用完了（見 newServerCmd）。三個讀取期限不開旗標（spec
-// #73 沒有要求），命令路徑一律用預設值；它們放在這裡，是為了讓測試經由 runServer 這個 seam 把
-// 期限設短，不必真的等上 10 秒。**零值代表用預設值**，見 newHTTPServer。
+// 唯一的旗標 --addr 在 listener 建立之前就用完了（見 newServerCmd）。三個讀取期限與寫入期限都不開
+// 旗標（spec #73 沒有要求），命令路徑一律用預設值；它們放在這裡，是為了讓測試經由 runServer 這個
+// seam 把期限設短，不必真的等上 10 秒。**零值代表用預設值**，見 newHTTPServer。
 type serverOptions struct {
 	addr string
 
@@ -44,6 +44,8 @@ type serverOptions struct {
 	readTimeout time.Duration
 	// idleTimeout 是 keep-alive 連線在兩個請求之間最多能閒置多久。
 	idleTimeout time.Duration
+	// writeTimeout 是寫完一個回應的上限，擋「送出請求之後不讀回應」的連線。
+	writeTimeout time.Duration
 }
 
 // 三個讀取期限的預設值。核心階段的請求 body 只是一段 JSON，正常的請求遠遠用不到這麼久；
@@ -52,6 +54,7 @@ const (
 	defaultReadHeaderTimeout = 10 * time.Second
 	defaultReadTimeout       = 30 * time.Second
 	defaultIdleTimeout       = 60 * time.Second
+	defaultWriteTimeout      = 30 * time.Second
 )
 
 // newHTTPServer 組出帶讀取期限的 http.Server。
@@ -68,14 +71,24 @@ const (
 // （server.go 的 startBackgroundRead），請求的 context 不會因為這個期限到了而被取消，所以 #79 的
 // turn 可以跑得比它久。
 //
-// 不設 WriteTimeout：spec #73 定案它必須大於 turn 時間上限，而 turn 時間上限（--turn-timeout）
-// 屬於 #79。
+// **WriteTimeout 擋的是「送出請求之後不讀回應」的連線**（#77 的 GET /memory 之後才需要）：回應大到
+// TCP 緩衝裝不下時，寫入會停在那裡等 client 讀，client 一直不讀，連線、goroutine 與編碼好的回應就
+// 一直被佔著。#75 的端點都是幾百 bytes 的小回應，緩衝吸收得了；/memory 回傳整份檔案，大小沒有上限，
+// 這個前提就不成立了。
+//
+// **整台 server 設一個值，不是只替查詢端點設**：用 http.ResponseController 逐端點設也做得到，但每一層
+// 中介層都得能 Unwrap 到底層連線，每個端點也得記得套上；整台設一個值，404、405、預檢這些由中介層
+// 直接寫出的回應也一併涵蓋。net/http 每讀到一個新請求就重新起算這個期限。
+//
+// **#79 加入 turn 時必須把它調到大於 turn 時間上限**（spec #73 第二節）：否則 turn 逾時之後，504 回應
+// 還沒寫出去，連線就先被切斷了。現在還沒有 turn，所以這條限制暫時沒有對象。
 func newHTTPServer(handler http.Handler, opts serverOptions) *http.Server {
 	return &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: cmp.Or(opts.readHeaderTimeout, defaultReadHeaderTimeout),
 		ReadTimeout:       cmp.Or(opts.readTimeout, defaultReadTimeout),
 		IdleTimeout:       cmp.Or(opts.idleTimeout, defaultIdleTimeout),
+		WriteTimeout:      cmp.Or(opts.writeTimeout, defaultWriteTimeout),
 	}
 }
 
@@ -170,6 +183,11 @@ func runServer(ctx context.Context, out io.Writer, baseDir string, opts serverOp
 			closeUnavailableProfile(proc, name, assembled)
 		} else {
 			profiles = append(profiles, assembled)
+			// 取自 Profile 過濾後的 Executor，也就是送給 LLM 的那一份：MCP 降級與自動加入的 load_skill
+			// 都已經反映在裡面。拿 Profile 的 tools 欄位原文來列，會把連不上的 MCP 工具也列成可用。
+			for _, info := range assembled.executor.Tools() {
+				entry.Tools = append(entry.Tools, web.ToolEntry{Name: info.Name, Description: info.Description, Server: info.Server})
+			}
 			fmt.Fprintf(out, "Profile %s 已載入（Provider %s，模型 %s）\n", name, prof.Provider.Name, prof.Provider.Model)
 		}
 		entries = append(entries, entry)
@@ -192,6 +210,7 @@ func runServer(ctx context.Context, out io.Writer, baseDir string, opts serverOp
 		StartedAt: startedAt,
 		Profiles:  entries,
 		Providers: providers,
+		LongTerm:  proc.longTerm,
 	}), opts)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(listener) }()

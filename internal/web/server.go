@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/rexshen5913/oryxos/internal/core"
+	"github.com/rexshen5913/oryxos/internal/memory"
 )
 
 // productName 是 info 回應裡的 name。
@@ -40,6 +42,8 @@ type Options struct {
 	// **只收名字**：憑證與 base_url 從型別上就進不了這個 package，info 端點也就沒有機會把它們
 	// 送出去（spec #73 使用者故事 43）。
 	Providers []string
+	// LongTerm 是 Workspace 的長期記憶，GET /memory 讀它的原文。整個進程只有一份，不分 Profile。
+	LongTerm *memory.LongTermMemory
 }
 
 // ProfileEntry 是一份 Profile 在這次啟動的載入結果，由命令層組好交進來。
@@ -50,6 +54,24 @@ type ProfileEntry struct {
 	Profile *core.Profile
 	// Reason 是不可用的原因，已套用錯誤文字去敏。空字串代表這份 Profile 可用。
 	Reason string
+	// Tools 是這份 Profile 這次啟動**實際可用**的 Tool：Profile 過濾後的子集，已套用 MCP 降級、
+	// 含自動加入的 load_skill（ticket #77）。不可用時為 nil。
+	//
+	// 是啟動時的快照，不是每次請求重算：server 執行期間不重新載入 Profile（spec #73 第三節），
+	// 子集在這次啟動中不會變。
+	Tools []ToolEntry
+}
+
+// ToolEntry 是一個實際可用的 Tool。
+//
+// **web 自己定這個型別，不直接用 tool.ToolInfo**：spec #73 第九節定案 web 依賴 core、storage、
+// memory，不含 tool。命令層（composition root）從 Executor 取出清單、逐欄搬過來，同形搬運是這條
+// 解耦的成本，形狀與 config／provider 那一對相同。
+type ToolEntry struct {
+	Name        string
+	Description string
+	// Server 是這個 Tool 來自哪一台 MCP server；內建 Tool 為空字串，回應裡是 null。
+	Server string
 }
 
 // Available 回報這份 Profile 在這次啟動是否可用。
@@ -75,6 +97,8 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("GET /api/v1/health", h.health)
 	mux.HandleFunc("GET /api/v1/info", h.info)
 	mux.HandleFunc("GET /api/v1/profiles", h.profiles)
+	mux.HandleFunc("GET /api/v1/tools", h.tools)
+	mux.HandleFunc("GET /api/v1/memory", h.memory)
 	return h.withRequestLog(withCORS(h.withJSONNotFound(mux)))
 }
 
@@ -167,6 +191,122 @@ func (h *handler) profiles(w http.ResponseWriter, _ *http.Request) {
 	h.writeJSON(w, http.StatusOK, struct {
 		Profiles []profileView `json:"profiles"`
 	}{Profiles: views})
+}
+
+// toolsResponse 是 GET /api/v1/tools 的回應形狀：依 Profile 分組（spec #73 第八節）。
+//
+// 最外層叫 groups，對應 spec 的「依 Profile 分組」：叫 tools 的話，每一組裡面又有一個 tools，
+// 讀起來分不出是哪一層。
+type toolsResponse struct {
+	Groups []toolGroup `json:"groups"`
+}
+
+// toolGroup 是一份 Profile 與它這次啟動實際可用的 Tool。
+type toolGroup struct {
+	Profile string     `json:"profile"`
+	Tools   []toolView `json:"tools"`
+}
+
+// toolView 是一個 Tool。
+//
+// **server 是指標**：內建 Tool 回 null。回空字串的話，呼叫端得自己記住「空字串代表內建」這條
+// 約定；null 本身就是「沒有來源 server」。
+type toolView struct {
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	Server      *string `json:"server"`
+}
+
+// tools 列出 Profile 這次啟動實際可用的 Tool（spec #73 使用者故事 36、37）。清單取自 Profile 過濾後
+// 的 Executor，已套用 MCP 降級、含自動加入的 load_skill，見 ProfileEntry.Tools。
+//
+// 沒帶 profile 參數時列出全部**可用**的 Profile：不可用的沒有 Tool 可列，它的原因在 GET /profiles。
+//
+// **帶了空值（?profile=）算帶了，回 404**：它多半是呼叫端把一個還沒填的變數接進了網址。當成「不
+// 篩選」的話，呼叫端以為拿到了某一份的 Tool，其實拿到全部，錯誤被蓋過去。spec 對輸入的原則是讓
+// 這類錯誤當場暴露（JSON 欄位拼錯回 400，同一個理由）。所以判斷用 Has，不看值是不是空字串。
+//
+// **query 用 url.ParseQuery 解析，不用 r.URL.Query()**：後者會靜默丟掉解析不了的參數（無效的編碼
+// `%ZZ`、未編碼的分號），`?profile=%ZZ` 於是變成「沒帶參數」、回 200 與全部 Profile，同樣把錯誤
+// 蓋過去。解析失敗回 400 invalid_request。
+func (h *handler) tools(w http.ResponseWriter, r *http.Request) {
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid_request", fmt.Sprintf("查詢參數無法解析：%v", err))
+		return
+	}
+	if !query.Has("profile") {
+		groups := make([]toolGroup, 0, len(h.opts.Profiles))
+		for _, entry := range h.opts.Profiles {
+			if entry.Available() {
+				groups = append(groups, toolGroupOf(entry))
+			}
+		}
+		h.writeJSON(w, http.StatusOK, toolsResponse{Groups: groups})
+		return
+	}
+	entry, ok := h.lookupAvailableProfile(w, query.Get("profile"))
+	if !ok {
+		return
+	}
+	h.writeJSON(w, http.StatusOK, toolsResponse{Groups: []toolGroup{toolGroupOf(entry)}})
+}
+
+// toolGroupOf 把一份 Profile 的 Tool 轉成回應形狀。tools 一律是非 nil 的切片：一份沒有任何 Tool 的
+// Profile，JSON 裡是 [] 而不是 null。
+func toolGroupOf(entry ProfileEntry) toolGroup {
+	views := make([]toolView, 0, len(entry.Tools))
+	for _, info := range entry.Tools {
+		view := toolView{Name: info.Name, Description: info.Description}
+		if info.Server != "" {
+			server := info.Server
+			view.Server = &server
+		}
+		views = append(views, view)
+	}
+	return toolGroup{Profile: entry.Name, Tools: views}
+}
+
+// lookupAvailableProfile 找出名為 name、而且可用的 Profile。
+//
+// 找不到回 404 profile_not_found；找到但不可用回 503 profile_unavailable，並附上原因（已去敏）。
+// 兩個狀態碼分開，是因為呼叫端該做的事不同：前者是名字寫錯，改請求；後者是那份 Profile 的設定
+// 壞了，請求本身沒錯，要等運維人員修好重啟（spec #73 使用者故事 26）。這兩種情形都已經寫好錯誤
+// 回應，呼叫端看到 false 直接返回。
+func (h *handler) lookupAvailableProfile(w http.ResponseWriter, name string) (ProfileEntry, bool) {
+	for _, entry := range h.opts.Profiles {
+		if entry.Name != name {
+			continue
+		}
+		if !entry.Available() {
+			h.writeError(w, http.StatusServiceUnavailable, "profile_unavailable",
+				fmt.Sprintf("Profile %s 在這次啟動中不可用：%s", name, entry.Reason))
+			return ProfileEntry{}, false
+		}
+		return entry, true
+	}
+	h.writeError(w, http.StatusNotFound, "profile_not_found", fmt.Sprintf("沒有名為 %q 的 Profile", name))
+	return ProfileEntry{}, false
+}
+
+// memory 回傳 Workspace 長期記憶（MEMORY.md）的原文（spec #73 使用者故事 38、39）。
+//
+// **原文，不是注入 system prompt 的那一份**：後者截到 4000 rune、去掉頭尾空白（見
+// memory.LongTermMemory.Read 與 Load 的差別）。檔案不存在時 content 是空字串，不是錯誤。
+//
+// 讀取經 Workspace root，越界的符號連結、權限不足等故障回 500，原因同時落錯誤日誌：回給呼叫端的
+// 只有狀態碼與訊息，運維人員要在日誌裡查得到發生了什麼。
+func (h *handler) memory(w http.ResponseWriter, r *http.Request) {
+	content, err := h.opts.LongTerm.Read(r.Context())
+	if err != nil {
+		reason := core.RedactErrorText(err.Error())
+		h.opts.Logger.ErrorContext(r.Context(), "memory_read_failed", "error", reason)
+		h.writeError(w, http.StatusInternalServerError, "internal_error", "讀取長期記憶失敗："+reason)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, struct {
+		Content string `json:"content"`
+	}{Content: content})
 }
 
 // errorResponse 是所有錯誤回應共用的形狀（spec #73 第八節）：呼叫端的程式依 error_code 分支，

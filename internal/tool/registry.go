@@ -38,6 +38,12 @@ type registeredTool struct {
 	server string
 }
 
+// info 把一筆註冊轉成給人看的 ToolInfo。Registry.All 與 Executor.Tools 共用它，兩份清單的欄位
+// 不會各寫各的。
+func (t registeredTool) info(name string) ToolInfo {
+	return ToolInfo{Name: name, Description: t.tool.Description(), Server: t.server}
+}
+
 // Registry 統一管理所有 Tool：啟動時顯式註冊（憲法 2.3），Profile 啟動 Agent 時
 // 按 tools 欄位過濾出可用子集。
 type Registry struct {
@@ -94,7 +100,7 @@ func (r *Registry) register(t OryxTool, server string) error {
 // 它是變參而不是必填的第四個參數，理由就是這個：不關心中介層的組裝點不必寫一個
 // 看起來像漏填了什麼的 nil。
 func (r *Registry) Subset(names, autoIncluded []string, logger *slog.Logger, middlewares ...Middleware) (*Executor, error) {
-	sub := make(map[string]OryxTool, len(names)+len(autoIncluded))
+	sub := make(map[string]registeredTool, len(names)+len(autoIncluded))
 	ordered := make([]string, 0, len(names)+len(autoIncluded))
 	for _, name := range names {
 		t, ok := r.tools[name]
@@ -104,7 +110,7 @@ func (r *Registry) Subset(names, autoIncluded []string, logger *slog.Logger, mid
 		if _, dup := sub[name]; dup {
 			return nil, fmt.Errorf("Profile 的 tools 重複列出 %q", name)
 		}
-		sub[name] = t.tool
+		sub[name] = t
 		ordered = append(ordered, name)
 	}
 	for _, name := range autoIncluded {
@@ -117,7 +123,7 @@ func (r *Registry) Subset(names, autoIncluded []string, logger *slog.Logger, mid
 			// 訊息要指向前者，免得使用者去 tools 欄位找一個他沒寫過的名字。
 			return nil, fmt.Errorf("自動加入的 Tool %q 未註冊（組裝點漏了 Register）", name)
 		}
-		sub[name] = t.tool
+		sub[name] = t
 		ordered = append(ordered, name)
 	}
 	exec := &Executor{names: ordered, tools: sub, logger: logger}
@@ -136,7 +142,7 @@ func (r *Registry) Subset(names, autoIncluded []string, logger *slog.Logger, mid
 func (r *Registry) All() []ToolInfo {
 	all := make([]ToolInfo, 0, len(r.tools))
 	for name, t := range r.tools {
-		all = append(all, ToolInfo{Name: name, Description: t.tool.Description(), Server: t.server})
+		all = append(all, t.info(name))
 	}
 	slices.SortFunc(all, func(a, b ToolInfo) int { return strings.Compare(a.Name, b.Name) })
 	return all
