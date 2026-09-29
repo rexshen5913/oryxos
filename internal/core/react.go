@@ -172,7 +172,7 @@ func (l *ReActLoop) Run(ctx context.Context, profile *Profile, session *Session)
 		// 尤其要留下來。這一行在錯誤處理之前，turn 失敗 rollback 也不會抹掉它。
 		l.recordLLMCall(ctx, profile, session, started, resp, err)
 		if err != nil {
-			return "", fmt.Errorf("呼叫 LLM: %w", err)
+			return "", fmt.Errorf("呼叫 LLM: %w", providerFailure{err})
 		}
 		// **一則既沒有內容也沒有 tool call 的 assistant 訊息不構成最終回應**
 		// （issue #60）。原本的判定只看有沒有 tool call，於是 Provider 回一則空訊息

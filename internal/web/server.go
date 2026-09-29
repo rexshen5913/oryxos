@@ -47,6 +47,8 @@ type Options struct {
 	LongTerm *memory.LongTermMemory
 	// Sessions 是 Workspace 的 Session 儲存，Session 端點以它建立、查詢與歸檔。整個進程只有一份。
 	Sessions *storage.SessionManager
+	// TurnTimeout 是單一 turn 的時間上限（--turn-timeout），必須大於 0。
+	TurnTimeout time.Duration
 }
 
 // ProfileEntry 是一份 Profile 在這次啟動的載入結果，由命令層組好交進來。
@@ -57,6 +59,8 @@ type ProfileEntry struct {
 	Profile *core.Profile
 	// Reason 是不可用的原因，已套用錯誤文字去敏。空字串代表這份 Profile 可用。
 	Reason string
+	// Agent 是這份 Profile 組出來的 Agent，發訊息時由它跑 turn。不可用時為 nil。
+	Agent *core.AgentService
 	// Tools 是這份 Profile 這次啟動**實際可用**的 Tool：Profile 過濾後的子集，已套用 MCP 降級、
 	// 含自動加入的 load_skill（ticket #77）。不可用時為 nil。
 	//
@@ -83,6 +87,8 @@ func (e ProfileEntry) Available() bool { return e.Reason == "" }
 // handler 是 Web Service 各個端點共用的狀態。
 type handler struct {
 	opts Options
+	// busy 是「哪些 Session 正在被一個請求使用」的進程內標記，見 busySessions。
+	busy *busySessions
 }
 
 // NewHandler 組出 /api/v1 之下的路由，外面由外到內依序包上請求日誌、CORS、JSON 形狀的 404／405。
@@ -93,7 +99,7 @@ type handler struct {
 //   - **CORS 包在 404／405 外面**，錯誤回應才帶得到 CORS 標頭。少了它，瀏覽器裡的前端在出錯時
 //     連錯誤 body 都讀不到。
 func NewHandler(opts Options) http.Handler {
-	h := &handler{opts: opts}
+	h := &handler{opts: opts, busy: newBusySessions()}
 	// 路由只用標準庫：Go 1.22 起 ServeMux 支援「方法＋路徑萬用字元」，核心 10 個端點都表達得
 	// 出來，所以不引入 chi（spec #73 第一節）。
 	mux := http.NewServeMux()
@@ -105,6 +111,7 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("POST /api/v1/sessions", h.createSession)
 	mux.HandleFunc("GET /api/v1/sessions/{id}", h.getSession)
 	mux.HandleFunc("DELETE /api/v1/sessions/{id}", h.deleteSession)
+	mux.HandleFunc("POST /api/v1/sessions/{id}/messages", h.postMessage)
 	return h.withRequestLog(withCORS(h.withJSONNotFound(mux)))
 }
 
@@ -280,18 +287,26 @@ func toolGroupOf(entry ProfileEntry) toolGroup {
 // 壞了，請求本身沒錯，要等運維人員修好重啟（spec #73 使用者故事 26）。這兩種情形都已經寫好錯誤
 // 回應，呼叫端看到 false 直接返回。
 func (h *handler) lookupAvailableProfile(w http.ResponseWriter, name string) (ProfileEntry, bool) {
-	for _, entry := range h.opts.Profiles {
-		if entry.Name != name {
-			continue
-		}
-		if !entry.Available() {
-			h.writeError(w, http.StatusServiceUnavailable, "profile_unavailable",
-				fmt.Sprintf("Profile %s 在這次啟動中不可用：%s", name, entry.Reason))
-			return ProfileEntry{}, false
-		}
-		return entry, true
+	entry, found := h.findProfile(name)
+	if !found {
+		h.writeError(w, http.StatusNotFound, "profile_not_found", fmt.Sprintf("沒有名為 %q 的 Profile", name))
+		return ProfileEntry{}, false
 	}
-	h.writeError(w, http.StatusNotFound, "profile_not_found", fmt.Sprintf("沒有名為 %q 的 Profile", name))
+	if !entry.Available() {
+		h.writeError(w, http.StatusServiceUnavailable, "profile_unavailable",
+			fmt.Sprintf("Profile %s 在這次啟動中不可用：%s", name, entry.Reason))
+		return ProfileEntry{}, false
+	}
+	return entry, true
+}
+
+// findProfile 依對外的名字（檔名）找出這次啟動的一份 Profile，可用與不可用的都找得到。
+func (h *handler) findProfile(name string) (ProfileEntry, bool) {
+	for _, entry := range h.opts.Profiles {
+		if entry.Name == name {
+			return entry, true
+		}
+	}
 	return ProfileEntry{}, false
 }
 
@@ -440,6 +455,19 @@ func (h *handler) withRequestLog(next http.Handler) http.Handler {
 func noteSessionID(w http.ResponseWriter, id string) {
 	if recorder, ok := w.(*statusRecorder); ok {
 		recorder.sessionID = id
+	}
+}
+
+// statusClientClosedRequest 是「呼叫端在回應寫出之前就斷線」時，請求日誌記下的狀態碼。HTTP 沒有替
+// 這種情況定義狀態碼，499 沿用 nginx 的慣例（Client Closed Request），運維人員在日誌裡認得出來。它只
+// 進日誌，不會送上連線，因為連線已經斷了。
+const statusClientClosedRequest = 499
+
+// noteClientGone 讓請求日誌記下「呼叫端已斷線、沒有寫回應」。不記的話，statusRecorder 停在初始值
+// 200，一個被取消、已經 rollback 的 turn 在日誌裡看起來就像成功了（Spec 審查）。
+func noteClientGone(w http.ResponseWriter) {
+	if recorder, ok := w.(*statusRecorder); ok {
+		recorder.status = statusClientClosedRequest
 	}
 }
 

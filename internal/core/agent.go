@@ -2,9 +2,30 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 )
+
+// ErrProviderFailed 標記「呼叫 Provider 本身失敗」的 turn 錯誤：網路不通、非 2xx、回應不合用
+// （spec #73 第八節，ticket #79）。Web Service 依它回 503 provider_error，呼叫端就知道是上游暫時
+// 不可用、可以稍後重試，而不是請求本身寫錯了。用 errors.Is 判斷。
+//
+// 它由 providerFailure 掛在 ReAct 循環呼叫 LLM 的那個包裝點上，所以其他原因的 turn 失敗（Bootstrap
+// 缺檔、持久化失敗）不帶它。
+var ErrProviderFailed = errors.New("Provider 呼叫失敗")
+
+// providerFailure 把一次 Provider 呼叫的錯誤標記成 ErrProviderFailed，**錯誤文字原樣保留**。
+//
+// 不用 fmt.Errorf("%w: %w", ErrProviderFailed, err)：那會在每一則 Provider 錯誤前多疊一段同義的
+// 「Provider 呼叫失敗」，chat 印給使用者的訊息跟著變長。標記是給程式看的，不該改動給人看的文字。
+type providerFailure struct{ err error }
+
+func (f providerFailure) Error() string { return f.err.Error() }
+
+func (f providerFailure) Unwrap() error { return f.err }
+
+func (f providerFailure) Is(target error) bool { return target == ErrProviderFailed }
 
 // AgentService 是引擎的唯一對外入口（門面）：CLI Channel 每次輸入調 Process，
 // 後續切片的 Web Service 也調同一入口，不另闢鏈路。

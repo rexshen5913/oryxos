@@ -23,18 +23,14 @@ import (
 	"github.com/rexshen5913/oryxos/internal/web"
 )
 
-// shutdownTimeout 是優雅關閉時，等進行中請求結束的上限。
-//
-// spec #73 第二節定案的上限是「一個 turn 時間上限再加一段緩衝」，但 turn 時間上限（--turn-timeout）
-// 屬於 #79。#75 的端點都是瞬間完成的查詢，這個值只是「按 Ctrl+C 不會卡住」的上限；#79 落地時改成
-// turn 上限加緩衝。
-const shutdownTimeout = 10 * time.Second
-
 // serverOptions 是 server 命令的選項。
 //
-// 唯一的旗標 --addr 在 listener 建立之前就用完了（見 newServerCmd）。三個讀取期限與寫入期限都不開
-// 旗標（spec #73 沒有要求），命令路徑一律用預設值；它們放在這裡，是為了讓測試經由 runServer 這個
-// seam 把期限設短，不必真的等上 10 秒。**零值代表用預設值**，見 newHTTPServer。
+// 兩個旗標的去向不同：--addr 在 listener 建立之前就用完了（見 newServerCmd）；--turn-timeout 則一路
+// 帶進 runServer，決定 turn 上限、寫入期限與優雅關閉的等待（見 turnTimeoutOf）。
+//
+// 三個讀取期限與寫入期限都不開旗標（spec #73 沒有要求），命令路徑一律用預設值；它們放在這裡，是為了
+// 讓測試經由 runServer 這個 seam 把期限設短，不必真的等上 10 秒。**零值代表用預設值**，見
+// newHTTPServer。
 type serverOptions struct {
 	addr string
 
@@ -46,6 +42,39 @@ type serverOptions struct {
 	idleTimeout time.Duration
 	// writeTimeout 是寫完一個回應的上限，擋「送出請求之後不讀回應」的連線。
 	writeTimeout time.Duration
+	// turnTimeout 是單一 turn 的時間上限（--turn-timeout）。
+	turnTimeout time.Duration
+}
+
+const (
+	// defaultTurnTimeout 是 --turn-timeout 的預設值（spec #73 第二節，技術方案 §7.4）。
+	defaultTurnTimeout = 60 * time.Second
+	// responseWriteGrace 是 turn 跑滿上限之後，還留給寫出回應的時間（見 newHTTPServer）。
+	responseWriteGrace = 30 * time.Second
+	// shutdownGrace 是優雅關閉時，在 handler 的最長時間之外多等的緩衝（見 shutdownWait）。
+	shutdownGrace = 10 * time.Second
+)
+
+// turnTimeoutOf 回傳這次啟動的 turn 時間上限：沒填（測試的零值）就用預設值。命令路徑一律有值，
+// 0 與負值在 newServerCmd 就被拒絕了。
+func turnTimeoutOf(opts serverOptions) time.Duration {
+	return cmp.Or(opts.turnTimeout, defaultTurnTimeout)
+}
+
+// handlerBudget 是一個請求的 handler 最多會跑多久：**讀 body 最晚在讀取期限到時結束，turn 從那之後
+// 才開始計時、最多跑滿 turn 上限**。寫入期限與優雅關閉的等待都以它為基準，而不是只以 turn 上限為基準
+// （Spec 審查）：body 傳得慢的請求，turn 開始得晚，只留 turn 上限的話，它逾時的那一刻兩個期限都已經到了。
+func handlerBudget(opts serverOptions) time.Duration {
+	return cmp.Or(opts.readTimeout, defaultReadTimeout) + turnTimeoutOf(opts)
+}
+
+// shutdownWait 是優雅關閉時，等進行中請求結束的上限：**handler 的最長時間再加一段緩衝**（spec #73
+// 第二節的「一個 turn 時間上限再加一段緩衝」，turn 之前讀 body 的時間也算進來，見 handlerBudget）。
+//
+// 按下 Ctrl+C 的那一刻，可能有一個請求剛讀完標頭，它最多跑滿 handlerBudget。等得比這短，進行中的
+// turn 會被切斷，呼叫端拿不到回應、那一輪白跑；緩衝留給 turn 結束之後寫回應與收尾。
+func shutdownWait(opts serverOptions) time.Duration {
+	return handlerBudget(opts) + shutdownGrace
 }
 
 // 三個讀取期限的預設值。核心階段的請求 body 只是一段 JSON，正常的請求遠遠用不到這麼久；
@@ -54,7 +83,6 @@ const (
 	defaultReadHeaderTimeout = 10 * time.Second
 	defaultReadTimeout       = 30 * time.Second
 	defaultIdleTimeout       = 60 * time.Second
-	defaultWriteTimeout      = 30 * time.Second
 )
 
 // newHTTPServer 組出帶讀取期限的 http.Server。
@@ -80,15 +108,18 @@ const (
 // 中介層都得能 Unwrap 到底層連線，每個端點也得記得套上；整台設一個值，404、405、預檢這些由中介層
 // 直接寫出的回應也一併涵蓋。net/http 每讀到一個新請求就重新起算這個期限。
 //
-// **#79 加入 turn 時必須把它調到大於 turn 時間上限**（spec #73 第二節）：否則 turn 逾時之後，504 回應
-// 還沒寫出去，連線就先被切斷了。現在還沒有 turn，所以這條限制暫時沒有對象。
+// **沒填時是「handler 的最長時間＋responseWriteGrace」**（spec #73 第二節，ticket #79）：WriteTimeout
+// 從讀完請求標頭就開始計時，涵蓋整個 handler，包括 turn 之前讀 body 的那一段（見 handlerBudget）。
+// 它若不大於 handler 的最長時間，turn 逾時之後，504 回應還沒寫出去，連線就先被切斷了。寬限的 30 秒是
+// 寫出回應本身的預算，也就是 #77 那個「不讀回應的 client」最多能佔住連線多久。明確填了（只有測試會
+// 填）就照用。
 func newHTTPServer(handler http.Handler, opts serverOptions) *http.Server {
 	return &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: cmp.Or(opts.readHeaderTimeout, defaultReadHeaderTimeout),
 		ReadTimeout:       cmp.Or(opts.readTimeout, defaultReadTimeout),
 		IdleTimeout:       cmp.Or(opts.idleTimeout, defaultIdleTimeout),
-		WriteTimeout:      cmp.Or(opts.writeTimeout, defaultWriteTimeout),
+		WriteTimeout:      cmp.Or(opts.writeTimeout, handlerBudget(opts)+responseWriteGrace),
 	}
 }
 
@@ -104,6 +135,10 @@ func newServerCmd() *cobra.Command {
 		// 執行期錯誤（未初始化、埠號被佔用、Profile 壞掉）與用法無關，不倒 Usage 沖淡錯誤訊息。
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// 在綁定位址之前就擋下：0 會讓每一個 turn 一開始就逾時，負值同理。
+			if opts.turnTimeout <= 0 {
+				return fmt.Errorf("--turn-timeout 必須大於 0，收到 %v", opts.turnTimeout)
+			}
 			cwd, err := os.Getwd()
 			if err != nil {
 				return fmt.Errorf("取得當前目錄: %w", err)
@@ -120,6 +155,8 @@ func newServerCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&opts.addr, "addr", ":8080",
 		"監聽位址；預設監聽所有網路介面的 8080 埠，只對本機開放請用 127.0.0.1:8080")
+	cmd.Flags().DurationVar(&opts.turnTimeout, "turn-timeout", defaultTurnTimeout,
+		"單一 turn 的時間上限；推理型模型跑滿 iteration 上限時可能需要調長")
 	return cmd
 }
 
@@ -185,6 +222,7 @@ func runServer(ctx context.Context, out io.Writer, baseDir string, opts serverOp
 			profiles = append(profiles, assembled)
 			// 取自 Profile 過濾後的 Executor，也就是送給 LLM 的那一份：MCP 降級與自動加入的 load_skill
 			// 都已經反映在裡面。拿 Profile 的 tools 欄位原文來列，會把連不上的 MCP 工具也列成可用。
+			entry.Agent = assembled.agent
 			for _, info := range assembled.executor.Tools() {
 				entry.Tools = append(entry.Tools, web.ToolEntry{Name: info.Name, Description: info.Description, Server: info.Server})
 			}
@@ -205,13 +243,14 @@ func runServer(ctx context.Context, out io.Writer, baseDir string, opts serverOp
 	slices.Sort(providers) // map 的走訪順序每次都不同，排序之後回應才可重現
 
 	srv := newHTTPServer(web.NewHandler(web.Options{
-		Logger:    proc.logger,
-		Version:   buildVersion(),
-		StartedAt: startedAt,
-		Profiles:  entries,
-		Providers: providers,
-		LongTerm:  proc.longTerm,
-		Sessions:  proc.sessions,
+		Logger:      proc.logger,
+		Version:     buildVersion(),
+		StartedAt:   startedAt,
+		Profiles:    entries,
+		Providers:   providers,
+		LongTerm:    proc.longTerm,
+		Sessions:    proc.sessions,
+		TurnTimeout: turnTimeoutOf(opts),
 	}), opts)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(listener) }()
@@ -230,8 +269,8 @@ func runServer(ctx context.Context, out io.Writer, baseDir string, opts serverOp
 
 	fmt.Fprintln(out, "正在關閉：不再接受新連線，等進行中的請求結束")
 	// **關閉用的 context 不能直接用 ctx**：ctx 已經取消了，Shutdown 拿到它會一刻都不等，進行中的
-	// 請求被當場切斷。WithoutCancel 保留 ctx 帶的值、拿掉取消，上限另外由 shutdownTimeout 給。
-	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+	// 請求被當場切斷。WithoutCancel 保留 ctx 帶的值、拿掉取消，上限另外由 shutdownWait 給。
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownWait(opts))
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		// 等不到進行中的請求結束：強制切斷剩下的連線，再往下收尾。

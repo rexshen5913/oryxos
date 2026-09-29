@@ -405,15 +405,18 @@ func TestServerReleasesSlowResponseReader(t *testing.T) {
 }
 
 // TestNewHTTPServerWriteTimeout 釘住寫入期限的零值換成預設值，不是不設期限：理由同讀取期限（見
-// TestNewHTTPServerTimeouts），http.Server 的零值就是不設。這一條從連線上看不到（預設要等 30 秒），
+// TestNewHTTPServerTimeouts），http.Server 的零值就是不設。這一條從連線上看不到（預設要等一分多鐘），
 // 所以直接看 newHTTPServer 的設定。
+//
+// 預設值自 #79 起是「讀取期限＋turn 上限＋寫出回應的寬限」：寫入期限必須大於 handler 的最長時間
+// （spec #73 第二節），另見 TestServerDeadlinesFollowTurnTimeout。
 func TestNewHTTPServerWriteTimeout(t *testing.T) {
 	tests := []struct {
 		name string
 		opts serverOptions
 		want time.Duration
 	}{
-		{name: "沒填時換成預設值", opts: serverOptions{}, want: defaultWriteTimeout},
+		{name: "沒填時換成預設值", opts: serverOptions{}, want: defaultReadTimeout + defaultTurnTimeout + responseWriteGrace},
 		{name: "有填時照用", opts: serverOptions{writeTimeout: 4 * time.Second}, want: 4 * time.Second},
 	}
 	for _, tt := range tests {

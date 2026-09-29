@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -91,20 +92,35 @@ func getSession(t *testing.T, s *runningServer, id string) sessionObject {
 // workspaceDB 是 Workspace 內那個 SQLite 檔的路徑。
 func workspaceDB(dir string) string { return filepath.Join(dir, workspaceDir, sessionDBFile) }
 
+// openWorkspaceDB 另開一條連線讀 Workspace 的 SQLite，帶 5 秒的 busy_timeout。
+//
+// server 可能同時開著同一個檔：turn 結束之後，審計在背景寫入。沒有 busy_timeout 的連線一撞到那一刻
+// 的寫鎖就立即回 SQLITE_BUSY，測試會因為時機而偶爾失敗。
+func openWorkspaceDB(t *testing.T, dir string) *sql.DB {
+	t.Helper()
+	abs, err := filepath.Abs(workspaceDB(dir))
+	if err != nil {
+		t.Fatalf("解析 db 檔路徑: %v", err)
+	}
+	dsn := url.URL{Scheme: "file", Path: filepath.ToSlash(abs), RawQuery: "_pragma=busy_timeout(5000)"}
+	db, err := sql.Open("sqlite", dsn.String())
+	if err != nil {
+		t.Fatalf("開啟 db 檔: %v", err)
+	}
+	return db
+}
+
 // sessionColumns 直接查 sessions 表裡一個 Session 的 channel、status 與 messages_json；不存在時
 // found 為假。
 func sessionColumns(t *testing.T, dir, id string) (channel, status, messagesJSON string, found bool) {
 	t.Helper()
-	db, err := sql.Open("sqlite", workspaceDB(dir))
-	if err != nil {
-		t.Fatalf("開啟 db 檔: %v", err)
-	}
+	db := openWorkspaceDB(t, dir)
 	defer func() {
 		if err := db.Close(); err != nil {
 			t.Errorf("關閉 db 檔: %v", err)
 		}
 	}()
-	err = db.QueryRowContext(context.Background(),
+	err := db.QueryRowContext(context.Background(),
 		`SELECT channel, status, messages_json FROM sessions WHERE session_id = ?`, id).
 		Scan(&channel, &status, &messagesJSON)
 	if errors.Is(err, sql.ErrNoRows) {

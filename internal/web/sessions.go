@@ -105,9 +105,18 @@ func (h *handler) getSession(w http.ResponseWriter, r *http.Request) {
 // deleteSession 把一個 Session 歸檔（spec #73 使用者故事 21、22）。已經歸檔的再歸檔一次也回 200：
 // 網路重試不該把一次成功的歸檔變成錯誤。對話歷史不動，之後仍查得到。
 //
+// **turn 進行中不能歸檔**：先佔用「進行中」標記，佔不到就立即回 409 session_busy，不排隊（spec #73
+// 第四節）。否則 turn 跑到一半 Session 被歸檔，它的存檔會因為「只寫得進 active 的列」而失敗，整輪
+// rollback——呼叫端的訊息白送，而他看到的原因是一個他沒做的歸檔。
+//
 // **先讀一次、確認是 Web Service 建立的，才歸檔**：CLI 的 Session 不能被 Web Service 動到（見 lookupWebSession）。
 // channel 欄位建立之後就不會再變，所以「先檢查、再動作」之間沒有空隙讓它變掉。
 func (h *handler) deleteSession(w http.ResponseWriter, r *http.Request) {
+	id, ok := h.markSessionBusy(w, r)
+	if !ok {
+		return
+	}
+	defer h.busy.release(id)
 	record, ok := h.lookupWebSession(w, r)
 	if !ok {
 		return
