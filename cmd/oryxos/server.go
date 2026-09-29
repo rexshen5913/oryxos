@@ -77,6 +77,22 @@ func shutdownWait(opts serverOptions) time.Duration {
 	return handlerBudget(opts) + shutdownGrace
 }
 
+// authReminder 是啟動時「未啟用認證」的提醒（spec #73 使用者故事 11）。
+//
+// **提醒本身不看監聽位址、一律印**：只在「監聽所有介面」時才印的話，改成 127.0.0.1 的人會以為安全
+// 了；但 CORS 全開，他瀏覽的任何網頁仍可能經由瀏覽器打到本機。
+//
+// **只有後半句的緩解建議看位址**：已經只監聽 loopback 時，「改用 --addr 127.0.0.1:8080」是做過的
+// 事，還指定了一個沒在用的埠，所以換成說明只對本機開放也擋不住的那條路。位址不是 TCP 位址時（不會
+// 發生在 net.Listen("tcp", …) 上）照「可能對外」處理，寧可多給一句建議。
+func authReminder(addr net.Addr) string {
+	const head = "提醒：未啟用認證，任何連得到這個位址的人都能驅動 Agent（含它的 Profile 開放的 Tool）；"
+	if tcp, ok := addr.(*net.TCPAddr); ok && tcp.IP.IsLoopback() {
+		return head + "只對本機開放也一樣：CORS 全開，你瀏覽的網頁仍可能經由瀏覽器打到它，完整風險說明見 SECURITY.md。\n"
+	}
+	return head + "只想在本機使用請改用 --addr 127.0.0.1:8080，完整風險說明見 SECURITY.md。\n"
+}
+
 // 三個讀取期限的預設值。核心階段的請求 body 只是一段 JSON，正常的請求遠遠用不到這麼久；
 // 期限只在連線慢得不正常時才起作用。
 const (
@@ -184,10 +200,7 @@ func runServer(ctx context.Context, out io.Writer, baseDir string, opts serverOp
 	startedAt := time.Now()
 
 	fmt.Fprintf(out, "OryxOS server 監聽 %s\n", listener.Addr())
-	// **這行提醒不看監聽位址、一律印**（spec #73 使用者故事 11）。只在「監聽所有介面」時才印的話，
-	// 改成 127.0.0.1 的人會以為安全了；但 CORS 全開，他瀏覽的任何網頁照樣能經由瀏覽器打到本機。
-	fmt.Fprintf(out, "提醒：未啟用認證，任何連得到這個位址的人都能驅動 Agent（含它的 Profile 開放的 Tool）；"+
-		"只想在本機使用請改用 --addr 127.0.0.1:8080，完整風險說明見 SECURITY.md。\n")
+	fmt.Fprint(out, authReminder(listener.Addr()))
 
 	proc, err := assembleProcess(ctx, out, baseDir, credentialsPerProvider)
 	var profiles []*profileAssembly

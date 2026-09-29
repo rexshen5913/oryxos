@@ -757,3 +757,82 @@ func TestNewHTTPServerTimeouts(t *testing.T) {
 		})
 	}
 }
+
+// reportedAddrListener 底下綁的是 loopback，Addr() 卻回報另一個位址：讓測試不必真的監聽所有網路
+// 介面（macOS 的防火牆會為此跳出詢問），也看得到 server 依監聽位址給的提醒。
+type reportedAddrListener struct {
+	net.Listener
+	addr net.Addr
+}
+
+func (l reportedAddrListener) Addr() net.Addr { return l.addr }
+
+// TestServerAuthReminder 釘住啟動時「未啟用認證」的提醒（spec #73 使用者故事 11）：
+//
+//   - **一律印**：只對本機開放也一樣，CORS 全開，使用者瀏覽的網頁仍可能經由瀏覽器打到它。
+//   - **緩解建議看監聽位址**：已經只監聽 loopback 時，「改用 --addr 127.0.0.1:8080」是做過的事，
+//     還指定了一個沒在用的埠；換成說明只對本機開放也擋不住的那條路。
+func TestServerAuthReminder(t *testing.T) {
+	const reminder = "未啟用認證"
+	const bindLoopback = "改用 --addr 127.0.0.1:8080"
+	const loopbackStill = "只對本機開放也一樣"
+	tests := []struct {
+		name string
+		// reported 非 nil 時，listener 對 runServer 回報這個位址；nil 代表照實回報 127.0.0.1。
+		reported   net.Addr
+		wantAdvice string
+		wantAbsent string
+	}{
+		{name: "監聽 127.0.0.1", wantAdvice: loopbackStill, wantAbsent: bindLoopback},
+		{name: "監聽 ::1", reported: &net.TCPAddr{IP: net.IPv6loopback, Port: 8080}, wantAdvice: loopbackStill, wantAbsent: bindLoopback},
+		{name: "監聽所有介面", reported: &net.TCPAddr{IP: net.IPv4zero, Port: 8080}, wantAdvice: bindLoopback, wantAbsent: loopbackStill},
+		{name: "監聽區網位址", reported: &net.TCPAddr{IP: net.ParseIP("192.168.1.10"), Port: 8080}, wantAdvice: bindLoopback, wantAbsent: loopbackStill},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := setupChatWorkspace(t, newReplayServer(t).URL)
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("開 listener: %v", err)
+			}
+			realAddr := listener.Addr().String()
+			var serving net.Listener = listener
+			if tt.reported != nil {
+				serving = reportedAddrListener{Listener: listener, addr: tt.reported}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var out bytes.Buffer
+			finished := make(chan error, 1)
+			go func() { finished <- runServer(ctx, &out, dir, serverOptions{}, serving) }()
+
+			// 先走完一個請求：確認啟動輸出都已經印完，再收掉。
+			resp, err := (&http.Client{Timeout: 10 * time.Second}).Get("http://" + realAddr + "/api/v1/health")
+			if err != nil {
+				t.Fatalf("health: %v", err)
+			}
+			if err := resp.Body.Close(); err != nil {
+				t.Fatalf("關閉 health 回應: %v", err)
+			}
+			cancel()
+			select {
+			case err := <-finished:
+				if err != nil {
+					t.Fatalf("runServer: %v\n輸出:\n%s", err, out.String())
+				}
+			case <-time.After(20 * time.Second):
+				t.Fatal("取消 context 之後 20 秒 runServer 仍未返回")
+			}
+
+			got := out.String()
+			for _, want := range []string{reminder, tt.wantAdvice, "SECURITY.md"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("啟動輸出沒有 %q:\n%s", want, got)
+				}
+			}
+			if strings.Contains(got, tt.wantAbsent) {
+				t.Errorf("啟動輸出不該有 %q:\n%s", tt.wantAbsent, got)
+			}
+		})
+	}
+}
