@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fixture-web-concurrent-final",
+  "object": "chat.completion",
+  "created": 1790700000,
+  "model": "deepseek/deepseek-v4-flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "完成：{{TAG}}"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 320,
+    "completion_tokens": 8,
+    "total_tokens": 328
+  }
+}

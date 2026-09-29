@@ -1,0 +1,39 @@
+{
+  "id": "chatcmpl-fixture-web-concurrent-tool-calls",
+  "object": "chat.completion",
+  "created": 1790700000,
+  "model": "deepseek/deepseek-v4-flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_concurrent_echo",
+            "type": "function",
+            "function": {
+              "name": "demo__echo",
+              "arguments": "{\"text\":\"{{TAG}}\"}"
+            }
+          },
+          {
+            "id": "call_concurrent_memory",
+            "type": "function",
+            "function": {
+              "name": "save_memory",
+              "arguments": "{\"content\":\"{{TAG}} 的偏好是綠茶\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 210,
+    "completion_tokens": 40,
+    "total_tokens": 250
+  }
+}

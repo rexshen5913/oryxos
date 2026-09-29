@@ -612,15 +612,25 @@ func TestServerGracefulShutdown(t *testing.T) {
 		t.Errorf("runServer 返回時 MCP 子進程還沒被收掉（marker %s 不存在）", marker)
 	}
 
+	assertGoroutinesBackToBaseline(t, baseline)
+}
+
+// assertGoroutinesBackToBaseline 等 goroutine 數回到基線附近（最多 5 秒），回不去就報錯並印出所有
+// goroutine 的堆疊。**基線要在 server 起來之前取**，server 自己開的每一個 goroutine（Serve 迴圈、連線、
+// 審計的背景 worker、SQLite 連線池、MCP 的讀取迴圈）沒收掉都會算進去。容忍 3 個：runtime 與 testing
+// 自己偶爾會多出正在結束的 goroutine。
+func assertGoroutinesBackToBaseline(t *testing.T, baseline int) {
+	t.Helper()
 	const slack = 3
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	got := runtime.NumGoroutine()
 	for got > baseline+slack && time.Now().Before(deadline) {
 		time.Sleep(50 * time.Millisecond)
 		got = runtime.NumGoroutine()
 	}
 	if got > baseline+slack {
-		t.Errorf("server 關閉之後 goroutine 沒有回到基線：基線 %d、關閉後 %d", baseline, got)
+		buf := make([]byte, 1<<20)
+		t.Errorf("server 關閉之後 goroutine 沒有回到基線：基線 %d、關閉後 %d\n%s", baseline, got, buf[:runtime.Stack(buf, true)])
 	}
 }
 
