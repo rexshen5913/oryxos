@@ -350,6 +350,8 @@ OpenAPI 文檔模組（**擴展階段**）。提供 OpenAPI 3.0 文檔，暴露�
 - `GET /api/v1/sessions/{id}`（查歷史）
 - `DELETE /api/v1/sessions/{id}`（歸檔）。
 
+會話管理的端點**只看得到 Web Service 建立的 Session**（接入來源為 `web`）；CLI 建立的 Session 對這些端點一律是 404，歸檔請求也不會動到它（ticket #78 依 spec #7 第四節的前提定案）。多 Session 的並行設計建立在「chat 與 server 永遠不會碰到同一個 Session」這個前提上：server 的「進行中」標記只在單一進程內有效，若 Web Service 能讀寫 CLI 的 Session，兩個進程就可能同時寫同一段對話。
+
 Agent 呼叫 1 個：
 
 - `POST /api/v1/agents/{name}/invoke`（無狀態呼叫）。

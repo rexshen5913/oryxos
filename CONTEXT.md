@@ -48,7 +48,8 @@ LLM API 服務的抽象，讓 Agent 不感知具體呼叫的是哪一家。一�
 _Avoid_: 模型、廠商、LLM 客戶端
 
 **Session**：
-使用者與 Agent 一次對話的上下文容器，含對話歷史與當前狀態，由 Channel、使用者、Profile 聯合標識。同時也是 Memory 的第一層。
+使用者與 Agent 一次對話的上下文容器，含對話歷史與當前狀態，由接入來源、使用者、Profile 聯合標識。同時也是 Memory 的第一層。
+Web Service 建立的 Session，接入來源記為 `web`、使用者標識由呼叫端提供；這不代表 Web Service 是 Channel。
 _Avoid_: 會話記憶（同一物，統一用 Session）
 
 ## 記憶

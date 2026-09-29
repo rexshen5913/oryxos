@@ -11,6 +11,7 @@ import (
 
 	"github.com/rexshen5913/oryxos/internal/core"
 	"github.com/rexshen5913/oryxos/internal/memory"
+	"github.com/rexshen5913/oryxos/internal/storage"
 )
 
 // productName 是 info 回應裡的 name。
@@ -44,6 +45,8 @@ type Options struct {
 	Providers []string
 	// LongTerm 是 Workspace 的長期記憶，GET /memory 讀它的原文。整個進程只有一份，不分 Profile。
 	LongTerm *memory.LongTermMemory
+	// Sessions 是 Workspace 的 Session 儲存，Session 端點以它建立、查詢與歸檔。整個進程只有一份。
+	Sessions *storage.SessionManager
 }
 
 // ProfileEntry 是一份 Profile 在這次啟動的載入結果，由命令層組好交進來。
@@ -99,6 +102,9 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("GET /api/v1/profiles", h.profiles)
 	mux.HandleFunc("GET /api/v1/tools", h.tools)
 	mux.HandleFunc("GET /api/v1/memory", h.memory)
+	mux.HandleFunc("POST /api/v1/sessions", h.createSession)
+	mux.HandleFunc("GET /api/v1/sessions/{id}", h.getSession)
+	mux.HandleFunc("DELETE /api/v1/sessions/{id}", h.deleteSession)
 	return h.withRequestLog(withCORS(h.withJSONNotFound(mux)))
 }
 
@@ -299,9 +305,7 @@ func (h *handler) lookupAvailableProfile(w http.ResponseWriter, name string) (Pr
 func (h *handler) memory(w http.ResponseWriter, r *http.Request) {
 	content, err := h.opts.LongTerm.Read(r.Context())
 	if err != nil {
-		reason := core.RedactErrorText(err.Error())
-		h.opts.Logger.ErrorContext(r.Context(), "memory_read_failed", "error", reason)
-		h.writeError(w, http.StatusInternalServerError, "internal_error", "讀取長期記憶失敗："+reason)
+		h.writeInternalError(w, r, "memory_read_failed", "讀取長期記憶失敗", err)
 		return
 	}
 	h.writeJSON(w, http.StatusOK, struct {
@@ -320,6 +324,14 @@ type errorResponse struct {
 // writeError 寫出統一形狀的錯誤回應。
 func (h *handler) writeError(w http.ResponseWriter, status int, code, message string) {
 	h.writeJSON(w, status, errorResponse{ErrorCode: code, Message: message, Timestamp: time.Now()})
+}
+
+// writeInternalError 回 500 internal_error，原因（已去敏）同時落錯誤日誌 event：呼叫端看得到訊息，
+// 但運維人員查的是日誌，原因要在那裡也查得到。
+func (h *handler) writeInternalError(w http.ResponseWriter, r *http.Request, event, what string, err error) {
+	reason := core.RedactErrorText(err.Error())
+	h.opts.Logger.ErrorContext(r.Context(), event, "error", reason)
+	h.writeError(w, http.StatusInternalServerError, "internal_error", what+"："+reason)
 }
 
 // writeJSON 寫出 JSON 回應。編碼或寫出失敗時，狀態碼已經送出、改不了，只能落日誌。
@@ -410,10 +422,25 @@ func (h *handler) withRequestLog(next http.Handler) http.Handler {
 		start := time.Now()
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
-		h.opts.Logger.InfoContext(r.Context(), "http_request",
-			"method", r.Method, "path", r.URL.Path, "status", recorder.status,
-			"duration_ms", time.Since(start).Milliseconds())
+		attrs := []any{"method", r.Method, "path", r.URL.Path, "status", recorder.status,
+			"duration_ms", time.Since(start).Milliseconds()}
+		if recorder.sessionID != "" {
+			attrs = append(attrs, "session_id", recorder.sessionID)
+		}
+		h.opts.Logger.InfoContext(r.Context(), "http_request", attrs...)
 	})
+}
+
+// noteSessionID 讓請求日誌記下這個請求處理的 Session（spec #73 第八節「有 Session ID 時一併記上」）。
+//
+// 請求日誌在最外層，看不到 handler 做了什麼；建立 Session 時，新的 ID 只出現在回應裡、請求的路徑
+// 上沒有。所以由 handler 把 ID 留在 statusRecorder 上，日誌寫出時帶上。handler 拿到的 w 就是
+// withRequestLog 包的那一個（中間的 CORS 與 404／405 都原樣往下傳），將來若有一層中介層換掉了 w，
+// 這裡會找不到它而記不到，由 TestServerRequestLogRecordsSessionID 守著。
+func noteSessionID(w http.ResponseWriter, id string) {
+	if recorder, ok := w.(*statusRecorder); ok {
+		recorder.sessionID = id
+	}
 }
 
 // statusRecorder 記下 handler 送出的狀態碼。handler 沒有明確呼叫 WriteHeader 就寫 body 時，
@@ -421,6 +448,8 @@ func (h *handler) withRequestLog(next http.Handler) http.Handler {
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
+	// sessionID 是這個請求處理的 Session，由 handler 經 noteSessionID 留下；沒有時是空字串。
+	sessionID string
 }
 
 func (r *statusRecorder) WriteHeader(status int) {

@@ -270,6 +270,159 @@ func (m *SessionManager) Save(ctx context.Context, session *core.Session) error 
 	return nil
 }
 
+// SessionRecord 是以 ID 讀回的一個 Session：對話歷史，加上狀態與三個時間戳（ticket #78）。
+//
+// **狀態與時間戳不加進 core.Session**（spec #73 第六節）：core.Session 必須能原樣重放給 Provider，
+// 引擎不該看到、也不該依賴「這一場是不是 active」「什麼時候建立的」這些儲存層的事實。
+type SessionRecord struct {
+	Session *core.Session
+	// Status 是 "active" 或 "archived"，也就是 sessions 表 status 欄位的值。
+	Status       string
+	CreatedAt    time.Time
+	LastActiveAt time.Time
+	// ArchivedAt 在 active 時是 nil。
+	ArchivedAt *time.Time
+}
+
+// ErrSessionNotFound 表示 session_id 在 sessions 表裡不存在。
+var ErrSessionNotFound = errors.New("找不到 Session")
+
+// ActiveSessionExistsError 表示同一聯合標識已經有一個 active Session，建立被擋下；SessionID 是
+// 既有那一場的 ID，呼叫端可以決定接著用它，還是先歸檔（spec #73 使用者故事 15）。
+type ActiveSessionExistsError struct {
+	SessionID string
+}
+
+func (e *ActiveSessionExistsError) Error() string {
+	return fmt.Sprintf("同一聯合標識已有 active Session %s", e.SessionID)
+}
+
+// Create 為（channel, userID, profileName）建立一個對話歷史為空的 active Session，並**立即落庫**
+// （spec #73 第五節）。這與 CLI 的「第一個成功 turn 才落庫」不同：Web Service 的呼叫端拿到 ID 之後
+// 可能先查詢再發訊息，ID 必須馬上查得到。
+//
+// 同一聯合標識已有 active Session 時回 *ActiveSessionExistsError，帶著既有那一場的 ID。
+//
+// **「撞到唯一索引」與「查出既有那一場」放在同一個交易裡**：兩步之間若插進另一個進程的歸檔或建立，
+// 查到的 ID 就不一定是擋下這次建立的那一場。**衝突用 ON CONFLICT DO NOTHING 加影響列數判斷，不去
+// 辨識驅動回的錯誤碼**：撞到唯一索引是預期中的結果，不是錯誤，不該依賴 SQLite 驅動特有的錯誤型別。
+func (m *SessionManager) Create(ctx context.Context, channel, userID, profileName string) (*SessionRecord, error) {
+	session := core.NewSession(channel, userID, profileName)
+	now := time.Now().UTC()
+	stamp := now.Format(timestampLayout)
+
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("建立 Session：開始交易: %w", err)
+	}
+	// Commit 成功之後的 Rollback 回 sql.ErrTxDone，不是錯誤；其餘路徑上的 Rollback 失敗，交易也會隨
+	// 連線結束而作廢，沒有東西要補救。
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO sessions
+		     (session_id, profile_name, channel, user_id, messages_json, status, created_at, last_active_at)
+		 VALUES (?, ?, ?, ?, '[]', ?, ?, ?)
+		 ON CONFLICT DO NOTHING`,
+		session.ID, profileName, channel, userID, statusActive, stamp, stamp)
+	if err != nil {
+		return nil, fmt.Errorf("建立 Session %s: %w", session.ID, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("取得建立 Session %s 的結果: %w", session.ID, err)
+	}
+	if affected == 0 {
+		var existing string
+		err := tx.QueryRowContext(ctx,
+			`SELECT session_id FROM sessions
+			 WHERE channel = ? AND user_id = ? AND profile_name = ? AND status = ?`,
+			channel, userID, profileName, statusActive).Scan(&existing)
+		if errors.Is(err, sql.ErrNoRows) {
+			// 沒撞到 active 那條索引，撞的是主鍵：同一聯合標識在同一奈秒內建立過一場。
+			return nil, fmt.Errorf("建立 Session：session_id %s 已存在，請重試", session.ID)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("查詢擋下建立的 active Session（%s／%s／%s）: %w", channel, userID, profileName, err)
+		}
+		return nil, &ActiveSessionExistsError{SessionID: existing}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("建立 Session %s：提交交易: %w", session.ID, err)
+	}
+	return &SessionRecord{Session: session, Status: statusActive, CreatedAt: now, LastActiveAt: now}, nil
+}
+
+// SessionByID 依 session_id 讀回一個 Session（含對話歷史）與它的狀態、時間戳；不存在時回的錯誤
+// 包著 ErrSessionNotFound。
+//
+// 不過濾接入來源：以 ID 讀取是儲存層的事實，「哪些 Session 這個入口看得到」由呼叫端決定（Web
+// Service 只認 channel 為 web 的，見 internal/web）。
+func (m *SessionManager) SessionByID(ctx context.Context, id string) (*SessionRecord, error) {
+	var (
+		channel, userID, profileName, messagesJSON, status, createdAt, lastActiveAt string
+		archivedAt                                                                  sql.NullString
+	)
+	err := m.db.QueryRowContext(ctx,
+		`SELECT channel, user_id, profile_name, messages_json, status, created_at, last_active_at, archived_at
+		 FROM sessions WHERE session_id = ?`, id).
+		Scan(&channel, &userID, &profileName, &messagesJSON, &status, &createdAt, &lastActiveAt, &archivedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("Session %s: %w", id, ErrSessionNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("查詢 Session %s: %w", id, err)
+	}
+
+	messages, err := decodeMessages(messagesJSON)
+	if err != nil {
+		return nil, fmt.Errorf("還原 Session %s 的對話歷史: %w", id, err)
+	}
+	record := &SessionRecord{
+		Session: &core.Session{ID: id, Channel: channel, UserID: userID, ProfileName: profileName, Messages: messages},
+		Status:  status,
+	}
+	if record.CreatedAt, err = time.Parse(timestampLayout, createdAt); err != nil {
+		return nil, fmt.Errorf("解析 Session %s 的 created_at: %w", id, err)
+	}
+	if record.LastActiveAt, err = time.Parse(timestampLayout, lastActiveAt); err != nil {
+		return nil, fmt.Errorf("解析 Session %s 的 last_active_at: %w", id, err)
+	}
+	if archivedAt.Valid {
+		at, err := time.Parse(timestampLayout, archivedAt.String)
+		if err != nil {
+			return nil, fmt.Errorf("解析 Session %s 的 archived_at: %w", id, err)
+		}
+		record.ArchivedAt = &at
+	}
+	return record, nil
+}
+
+// ArchiveByID 把 session_id 指定的那一場歸檔，回傳歸檔後的紀錄；不存在時回的錯誤包著
+// ErrSessionNotFound。
+//
+// **已經歸檔的再歸檔一次視為成功**，archived_at 維持第一次的值：網路重試不該把一次成功的歸檔
+// 變成錯誤（spec #73 使用者故事 22）。
+//
+// **以 session_id 定位，不接到 ArchiveActive 上**：那支以聯合標識找 active 那一列，傳入舊 Session 的
+// ID 會歸檔到當前那一場。兩者共用的是狀態轉移規則（status 轉 archived、蓋 archived_at、對話歷史
+// 不動、只動 active 的列），各自寫成一條完整的 UPDATE，不共用函式：共用函式得把 WHERE 條件當字串
+// 拼進 SQL，安全性只能靠註解約束。只動 active 的列，所以 archived_at 只蓋一次、重複歸檔是 no-op。
+func (m *SessionManager) ArchiveByID(ctx context.Context, id string) (*SessionRecord, error) {
+	now := time.Now().UTC().Format(timestampLayout)
+	if _, err := m.db.ExecContext(ctx,
+		`UPDATE sessions SET status = ?, archived_at = ?
+		 WHERE session_id = ? AND status = ?`,
+		statusArchived, now, id, statusActive); err != nil {
+		return nil, fmt.Errorf("歸檔 Session %s: %w", id, err)
+	}
+	record, err := m.SessionByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("讀回歸檔後的 Session: %w", err)
+	}
+	return record, nil
+}
+
 // persistedMessage 是 messages_json 的落庫形狀。刻意與 core.Message 分開定義：
 // 落庫格式是對外承諾（使用者可直接開 db 檔查看、舊資料要能讀回），不該隨
 // core 內部欄位改名而漂移。

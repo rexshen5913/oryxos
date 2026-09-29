@@ -211,6 +211,7 @@ func runServer(ctx context.Context, out io.Writer, baseDir string, opts serverOp
 		Profiles:  entries,
 		Providers: providers,
 		LongTerm:  proc.longTerm,
+		Sessions:  proc.sessions,
 	}), opts)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(listener) }()
