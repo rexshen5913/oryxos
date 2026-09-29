@@ -42,7 +42,7 @@ OryxOS 是一個**企業級 Agent 作業系統**。它的定位不是又一個 A
 | 二 | **ReAct 循環** | Agent 的大腦。ReAct loop 由 `ReActLoop` ＋ `ToolExecutor` 完全自實現、可控，不採用框架的自動執行 Agent 抽象。 |
 | 三 | **三層記憶（Memory）** | Session／長期記憶／情景記憶三層，統一門面對外；核心階段實作前兩層（SQLite ＋ `MEMORY.md`），情景記憶放擴展階段。 |
 | 四 | **工具體系（Tool）** | 內建 Tool（File／Shell／Http）＋ MCP Client ＋ Plugin 自定義工具，主推 `SKILL.md` 與 MCP 的零程式碼接入。 |
-| 五 | **Web Service** | 以 `net/http`（搭配 `chi`）對外暴露 HTTP API，供業務系統集成。 |
+| 五 | **Web Service** | 以標準庫 `net/http` 對外暴露 HTTP API，供業務系統集成。 |
 
 > 另有一個基礎模組 **Channel**（訊息接入渠道，負責「訊息進來、回應出去」）：核心階段只內建 **CLI**，Slack／Telegram／Discord 等 IM Channel 放擴展階段。
 
@@ -68,7 +68,7 @@ Agent 的執行核心是一個自實現的 ReAct loop，向下驅動三大服務
 | 部署 | **`CGO_ENABLED=0` 單一靜態二進制** | `go build` 直出，單檔部署、無需額外運行時 |
 | 併發 | **goroutine ＋ `context`** | 阻塞路徑一律走 `context`（取消、超時、追蹤） |
 | 儲存 | **`modernc.org/sqlite`（純 Go）** | 避免 cgo，守住單一靜態二進制（不用 `mattn/go-sqlite3`） |
-| Web | **`net/http` ＋ `chi`** | 標準庫優先，不引入重框架 |
+| Web | **`net/http`（標準庫 ServeMux）** | 標準庫優先；ServeMux 已支援「方法＋路徑萬用字元」，不引入路由框架 |
 | LLM | **`go-openai`** | 只做協議轉換與 tool schema 生成，調度由自實現的 loop 控制 |
 | CLI | **`cobra`** | `cmd/oryxos` 單一 main，Go ~10ms 啟動無負擔 |
 
@@ -86,7 +86,7 @@ oryxos/
 │   ├── provider/         # 能力一：ProviderService、OpenAI 兼容 adapter、provider 顯式註冊
 │   ├── memory/           # 能力三：MemoryService（統一門面）、LongTermMemory、MemoryTools
 │   ├── tool/             # 能力四：內建 Tool、MCP Client、ToolRegistry、SandboxChecker（三合一）
-│   ├── web/              # 能力五：HTTP server（net/http ＋ chi）、handler、OpenAPI
+│   ├── web/              # 能力五：HTTP server（net/http）、handler、錯誤形狀、CORS
 │   ├── channel/cli/      # CLI Channel 實現
 │   ├── storage/          # SQLite（modernc）儲存層：sessions、tool_invocations、llm_calls
 │   └── config/           # ConfigLoader 配置與密鑰加載
@@ -120,8 +120,14 @@ CGO_ENABLED=0 go build -o oryxos ./cmd/oryxos
 # 與 Agent 對話（單次 CLI 模式）
 ./oryxos chat
 
-# 啟動 HTTP 服務
-./oryxos server
+# 啟動 HTTP 服務，載入 profiles/ 底下全部 Profile（Ctrl+C 停止）
+# --addr 127.0.0.1:8080 只對本機開放；不帶時監聽所有網路介面的 8080 埠。
+# 核心階段沒有認證，風險與緩解見 SECURITY.md 的「Web Service」一節。
+./oryxos server --addr 127.0.0.1:8080
+
+# 另開一個終端機，確認服務狀態
+curl http://127.0.0.1:8080/api/v1/health
+curl http://127.0.0.1:8080/api/v1/info
 ```
 
 核心階段有兩種運行模式：**CLI（`chat`）** 與 **HTTP Server（`server`）**。CLI 共 11 個子命令：`init`、`status`、`chat`、`server`、`profile list/create/show/delete`、`provider list`、`tool list`、`session list`。

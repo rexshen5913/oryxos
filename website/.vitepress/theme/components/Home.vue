@@ -85,10 +85,10 @@ const capabilities = computed(() => [
   {
     no: 'V',
     title: t('Web Service', 'Web Service'),
-    meta: 'net/http · chi · OpenAPI',
+    meta: 'net/http · ServeMux · REST',
     desc: t(
-      '以標準庫 net/http 搭配 chi 對外暴露 HTTP API，供既有業務系統集成，不引入重框架。',
-      'HTTP APIs exposed through the standard library’s net/http with chi, ready for integration with existing systems — no heavyweight framework.',
+      '以標準庫 net/http 對外暴露 REST API（路由用 ServeMux，不引入路由框架），供既有業務系統集成。',
+      'REST APIs exposed through the standard library’s net/http — routed with ServeMux, no router framework — ready for integration with existing systems.',
     ),
   },
 ])
@@ -106,7 +106,7 @@ const stack = computed(() => [
   { k: t('語言', 'Language'), v: 'Go >= 1.24', why: t('基礎設施母語；快啟動、低記憶體、原生併發', 'The native tongue of infrastructure — fast startup, low memory, built-in concurrency') },
   { k: t('部署', 'Deployment'), v: 'CGO_ENABLED=0', why: t('go build 直出單一靜態二進制，無需額外運行時', 'go build emits one static binary — no extra runtime required') },
   { k: t('儲存', 'Storage'), v: 'modernc.org/sqlite', why: t('純 Go 驅動，避免 cgo，守住單一二進制', 'Pure Go driver — avoids cgo and preserves the single binary') },
-  { k: 'Web', v: 'net/http + chi', why: t('標準庫優先，不引入重框架', 'Standard library first — no heavyweight framework') },
+  { k: 'Web', v: 'net/http', why: t('標準庫優先；ServeMux 路由，不引入路由框架', 'Standard library first — ServeMux routing, no router framework') },
   { k: 'LLM', v: 'go-openai', why: t('只做協議轉換與 tool schema 生成', 'Protocol translation and tool schema generation only') },
   { k: 'CLI', v: 'cobra', why: t('cmd/oryxos 單一 main，約 10ms 啟動', 'A single main under cmd/oryxos, ~10ms startup') },
 ])
@@ -178,7 +178,7 @@ const roadmap = computed(() => [
         </div>
 
         <p class="ox-eco">
-          Go >= 1.24 · CGO_ENABLED=0 · modernc SQLite · net/http + chi · go-openai · MCP · cobra
+          Go >= 1.24 · CGO_ENABLED=0 · modernc SQLite · net/http · go-openai · MCP · cobra
         </p>
       </div>
     </section>

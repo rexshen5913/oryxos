@@ -552,7 +552,7 @@ OryxOS 核心功能的實施按 4 週節奏組織。
 實施內容：
 
 - Web Service 核心 10 個 REST 端點（會話管理 4 個、Agent 呼叫 1 個、Profile/Memory/Tool 列表 3 個、health/info 2 個）
-- 通過 `oryxos server` 啟動 net/http + chi 服務
+- 通過 `oryxos server` 啟動 net/http 服務（標準庫 ServeMux 路由）
 - 配置與密鑰加載（環境變數注入加基礎校驗）
 
 驗收：外部系統能通過 10 個 REST 端點呼叫 OryxOS（創建會話、發訊息、查 Profile、查 Memory、查 Tool、查健康狀態），API 呼叫鏈路完整。

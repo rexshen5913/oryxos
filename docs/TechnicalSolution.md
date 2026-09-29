@@ -27,7 +27,7 @@
 
 OryxOS 是一個 Go 1.24+ 的單一二進制服務，基於 go-openai 接 OpenAI 兼容協議做 LLM 呼叫，自己實現 ReAct loop 作為 Agent 核心。整個 OryxOS 編譯成單一靜態二進制（`CGO_ENABLED=0`），單二進制部署是 day-one 預設。
 
-技術棧選型一句話總結：Go 1.24+ + go-openai + 自實現 ReAct loop + net/http+chi + modernc SQLite + cobra 命令行。
+技術棧選型一句話總結：Go 1.24+ + go-openai + 自實現 ReAct loop + net/http（標準庫路由）+ modernc SQLite + cobra 命令行。
 
 ### 1.1 關鍵技術決策
 
@@ -39,7 +39,7 @@ OryxOS 是一個 Go 1.24+ 的單一二進制服務，基於 go-openai 接 OpenAI
 | 二 LLM 客戶端邊界 | go-openai 只做協議轉換和 tool schema，循環自己寫 | raw tool_calls 自己執行，循環完全可控 |
 | 三 執行模型 | 同步直觀加 goroutine，用 context.Context 統一取消/超時/追蹤 | 程式碼直觀又能扛並發 |
 | 四 Tool 註冊 | OryxTool 介面加顯式註冊（無反射掃描） | ReAct 不感知 Tool 來源 |
-| 五 HTTP 層 | net/http 加 chi，goroutine-per-request | 單機撐幾千並發 |
+| 五 HTTP 層 | net/http 標準庫路由，goroutine-per-request | 單機撐幾千並發 |
 | 六 Sandbox | Path/Pattern 白名單 | 應用層校驗，擴展階段容器隔離 |
 | 七 持久化 | SQLite（modernc 純 Go 驅動）加 MEMORY.md，審計表 day one 落庫 | 可審計地基從一開始立起來，守單二進制 |
 
@@ -58,7 +58,7 @@ ReAct 循環由 OryxOS 自己寫，不採用任何框架的自動執行機制。
 
 **決策四：Tool 註冊機制用 OryxTool 介面加顯式註冊。** 每個 Tool 實現 OryxTool 介面，啟動時顯式註冊到 ToolRegistry，不靠反射掃描自動裝配。OryxTool 抽象統一內建 Tool 和 MCP Tool 的介面形式，讓 ReAct loop 不感知 Tool 來源。顯式註冊比魔法掃描更可控，也對齊 Go「顯式優於魔法」的取向。
 
-**決策五：HTTP 服務層用 `net/http` 加 `chi` 路由。** 同步直觀的程式碼加 goroutine-per-request 的高並發能力（這本就是 `net/http` 的預設模型），單機輕鬆撐住幾千並發。擴展階段要 SSE 流式返回時，`net/http` 的 `http.Flusher` 也能支援。
+**決策五：HTTP 服務層用 `net/http`，路由用標準庫的 `ServeMux`。** Go 1.22 起 `ServeMux` 支援「方法＋路徑萬用字元」的路由規則，核心 10 個端點都表達得出來，所以不引入 `chi`（spec #7 定案；憲法 1.4 寫的是「可搭配 chi」，並非必須）。同步直觀的程式碼加 goroutine-per-request 的高並發能力（這本就是 `net/http` 的預設模型），單機輕鬆撐住幾千並發。擴展階段要 SSE 流式返回時，`net/http` 的 `http.Flusher` 也能支援。
 
 **決策六：Sandbox 策略用 Path 和 Pattern 白名單。** 檔案操作限制工作目錄、Shell 命令白名單、HTTP 域名白名單，在應用層做校驗。擴展階段引入子進程加 bwrap 或容器隔離做完整 sandbox——OryxOS 本就跑在雲原生環境裡，容器隔離對 Go 版是本命手段。
 
@@ -71,7 +71,7 @@ OryxOS 的完整技術棧：
 - Go 1.24+，`CGO_ENABLED=0` 靜態編譯（goroutine 加 `context.Context` 處理高並發）
 - go-openai 加自實現 Provider 抽象（接 OpenAI 兼容協議做 LLM 呼叫）
 - 自實現 ReAct loop（Agent 核心循環）
-- `net/http` 加 `chi`（HTTP API 服務層）
+- `net/http`（Web Service，標準庫 `ServeMux` 路由）
 - cobra（命令行工具，kubectl/docker/gh 同款）
 - `gopkg.in/yaml.v3`（Profile YAML 解析）
 - SQLite（`modernc.org/sqlite` 純 Go 驅動）加 `database/sql`（Session、審計和元資料持久化）
@@ -333,13 +333,13 @@ Web Service 是 OryxOS 的對外完整門面，業務系統通過 REST API 接�
 
 ### 7.1 模組組成
 
-WebServer 模組。啟動 `net/http` 加 `chi` 路由的 HTTP 伺服器，`oryxos server` 命令觸發，預設端口 8080，goroutine-per-request 本就是 `net/http` 的預設模型。
+WebServer 模組。啟動以標準庫 `ServeMux` 路由的 `net/http` 伺服器（不引入 `chi`，理由見 §1.1 決策五），`oryxos server` 命令觸發，預設端口 8080，goroutine-per-request 本就是 `net/http` 的預設模型。
 
 ApiHandler 集合。按資源分六組 handler：SessionApiHandler（會話管理）、AgentApiHandler（無狀態呼叫）、ProfileApiHandler（Profile 查詢）、MemoryApiHandler（Memory 查詢）、ToolApiHandler（Tool 資訊）、SystemApiHandler（系統狀態）。每組 handler 只做參數校驗、回應包裝、錯誤處理，實際邏輯委託給核心層的服務。
 
-錯誤處理中介層。統一處理各 handler 回傳的錯誤，把錯誤轉成標準 JSON 錯誤回應（errorCode、message、timestamp）。
+錯誤處理中介層。統一處理各 handler 回傳的錯誤，把錯誤轉成標準 JSON 錯誤回應（`error_code`、`message`、`timestamp`，欄位名與 messages_json 的落庫格式同為 snake_case）。
 
-OpenAPI 文檔模組。提供 OpenAPI 3.0 文檔，暴露在 `/swagger-ui`；核心階段可手寫 spec 或用程式碼生成，不綁定特定工具。
+OpenAPI 文檔模組（**擴展階段**）。提供 OpenAPI 3.0 文檔，暴露在 `/swagger-ui`。需求 §5.8 把 OpenAPI spec 列為擴展階段的端點，ADR-0004 的核心範圍以需求文檔第 5 章為準，所以核心階段不做（spec #7 定案）。
 
 ### 7.2 核心階段 10 個端點
 
@@ -520,7 +520,7 @@ oryxos/
     provider/            # ProviderService、OpenAI 兼容 adapter、provider name 顯式註冊
     memory/              # MemoryService 統一門面、LongTermMemory、MemoryTools
     tool/                # 內建 Tool（File/Shell/Http）、MCP Client、ToolRegistry、SandboxChecker
-    web/                 # HTTP server（net/http 加 chi）、六組 handler、錯誤處理、OpenAPI
+    web/                 # HTTP server（net/http 標準庫路由）、六組 handler、錯誤處理、CORS
     channel/cli/         # CLI Channel
     storage/             # SQLite（modernc）、sessions / tool_invocations / llm_calls 三張表
     config/              # ConfigLoader 配置與密鑰加載
@@ -535,7 +535,7 @@ oryxos/
 | `internal/provider` | 能力一 | ProviderService、OpenAI 兼容 adapter、provider name 顯式註冊 |
 | `internal/memory` | 能力三 | MemoryService（統一門面）、LongTermMemory、MemoryTools |
 | `internal/tool` | 能力四 | 內建 Tool（File/Shell/Http）、MCP Client、ToolRegistry、SandboxChecker（三合一） |
-| `internal/web` | 能力五 | HTTP server（net/http 加 chi）、六組 handler、錯誤處理、OpenAPI 文檔 |
+| `internal/web` | 能力五 | HTTP server（net/http 標準庫路由）、六組 handler、錯誤處理、CORS、請求日誌 |
 | `internal/channel/cli` | 支撐 | CLI Channel 實現 |
 | `internal/storage` | 支撐 | SQLite（modernc）儲存層，含 sessions、tool_invocations、llm_calls 三張表 |
 | `internal/config` | 支撐 | ConfigLoader 配置與密鑰加載 |
@@ -599,7 +599,7 @@ oryxos/
 
 ### 第三週（3 小時）：核心能力五 Web Service
 
-- WebServer（`net/http` 加 `chi`）、六組 handler 的核心 10 個端點
+- WebServer（`net/http` 標準庫路由）、六組 handler 的核心 10 個端點
 - 錯誤處理中介層、ConfigLoader（配置與密鑰加載）
 
 可演示：外部系統通過 10 個 REST 端點完整呼叫 OryxOS。

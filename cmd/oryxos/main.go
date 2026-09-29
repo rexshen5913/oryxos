@@ -24,6 +24,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newInitCmd())
 	cmd.AddCommand(newChatCmd())
 	cmd.AddCommand(newToolsCmd())
+	cmd.AddCommand(newServerCmd())
 	return cmd
 }
 
